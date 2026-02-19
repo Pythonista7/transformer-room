@@ -5,6 +5,30 @@ from torch.utils.data import Dataset
 
 from model import BaselineModel
 from tokenizer import BPETokenizer
+from typing import TypedDict
+
+# ===
+
+class Config(TypedDict):
+    vocab_size: int
+    d_model: int
+    n_heads: int
+    layers: int
+    learning_rate: float
+    epochs: int
+
+config: Config = {
+    "vocab_size": 10_000,
+    "d_model": 128,
+    "n_heads": 6,
+    "layers": 2,
+    "learning_rate": 1e-3,
+    "epochs": 10,
+    "training_seq_len": 128,
+    "batch_size": 256
+}
+
+#===
 
 corpus = None
 with open("../datasets/tiny_shakespeare.txt") as f:
@@ -15,12 +39,13 @@ if corpus is None:
 
 tokenizer = BPETokenizer(
     corpus=corpus, 
-    max_vocab_count=10_000,
+    max_vocab_count=config["vocab_size"],
     path="tiny_shakespeare_bpe_vocab.txt"
 )
 
 VOCAB = tokenizer.vocab
 VOCAB_SIZE = len(VOCAB)
+assert VOCAB_SIZE == config["vocab_size"], f"Tokenizer vocab size {VOCAB_SIZE} does not match config vocab size {config['vocab_size']}"
 
 print(f"Vocabulary size: {VOCAB_SIZE}")
 
@@ -44,15 +69,15 @@ class CustomShakespeareDataset(Dataset):
         target_seq = self.tokens[idx+1:idx+self.seq_len+1]
         return torch.tensor(input_seq, dtype=torch.long), torch.tensor(target_seq, dtype=torch.long)
 
-dataset = CustomShakespeareDataset(tokens, seq_len=128)
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
+dataset = CustomShakespeareDataset(tokens, seq_len=config["training_seq_len"])
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True)
 
 
 model = BaselineModel(
     vocab_size=VOCAB_SIZE,
-    d_model=128,
-    n_heads=6,
-    layers=2
+    d_model=config["d_model"],
+    n_heads=config["n_heads"],
+    layers=config["layers"]
 )
 
 # log model parameter count
