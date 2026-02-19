@@ -8,16 +8,7 @@ and improve it along the way.
 import torch
 from torch import nn
 import torch.nn.functional as F
-
-
-device = torch.device(
-    "cuda"
-    if torch.cuda.is_available()
-    else "mps" if torch.backends.mps.is_available() else "cpu"
-)
-
-# Set it as default device, if an accelerator is being used, we should be mindful and use `.to("cpu")` for certain CPU bound tasks.
-torch.set_default_device(device)
+import math
 
 # set random seed for reproducibility
 torch.manual_seed(42)
@@ -159,9 +150,9 @@ class BasicMultiHeadSelfAttention(nn.Module):
         self.E_out = E_out
         self.n_heads = n_heads
 
-        assert self.E_q % self.n_heads == 0
+        assert self.E_q % self.n_heads == 0 , f"Embedding dimension {self.E_q} must be divisible by number of heads {self.n_heads}"
 
-        self.head_dim = torch.tensor(self.E_q // self.n_heads, dtype=torch.float32, device=device)
+        self.head_dim = self.E_q // self.n_heads
 
         # self.same_qkv = False if implementing cross attn use a flag like this and branch to implement cross-attn.
         # in self-attn all are equal then we can use one large linear layer instead of 3 projections and then split em up.
@@ -207,7 +198,7 @@ class BasicMultiHeadSelfAttention(nn.Module):
         ).transpose(1, 2)
 
         if scale is None:
-            scale = torch.sqrt(self.head_dim)
+            scale = math.sqrt(self.head_dim)
 
         scores = (Q_headed @ K_headed.transpose(-2, -1)) / scale
 

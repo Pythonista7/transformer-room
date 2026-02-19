@@ -16,11 +16,13 @@ class Config(TypedDict):
     layers: int
     learning_rate: float
     epochs: int
+    training_seq_len: int
+    batch_size: int
 
 config: Config = {
     "vocab_size": 10_000,
     "d_model": 128,
-    "n_heads": 6,
+    "n_heads": 8,
     "layers": 2,
     "learning_rate": 1e-3,
     "epochs": 10,
@@ -49,13 +51,14 @@ assert VOCAB_SIZE == config["vocab_size"], f"Tokenizer vocab size {VOCAB_SIZE} d
 
 print(f"Vocabulary size: {VOCAB_SIZE}")
 
-tokens = tokenizer.encode(corpus)
+token_to_id = {token: idx for idx, token in enumerate(VOCAB)}
+tokens = [token_to_id[token] for token in tokenizer.encode(corpus)]
 print(f"Encoded {len(tokens):,} tokens")
 
 
 class CustomShakespeareDataset(Dataset):
     """
-    IMPORTANT: REMEBER TO USE JAGGED/NESTED TENSORS ARE KEY PADDING IS NOT IMPLEMENTED IN THE ATTENTION LAYER!
+    IMPORTANT: REMEBER TO USE JAGGED/NESTED TENSORS AS KEY PADDING IS NOT IMPLEMENTED IN THE ATTENTION LAYER!
     """
     def __init__(self, tokens, seq_len):
         self.tokens = tokens
@@ -72,7 +75,14 @@ class CustomShakespeareDataset(Dataset):
 dataset = CustomShakespeareDataset(tokens, seq_len=config["training_seq_len"])
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True)
 
+# print a sample shape from the dataloader
+for batch in dataloader:
+    input_batch, target_batch = batch
+    print(f"Input batch shape: {input_batch.shape}")
+    print(f"Target batch shape: {target_batch.shape}")
+    break
 
+# Note that the embedding class should create nested tensors in the d_model dim
 model = BaselineModel(
     vocab_size=VOCAB_SIZE,
     d_model=config["d_model"],
