@@ -413,7 +413,7 @@ if __name__ == "__main__":
         "learning_rate": 5e-3,
         "epochs": 3,
         "training_seq_len": 128,
-        "training_stride": 1,
+        "training_stride": 128,
         "data_fraction": 1,
         "batch_size": 256,
         "checkpoint_every_n_steps": 250,

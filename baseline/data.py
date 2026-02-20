@@ -189,12 +189,12 @@ def get_data(
         train_set,
         batch_size=config["batch_size"],
         shuffle=True,
-        # pin_memory=pin_memory,
+        pin_memory=pin_memory,
     )
     val_dataloader = torch.utils.data.DataLoader(
         val_set,
         batch_size=config["batch_size"],
         shuffle=False,
-        # pin_memory=pin_memory,
+        pin_memory=pin_memory,
     )
     return dataloader, val_dataloader
