@@ -1,0 +1,8 @@
+{
+  "vocab_size": 10000,
+  "d_model": 128,
+  "n_heads": 8,
+  "layers": 2,
+  "training_seq_len": 128,
+  "tokenizer_vocab_path": "tiny_shakespeare_bpe_vocab.txt"
+}

@@ -109,7 +109,7 @@ class EmbeddingLayer(nn.Module):
             torch.empty(size=(self.key_size, self.embedding_size))
         )
         
-        nn.init.normal_(self.embedding_table)
+        nn.init.normal_(self.embedding_table,std=1/math.sqrt(self.embedding_size))
         
         # We zero out padding index cause we dont want grads updating padding representation.
         if self.padding_idx is not None:
