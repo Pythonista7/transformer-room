@@ -5,8 +5,8 @@ class PositionalEncoder(nn.Module):
   def __init__(self, d_model , **kwargs) -> None:
     super().__init__( **kwargs)
     self.d_model = d_model
-    # Growable cache. Starts empty and expands when a longer sequence is encountered.
-    self.register_buffer('pos_enc_cache', torch.empty((0, d_model)))
+    # Growable runtime cache. Keep it out of checkpoints to avoid shape mismatch on restore.
+    self.register_buffer('pos_enc_cache', torch.empty((0, d_model)), persistent=False)
 
 
   def get_positional_encoding(self,T,device='cpu',dtype=torch.float32):
@@ -51,6 +51,28 @@ class PositionalEncoder(nn.Module):
       extra[:,1::2] = torch.cos(angles)
 
       self.pos_enc_cache = torch.cat((self.pos_enc_cache, extra), dim=0)
+
+  def _load_from_state_dict(
+    self,
+    state_dict,
+    prefix,
+    local_metadata,
+    strict,
+    missing_keys,
+    unexpected_keys,
+    error_msgs,
+  ):
+    # Backward compatibility: drop cache entries serialized by older checkpoints.
+    state_dict.pop(f"{prefix}pos_enc_cache", None)
+    super()._load_from_state_dict(
+      state_dict,
+      prefix,
+      local_metadata,
+      strict,
+      missing_keys,
+      unexpected_keys,
+      error_msgs,
+    )
 
   def forward(self,X):
     input_seq_len = X.shape[1]

@@ -24,31 +24,13 @@ class Config(TypedDict):
     checkpoint_every_n_steps: int
     checkpoint_path: str
     final_model_path: str
+    dataset_path: str
+    tokenizer_vocab_path: str
     resume_from_checkpoint: bool
     use_torch_compile: NotRequired[bool]
     torch_compile_mode: NotRequired[str]
     torch_compile_fullgraph: NotRequired[bool]
     torch_compile_dynamic: NotRequired[bool]
-
-
-config: Config = {
-    "vocab_size": 10_000,
-    "d_model": 128,
-    "n_heads": 8,
-    "layers": 2,
-    "learning_rate": 1e-3,
-    "epochs": 3,
-    "training_seq_len": 128,
-    "batch_size": 256,
-    "checkpoint_every_n_steps": 250,
-    "checkpoint_path": "baseline_checkpoint.pt",
-    "final_model_path": "baseline_model.pt",
-    "resume_from_checkpoint": True,
-    "use_torch_compile": True,
-    "torch_compile_mode": "default",
-    "torch_compile_fullgraph": False,
-    "torch_compile_dynamic": False,
-}
 
 # ===
 
@@ -116,19 +98,10 @@ def maybe_compile_model(
         return model, False, f"failed: {exc}"
 
 
-def make(
-    config: Config,
-    pin_memory: bool = False,
-) -> tuple[
-    torch.utils.data.DataLoader,
-    torch.utils.data.DataLoader,
-    BaselineModel,
-    optim.Optimizer,
-    CrossEntropyLoss,
-]:
+def get_data(config: Config, pin_memory: bool = False) -> tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     # Load up the data and tokenize it
     corpus = None
-    with open("../datasets/tiny_shakespeare.txt") as f:
+    with open(config["dataset_path"]) as f:
         corpus = f.read()
 
     if corpus is None:
@@ -137,7 +110,7 @@ def make(
     tokenizer = BPETokenizer(
         corpus=corpus,
         max_vocab_count=config["vocab_size"],
-        path="tiny_shakespeare_bpe_vocab.txt",
+        path=config["tokenizer_vocab_path"],
     )
 
     # Create a vocab and encode the corpus
@@ -151,11 +124,12 @@ def make(
 
     # Create a mapping from token to ID and encode the corpus
     token_to_id = {token: idx for idx, token in enumerate(VOCAB)}
+
     tokens = [token_to_id[token] for token in tokenizer.encode(corpus)]
     print(f"Encoded {len(tokens):,} tokens")
 
     # Create the dataset and dataloader
-    dataset = CustomShakespeareDataset(tokens, seq_len=config["training_seq_len"])
+    dataset = CustomShakespeareDataset(tokens[:int(len(tokens)*0.1)], seq_len=config["training_seq_len"])
 
     train_set = torch.utils.data.Subset(dataset, range(0, int(0.9 * len(dataset))))
     val_set = torch.utils.data.Subset(
@@ -165,7 +139,7 @@ def make(
     dataloader = torch.utils.data.DataLoader(
         train_set,
         batch_size=config["batch_size"],
-        shuffle=True,
+        shuffle=False,
         pin_memory=pin_memory,
     )
     val_dataloader = torch.utils.data.DataLoader(
@@ -174,11 +148,23 @@ def make(
         shuffle=False,
         pin_memory=pin_memory,
     )
+    return dataloader, val_dataloader
 
+def make(
+    config: Config,
+    pin_memory: bool = False,
+) -> tuple[
+    torch.utils.data.DataLoader,
+    torch.utils.data.DataLoader,
+    BaselineModel,
+    optim.Optimizer,
+    CrossEntropyLoss,
+]:
+    dataloader, val_dataloader = get_data(config, pin_memory)
     # Create the model
     # Note that the embedding class should create nested tensors in the d_model dim
     model = BaselineModel(
-        vocab_size=VOCAB_SIZE,
+        vocab_size=config["vocab_size"],
         d_model=config["d_model"],
         n_heads=config["n_heads"],
         layers=config["layers"],
@@ -187,7 +173,19 @@ def make(
     # log model parameter count
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {param_count:,}")
-
+    print(f"Model param names: {[name for name, _ in model.named_parameters()]}")
+    # save image of model architecture
+    try:
+        from torchviz import make_dot
+        sample_input, _ = next(iter(dataloader))
+        sample_input = sample_input.to(get_best_device())
+        model_viz = make_dot(model(sample_input), params=dict(model.named_parameters()))
+        model_viz.format = "png"
+        model_viz.render("baseline_model_architecture")
+        print("Saved model architecture visualization to baseline_model_architecture.png")
+    except ImportError:
+        print("torchviz not installed, skipping model architecture visualization.")
+    
     # Create the optimizer and loss function
     optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
     loss_fn = CrossEntropyLoss()
@@ -267,7 +265,10 @@ def train(
             return 0, 0, 0
 
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        checkpoint_model.load_state_dict(checkpoint["model_state_dict"])
+        model_state_dict = dict(checkpoint["model_state_dict"])
+        # Backward compatibility: old checkpoints may serialize the positional cache buffer.
+        model_state_dict.pop("pos_encoding.pos_enc_cache", None)
+        checkpoint_model.load_state_dict(model_state_dict)
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         move_optimizer_state_to_device(optimizer, device)
 
@@ -397,6 +398,27 @@ def model_pipeline(config: Config, project_name: str):
     return model
 
 if __name__ == "__main__":
+    
+    config: Config = {
+        "vocab_size": 10_000,
+        "d_model": 128,
+        "n_heads": 8,
+        "layers": 2,
+        "learning_rate": 1e-3,
+        "epochs": 50,
+        "training_seq_len": 128,
+        "batch_size": 256,
+        "checkpoint_every_n_steps": 250,
+        "checkpoint_path": "baseline_checkpoint.pt",
+        "final_model_path": "baseline_model.pt",
+        "dataset_path": "../datasets/tiny_shakespeare.txt",
+        "tokenizer_vocab_path": "tiny_shakespeare_bpe_vocab.txt",
+        "resume_from_checkpoint": True,
+        "use_torch_compile": True,
+        "torch_compile_mode": "default",
+        "torch_compile_fullgraph": False,
+        "torch_compile_dynamic": False,
+    }
     model_pipeline(
         config,
         project_name="transformer-room-baseline",
