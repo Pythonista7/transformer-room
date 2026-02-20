@@ -24,7 +24,7 @@ PAD_TOKEN = "<PAD>"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Simple terminal chat REPL for a BaselineModel .pt checkpoint/state_dict."
+        description="Simple terminal REPL for BaselineModel .pt checkpoint/state_dict inference."
     )
     parser.add_argument(
         "--model-path",
@@ -75,9 +75,18 @@ def parse_args() -> argparse.Namespace:
         help="Disable multi-turn history and prompt each turn independently.",
     )
     parser.add_argument(
+        "--prompt-format",
+        choices=("plain", "chat"),
+        default="plain",
+        help=(
+            "Prompt template style. 'plain' uses raw text completion "
+            "(best for base LMs). 'chat' uses User/Assistant markers."
+        ),
+    )
+    parser.add_argument(
         "--system-prompt",
-        default="You are a helpful assistant.",
-        help="Initial instruction for chat formatting.",
+        default="",
+        help="Optional instruction prefix added before the first turn.",
     )
     return parser.parse_args()
 
@@ -402,11 +411,16 @@ def run_repl(
 
     print(f"Loaded model on {device}")
     print(f"Context window: {context_window}")
+    print(f"Prompt format: {args.prompt_format}")
     print(f"Type a prompt and press enter. Type /quit to exit.\n")
 
     history = ""
-    if args.system_prompt:
-        history = f"System: {args.system_prompt.strip()}\n"
+    if args.system_prompt.strip():
+        system_prompt = args.system_prompt.strip()
+        if args.prompt_format == "chat":
+            history = f"System: {system_prompt}\n"
+        else:
+            history = f"{system_prompt}\n"
 
     while True:
         try:
@@ -423,10 +437,16 @@ def run_repl(
         if user_text.lower() in QUIT_COMMANDS:
             break
 
-        if args.no_history:
-            prompt = f"User: {user_text}\nAssistant:"
+        if args.prompt_format == "chat":
+            if args.no_history:
+                prompt = f"User: {user_text}\nAssistant:"
+            else:
+                prompt = f"{history}User: {user_text}\nAssistant:"
         else:
-            prompt = f"{history}User: {user_text}\nAssistant:"
+            if args.no_history:
+                prompt = user_text
+            else:
+                prompt = f"{history}{user_text}\n"
 
         try:
             raw_reply = generate(
@@ -447,9 +467,12 @@ def run_repl(
             print(f"bot> [generation error] {exc}")
             continue
 
-        # Stop if model starts writing the next user turn marker.
-        stop = raw_reply.find("\nUser:")
-        assistant_raw = raw_reply if stop == -1 else raw_reply[:stop]
+        if args.prompt_format == "chat":
+            # Stop if model starts writing the next user turn marker.
+            stop = raw_reply.find("\nUser:")
+            assistant_raw = raw_reply if stop == -1 else raw_reply[:stop]
+        else:
+            assistant_raw = raw_reply
         assistant_text = assistant_raw.strip() or "(empty reply)"
         print(f"bot> {assistant_text}\n")
 
