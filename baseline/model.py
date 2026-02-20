@@ -7,10 +7,13 @@ from positional_encoder import PositionalEncoder
 
 
 class BaselineModel(nn.Module):
-    def __init__(self, vocab_size, layers, d_model, n_heads, **kwargs):
+    def __init__(self, vocab_size, layers, d_model, n_heads, pad_id=None, **kwargs):
         super().__init__(**kwargs)
         
-        self.embedding_layer = EmbeddingLayer(key_size=vocab_size, embedding_size=d_model)
+        self.pad_id = pad_id
+        self.embedding_layer = EmbeddingLayer(
+            key_size=vocab_size, embedding_size=d_model, pad_idx=pad_id
+        )
         self.pos_encoding = PositionalEncoder(d_model=d_model) 
         
         self.layer_count = layers
@@ -24,7 +27,7 @@ class BaselineModel(nn.Module):
         )
         self.output_proj = LinearLayer(d_model, vocab_size) # Projecting back to vocab size for prediction.
 
-    def forward(self, inputs):
+    def forward(self, inputs, key_padding_mask=None):
         # inputs of shape [batch, tokens]
         # Convert tokens into embeddings [batch,tokens,d_embed]
         embeddings = self.embedding_layer(inputs)
@@ -34,7 +37,7 @@ class BaselineModel(nn.Module):
         
         # Decoder Stack
         for layer in self.dec_layers:
-            x = layer(x)
+            x = layer(x, key_padding_mask=key_padding_mask)
         
         # Final output of shape [batch,tokens,d_model]
         # Now project back the d_model output to the vocab size for prediction. This can be done with a linear layer.

@@ -18,6 +18,8 @@ from tokenizer import BPETokenizer  # noqa: E402
 
 QUIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 MODEL_CONFIG_KEYS = ("vocab_size", "d_model", "n_heads", "layers")
+EOS_TOKEN = "<EOS>"
+PAD_TOKEN = "<PAD>"
 
 
 def parse_args() -> argparse.Namespace:
@@ -194,6 +196,26 @@ def safe_int(value: Any, key: str) -> int:
         raise ValueError(f"Config key '{key}' must be int-like, got {value!r}") from exc
 
 
+def resolve_vocab_and_special_ids(
+    config: dict[str, Any],
+) -> tuple[int, int, int, int | None, int | None]:
+    vocab_size = safe_int(config["vocab_size"], "vocab_size")
+    base_vocab_size = safe_int(config.get("base_vocab_size", vocab_size), "base_vocab_size")
+    num_special_tokens = safe_int(config.get("num_special_tokens", 0), "num_special_tokens")
+
+    if num_special_tokens < 0:
+        raise ValueError(f"num_special_tokens must be >= 0, got {num_special_tokens}")
+    if vocab_size != base_vocab_size + num_special_tokens:
+        raise ValueError(
+            f"Expected vocab_size == base_vocab_size + num_special_tokens, got "
+            f"{vocab_size} != {base_vocab_size} + {num_special_tokens}"
+        )
+
+    eos_id = base_vocab_size if num_special_tokens >= 1 else None
+    pad_id = base_vocab_size + 1 if num_special_tokens >= 2 else None
+    return vocab_size, base_vocab_size, num_special_tokens, eos_id, pad_id
+
+
 def encode_text(text: str, tokenizer: BPETokenizer, token_to_id: dict[Any, int]) -> list[int]:
     tokenized = tokenizer.encode(text)
     ids: list[int] = []
@@ -204,12 +226,37 @@ def encode_text(text: str, tokenizer: BPETokenizer, token_to_id: dict[Any, int])
     return ids
 
 
-def decode_ids(ids: list[int], id_to_token: list[Any], tokenizer: BPETokenizer) -> str:
-    tokens = [id_to_token[idx] for idx in ids]
-    return tokenizer.decode(tokens)
+def decode_ids(
+    ids: list[int],
+    id_to_token: list[Any],
+    tokenizer: BPETokenizer,
+    eos_id: int | None = None,
+    pad_id: int | None = None,
+) -> str:
+    tokens: list[Any] = []
+    for idx in ids:
+        if eos_id is not None and idx == eos_id:
+            continue
+        if pad_id is not None and idx == pad_id:
+            continue
+        token = id_to_token[idx]
+        if isinstance(token, (int, tuple)):
+            tokens.append(token)
+    return tokenizer.decode(tokens) if tokens else ""
 
 
-def sample_next_id(logits: torch.Tensor, temperature: float, top_k: int) -> int:
+def sample_next_id(
+    logits: torch.Tensor,
+    temperature: float,
+    top_k: int,
+    blocked_ids: list[int] | None = None,
+) -> int:
+    if blocked_ids:
+        logits = logits.clone()
+        for blocked_id in blocked_ids:
+            if 0 <= blocked_id < logits.numel():
+                logits[blocked_id] = float("-inf")
+
     if temperature <= 0:
         return int(torch.argmax(logits).item())
 
@@ -236,6 +283,8 @@ def generate(
     top_k: int,
     context_window: int,
     device: torch.device,
+    eos_id: int | None = None,
+    pad_id: int | None = None,
 ) -> str:
     prompt_ids = encode_text(prompt_text, tokenizer, token_to_id)
     if not prompt_ids:
@@ -246,11 +295,25 @@ def generate(
         context_ids = token_ids[-context_window:] if context_window > 0 else token_ids
         input_tensor = torch.tensor([context_ids], dtype=torch.long, device=device)
         logits = model(input_tensor)
-        next_id = sample_next_id(logits[0, -1, :], temperature=temperature, top_k=top_k)
+        blocked_ids = [pad_id] if pad_id is not None else None
+        next_id = sample_next_id(
+            logits[0, -1, :],
+            temperature=temperature,
+            top_k=top_k,
+            blocked_ids=blocked_ids,
+        )
+        if eos_id is not None and next_id == eos_id:
+            break
         token_ids.append(next_id)
 
     generated_ids = token_ids[len(prompt_ids) :]
-    return decode_ids(generated_ids, id_to_token, tokenizer)
+    return decode_ids(
+        generated_ids,
+        id_to_token,
+        tokenizer,
+        eos_id=eos_id,
+        pad_id=pad_id,
+    )
 
 
 def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[
@@ -260,6 +323,8 @@ def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[
     list[Any],
     dict[str, Any],
     torch.device,
+    int | None,
+    int | None,
 ]:
     model_path = resolve_existing_path(args.model_path, model_path=PROJECT_ROOT / args.model_path)
     device = choose_device(args.device)
@@ -278,12 +343,15 @@ def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[
     validate_model_config(config)
 
     tokenizer_vocab_path = resolve_existing_path(config["tokenizer_vocab_path"], model_path=model_path)
-    vocab_size = safe_int(config["vocab_size"], "vocab_size")
+    vocab_size, base_vocab_size, num_special_tokens, eos_id, pad_id = resolve_vocab_and_special_ids(
+        config
+    )
     model = BaselineModel(
         vocab_size=vocab_size,
         d_model=safe_int(config["d_model"], "d_model"),
         n_heads=safe_int(config["n_heads"], "n_heads"),
         layers=safe_int(config["layers"], "layers"),
+        pad_id=pad_id,
     )
 
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
@@ -297,10 +365,22 @@ def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[
     model.to(device)
     model.eval()
 
-    tokenizer = BPETokenizer(max_vocab_count=vocab_size, path=str(tokenizer_vocab_path))
+    tokenizer = BPETokenizer(max_vocab_count=base_vocab_size, path=str(tokenizer_vocab_path))
     id_to_token = list(tokenizer.vocab)
+    if num_special_tokens >= 1:
+        id_to_token.append(EOS_TOKEN)
+    if num_special_tokens >= 2:
+        id_to_token.append(PAD_TOKEN)
+    for idx in range(2, num_special_tokens):
+        id_to_token.append(f"<SPECIAL_{idx}>")
+
+    if len(id_to_token) != vocab_size:
+        raise RuntimeError(
+            f"Runtime vocab assembly mismatch: got {len(id_to_token)} tokens, expected {vocab_size}"
+        )
+
     token_to_id = {token: idx for idx, token in enumerate(id_to_token)}
-    return model, tokenizer, token_to_id, id_to_token, config, device
+    return model, tokenizer, token_to_id, id_to_token, config, device, eos_id, pad_id
 
 
 def run_repl(
@@ -311,6 +391,8 @@ def run_repl(
     config: dict[str, Any],
     device: torch.device,
     args: argparse.Namespace,
+    eos_id: int | None,
+    pad_id: int | None,
 ) -> None:
     context_window = args.context_window
     if context_window is None:
@@ -358,6 +440,8 @@ def run_repl(
                 top_k=args.top_k,
                 context_window=context_window,
                 device=device,
+                eos_id=eos_id,
+                pad_id=pad_id,
             )
         except Exception as exc:
             print(f"bot> [generation error] {exc}")
@@ -375,7 +459,7 @@ def run_repl(
 
 def main() -> int:
     args = parse_args()
-    model, tokenizer, token_to_id, id_to_token, config, device = load_model_and_tokenizer(args)
+    model, tokenizer, token_to_id, id_to_token, config, device, eos_id, pad_id = load_model_and_tokenizer(args)
     run_repl(
         model=model,
         tokenizer=tokenizer,
@@ -384,6 +468,8 @@ def main() -> int:
         config=config,
         device=device,
         args=args,
+        eos_id=eos_id,
+        pad_id=pad_id,
     )
     return 0
 

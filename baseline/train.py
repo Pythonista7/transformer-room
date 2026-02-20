@@ -1,59 +1,16 @@
 import torch
 from torch import optim
 from torch.nn import CrossEntropyLoss
-from torch.utils.data import Dataset
 from tqdm import tqdm
 import wandb
 import os
+import shutil
+from datetime import datetime
 
 from model import BaselineModel
-from tokenizer import BPETokenizer
+from data import get_data, resolve_special_token_ids
 from typing import NotRequired, TypedDict
-
-# ===
-
-class Config(TypedDict):
-    vocab_size: int
-    d_model: int
-    n_heads: int
-    layers: int
-    learning_rate: float
-    epochs: int
-    training_seq_len: int
-    batch_size: int
-    checkpoint_every_n_steps: int
-    checkpoint_path: str
-    final_model_path: str
-    dataset_path: str
-    tokenizer_vocab_path: str
-    resume_from_checkpoint: bool
-    use_torch_compile: NotRequired[bool]
-    torch_compile_mode: NotRequired[str]
-    torch_compile_fullgraph: NotRequired[bool]
-    torch_compile_dynamic: NotRequired[bool]
-
-# ===
-
-
-class CustomShakespeareDataset(Dataset):
-    """
-    IMPORTANT: REMEBER TO USE JAGGED/NESTED TENSORS AS KEY PADDING IS NOT IMPLEMENTED IN THE ATTENTION LAYER!
-    """
-
-    def __init__(self, tokens, seq_len):
-        self.tokens = tokens
-        self.seq_len = seq_len
-
-    def __len__(self):
-        return len(self.tokens) - self.seq_len
-
-    def __getitem__(self, idx):
-        input_seq = self.tokens[idx : idx + self.seq_len]
-        target_seq = self.tokens[idx + 1 : idx + self.seq_len + 1]
-        return torch.tensor(input_seq, dtype=torch.long), torch.tensor(
-            target_seq, dtype=torch.long
-        )
-
+from config import Config
 
 def get_best_device() -> torch.device:
     if torch.cuda.is_available():
@@ -98,57 +55,85 @@ def maybe_compile_model(
         return model, False, f"failed: {exc}"
 
 
-def get_data(config: Config, pin_memory: bool = False) -> tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
-    # Load up the data and tokenize it
-    corpus = None
-    with open(config["dataset_path"]) as f:
-        corpus = f.read()
+def find_latest_artifact_dir_with_checkpoint(
+    models_root: str, checkpoint_filename: str
+) -> str | None:
+    latest_dir = None
+    latest_mtime = float("-inf")
 
-    if corpus is None:
-        raise Exception("Invalid dataset read!")
+    for entry in os.scandir(models_root):
+        if not entry.is_dir():
+            continue
+        checkpoint_path = os.path.join(entry.path, checkpoint_filename)
+        if not os.path.exists(checkpoint_path):
+            continue
 
-    tokenizer = BPETokenizer(
-        corpus=corpus,
-        max_vocab_count=config["vocab_size"],
-        path=config["tokenizer_vocab_path"],
+        checkpoint_mtime = os.path.getmtime(checkpoint_path)
+        if checkpoint_mtime > latest_mtime:
+            latest_mtime = checkpoint_mtime
+            latest_dir = entry.path
+
+    return latest_dir
+
+
+def prepare_run_artifact_paths(config: Config) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    configured_models_root = config.get("models_root_dir")
+    if configured_models_root:
+        models_root = (
+            configured_models_root
+            if os.path.isabs(configured_models_root)
+            else os.path.join(script_dir, configured_models_root)
+        )
+    else:
+        models_root = os.path.join(script_dir, "models")
+    os.makedirs(models_root, exist_ok=True)
+
+    original_checkpoint_path = config["checkpoint_path"]
+    original_checkpoint_path = (
+        original_checkpoint_path
+        if os.path.isabs(original_checkpoint_path)
+        else os.path.join(script_dir, original_checkpoint_path)
     )
 
-    # Create a vocab and encode the corpus
-    VOCAB = tokenizer.vocab
-    VOCAB_SIZE = len(VOCAB)
-    assert (
-        VOCAB_SIZE == config["vocab_size"]
-    ), f"Tokenizer vocab size {VOCAB_SIZE} does not match config vocab size {config['vocab_size']}"
+    checkpoint_filename = os.path.basename(config["checkpoint_path"])
+    final_model_filename = os.path.basename(config["final_model_path"])
 
-    print(f"Vocabulary size: {VOCAB_SIZE}")
+    run_dir = None
+    if config.get("run_name"):
+        run_dir = os.path.join(models_root, config["run_name"])
+        os.makedirs(run_dir, exist_ok=True)
+    elif config["resume_from_checkpoint"]:
+        run_dir = find_latest_artifact_dir_with_checkpoint(
+            models_root=models_root,
+            checkpoint_filename=checkpoint_filename,
+        )
+        if run_dir:
+            print(f"Resuming artifacts from: {run_dir}")
 
-    # Create a mapping from token to ID and encode the corpus
-    token_to_id = {token: idx for idx, token in enumerate(VOCAB)}
+    if run_dir is None:
+        run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+        run_dir = os.path.join(models_root, run_name)
+        os.makedirs(run_dir, exist_ok=True)
 
-    tokens = [token_to_id[token] for token in tokenizer.encode(corpus)]
-    print(f"Encoded {len(tokens):,} tokens")
+    config["run_artifact_dir"] = run_dir
+    config["checkpoint_path"] = os.path.join(run_dir, checkpoint_filename)
+    config["final_model_path"] = os.path.join(run_dir, final_model_filename)
+    config["model_diagram_path"] = os.path.join(run_dir, "baseline_model_architecture")
+    if (
+        config["resume_from_checkpoint"]
+        and os.path.exists(original_checkpoint_path)
+        and original_checkpoint_path != config["checkpoint_path"]
+        and not os.path.exists(config["checkpoint_path"])
+    ):
+        shutil.copy2(original_checkpoint_path, config["checkpoint_path"])
+        print(
+            f"Copied checkpoint for resume: {original_checkpoint_path} -> {config['checkpoint_path']}"
+        )
+    print(f"Run artifacts will be saved to: {run_dir}")
 
-    # Create the dataset and dataloader
-    dataset = CustomShakespeareDataset(tokens[:int(len(tokens)*0.1)], seq_len=config["training_seq_len"])
+# ==================================================================
 
-    train_set = torch.utils.data.Subset(dataset, range(0, int(0.9 * len(dataset))))
-    val_set = torch.utils.data.Subset(
-        dataset, range(int(0.9 * len(dataset)), len(dataset))
-    )
-
-    dataloader = torch.utils.data.DataLoader(
-        train_set,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        # pin_memory=pin_memory,
-    )
-    val_dataloader = torch.utils.data.DataLoader(
-        val_set,
-        batch_size=config["batch_size"],
-        shuffle=False,
-        # pin_memory=pin_memory,
-    )
-    return dataloader, val_dataloader
 
 def make(
     config: Config,
@@ -160,14 +145,15 @@ def make(
     optim.Optimizer,
     CrossEntropyLoss,
 ]:
+    _, _, _, _, pad_id = resolve_special_token_ids(config)
     dataloader, val_dataloader = get_data(config, pin_memory)
     # Create the model
-    # Note that the embedding class should create nested tensors in the d_model dim
     model = BaselineModel(
         vocab_size=config["vocab_size"],
         d_model=config["d_model"],
         n_heads=config["n_heads"],
         layers=config["layers"],
+        pad_id=pad_id,
     )
 
     # log model parameter count
@@ -177,18 +163,27 @@ def make(
     # save image of model architecture
     try:
         from torchviz import make_dot
-        sample_input, _ = next(iter(dataloader))
+        sample_input, _, sample_key_padding_mask = next(iter(dataloader))
         sample_input = sample_input.to(get_best_device())
-        model_viz = make_dot(model(sample_input), params=dict(model.named_parameters()))
+        sample_key_padding_mask = sample_key_padding_mask.to(get_best_device())
+        model_viz = make_dot(
+            model(sample_input, key_padding_mask=sample_key_padding_mask),
+            params=dict(model.named_parameters()),
+        )
         model_viz.format = "png"
-        model_viz.render("baseline_model_architecture")
-        print("Saved model architecture visualization to baseline_model_architecture.png")
+        model_diagram_path = config.get(
+            "model_diagram_path", "baseline_model_architecture"
+        )
+        model_viz.render(model_diagram_path)
+        print(f"Saved model architecture visualization to {model_diagram_path}.png")
     except ImportError:
         print("torchviz not installed, skipping model architecture visualization.")
+    except Exception as exc:
+        print(f"Skipping model architecture visualization: {exc}")
     
     # Create the optimizer and loss function
     optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
-    loss_fn = CrossEntropyLoss()
+    loss_fn = CrossEntropyLoss(ignore_index=pad_id, reduction="sum")
 
     return dataloader, val_dataloader, model, optimizer, loss_fn
 
@@ -200,34 +195,36 @@ def evaluate(
     device: torch.device,
 ) -> dict[str, float]:
     model.eval()
+    pad_id = int(loss_fn.ignore_index)
     total_tokens = 0
-    total_correct = 0
     total_loss = 0.0
     non_blocking = device.type == "cuda"
 
     with torch.no_grad():
-        for input_seq, target_seq in loader:
+        for input_seq, target_seq, key_padding_mask in loader:
             input_seq = input_seq.to(device, non_blocking=non_blocking)
             target_seq = target_seq.to(device, non_blocking=non_blocking)
+            key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
 
-            output = model(input_seq)
-            loss = loss_fn(
+            output = model(input_seq, key_padding_mask=key_padding_mask)
+            loss_sum = loss_fn(
                 output.reshape(-1, output.size(-1)),
                 target_seq.reshape(-1),
             )
 
-            tokens = target_seq.numel()
+            valid_target_mask = target_seq != pad_id
+            tokens = int(valid_target_mask.sum().item())
+            if tokens == 0:
+                continue
+
             total_tokens += tokens
-            total_loss += loss.item() * tokens
-            total_correct += (output.argmax(dim=-1) == target_seq).sum().item()
+            total_loss += loss_sum.item()
 
     avg_loss = total_loss / max(total_tokens, 1)
-    avg_accuracy = total_correct / max(total_tokens, 1)
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
 
     return {
         "val_loss": avg_loss,
-        "val_token_accuracy": avg_accuracy,
         "val_perplexity": perplexity,
     }
 
@@ -243,6 +240,7 @@ def train(
     device: torch.device,
 ):
     checkpoint_model = get_uncompiled_model(model)
+    pad_id = int(loss_fn.ignore_index)
 
     def save_checkpoint(epoch: int, next_batch_idx: int, global_step: int):
         checkpoint = {
@@ -289,26 +287,31 @@ def train(
         epoch_train_loss_sum = 0.0
         epoch_token_count = 0
 
-        for batch_idx, (input_seq, target_seq) in enumerate(train_loader):
+        for batch_idx, (input_seq, target_seq, key_padding_mask) in enumerate(train_loader):
             if epoch == start_epoch and batch_idx < start_batch_idx:
                 continue
 
             input_seq = input_seq.to(device, non_blocking=non_blocking)
             target_seq = target_seq.to(device, non_blocking=non_blocking)
+            key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
 
             optimizer.zero_grad()
-            output = model(input_seq)
-            loss = loss_fn(
+            output = model(input_seq, key_padding_mask=key_padding_mask)
+            loss_sum = loss_fn(
                 output.reshape(-1, output.size(-1)),
                 target_seq.reshape(-1),
             )
+            valid_tokens = int((target_seq != pad_id).sum().item())
+            if valid_tokens == 0:
+                continue
+
+            loss = loss_sum / valid_tokens
             loss.backward()
             optimizer.step()
             global_step += 1
 
-            tokens = target_seq.numel()
-            epoch_token_count += tokens
-            epoch_train_loss_sum += loss.item() * tokens
+            epoch_token_count += valid_tokens
+            epoch_train_loss_sum += loss_sum.item()
 
             if batch_idx % 10 == 0:
                 run.log(
@@ -349,7 +352,7 @@ def train(
             f"Epoch {epoch + 1}/{config['epochs']} | "
             f"train_loss={avg_train_loss:.4f} | "
             f"val_loss={val_metrics['val_loss']:.4f} | "
-            f"val_token_accuracy={val_metrics['val_token_accuracy']:.4f}"
+            f"val_perplexity={val_metrics['val_perplexity']:.4f}"
         )
 
     # Save a final checkpoint marker at the end of training.
@@ -363,6 +366,7 @@ def train(
 def model_pipeline(config: Config, project_name: str):
     device = get_best_device()
     print(f"Using device: {device}")
+    prepare_run_artifact_paths(config)
 
     train_loader, val_loader, model, optimizer, loss_fn = make(
         config, pin_memory=device.type == "cuda"
@@ -400,13 +404,17 @@ def model_pipeline(config: Config, project_name: str):
 if __name__ == "__main__":
     
     config: Config = {
-        "vocab_size": 10_000,
+        "base_vocab_size": 10_000,
+        "num_special_tokens": 2, # EOS and PAD
+        "vocab_size": 10_002,
         "d_model": 128,
         "n_heads": 8,
         "layers": 2,
-        "learning_rate": 1e-3,
-        "epochs": 50,
+        "learning_rate": 5e-3,
+        "epochs": 3,
         "training_seq_len": 128,
+        "training_stride": 1,
+        "data_fraction": 1,
         "batch_size": 256,
         "checkpoint_every_n_steps": 250,
         "checkpoint_path": "baseline_checkpoint.pt",

@@ -165,6 +165,7 @@ class BasicMultiHeadSelfAttention(nn.Module):
         self,
         Q: torch.Tensor,
         mask: torch.Tensor = None,
+        key_padding_mask: torch.Tensor = None,
         scale: torch.Tensor = None,
         is_causal: bool = True,
     ):
@@ -202,15 +203,47 @@ class BasicMultiHeadSelfAttention(nn.Module):
 
         scores = (Q_headed @ K_headed.transpose(-2, -1)) / scale
 
+        attention_mask = torch.ones(
+            (batch_size, 1, seq_len, seq_len), dtype=torch.bool, device=scores.device
+        )
+
         if is_causal:
-            # Create causal mask [seq_len, seq_len] - will broadcast to [batch, n_heads, seq_len, seq_len]
-            # Lower triangle = 1 (attend), upper triangle = 0 (mask out future tokens)
-            mask = torch.tril(
-                torch.ones([seq_len, seq_len],device=scores.device), diagonal=0,
+            # Lower triangle = attend, upper triangle = future and must be masked.
+            causal_mask = torch.tril(
+                torch.ones((seq_len, seq_len), dtype=torch.bool, device=scores.device),
+                diagonal=0,
             )
-            scores = scores.masked_fill(mask == 0, float("-inf"))
-        else:
-            scores = scores.masked_fill(mask == 0, float("-inf"))
+            attention_mask = attention_mask & causal_mask.unsqueeze(0).unsqueeze(0)
+        elif mask is not None:
+            user_mask = mask.to(device=scores.device, dtype=torch.bool)
+            if user_mask.dim() == 2:
+                user_mask = user_mask.unsqueeze(0).unsqueeze(0)
+            elif user_mask.dim() == 3:
+                user_mask = user_mask.unsqueeze(1)
+            elif user_mask.dim() != 4:
+                raise ValueError(
+                    f"Unsupported mask dim {user_mask.dim()} for attention mask."
+                )
+            attention_mask = attention_mask & user_mask
+
+        if key_padding_mask is not None:
+            if key_padding_mask.shape != (batch_size, seq_len):
+                raise ValueError(
+                    f"key_padding_mask must have shape {(batch_size, seq_len)}, "
+                    f"got {tuple(key_padding_mask.shape)}"
+                )
+            # Broadcast key validity over attention heads and query positions.
+            key_mask = key_padding_mask.to(device=scores.device, dtype=torch.bool)
+            attention_mask = attention_mask & key_mask.unsqueeze(1).unsqueeze(1)
+
+        # mask scores with -inf
+        scores = scores.masked_fill(~attention_mask, float("-inf"))
+        
+        # Avoid NaNs when a query row is fully masked.i.e:
+        # if a query has no valid keys:
+        #     replace that entire row with zeros
+        fully_masked = ~attention_mask.any(dim=-1, keepdim=True)
+        scores = scores.masked_fill(fully_masked, 0.0)
 
         scores = self.softmax(scores)
 
@@ -248,14 +281,16 @@ class SelfAttnDecoder(nn.Module):
         self.linear2 = LinearLayer(d_model * 4, d_model)
         self.linear_dropout = DropoutLayer(p=dropout)
 
-    def forward(self, Q: torch.Tensor):
+    def forward(self, Q: torch.Tensor, key_padding_mask: torch.Tensor = None):
         """
         The Decoder consists of 2 blocks:
         1. Attention Block
         2. Linear Block
         """
         # self attn
-        attention = self.multi_head_attention(Q,is_causal=True)
+        attention = self.multi_head_attention(
+            Q, is_causal=True, key_padding_mask=key_padding_mask
+        )
         # apply dropout
         attention = self.attn_dropout(attention)
         
