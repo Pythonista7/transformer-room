@@ -108,6 +108,151 @@ def truncate_stream_by_fraction_at_eos(
     return token_stream
 
 
+def _normalize_text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            normalized = item.strip() if isinstance(item, str) else str(item).strip()
+            if normalized:
+                parts.append(normalized)
+        return "\n".join(parts).strip()
+    return str(value).strip()
+
+
+def _infer_text_field_from_sample(sample: Mapping[str, Any]) -> str:
+    preferred_fields = ("text", "content", "article", "body", "document", "sentence")
+    for field in preferred_fields:
+        value = sample.get(field)
+        if isinstance(value, str):
+            return field
+        if isinstance(value, list) and (
+            not value or all(isinstance(item, str) for item in value)
+        ):
+            return field
+
+    for field, value in sample.items():
+        if isinstance(value, str):
+            return field
+        if isinstance(value, list) and (
+            not value or all(isinstance(item, str) for item in value)
+        ):
+            return field
+
+    raise ValueError(
+        "Could not infer a text field from Hugging Face dataset rows. "
+        "Set `hf_text_field` in config."
+    )
+
+
+def _load_local_corpus(config: Config) -> tuple[str, list[str]]:
+    dataset_path = config.get("dataset_path")
+    if not dataset_path:
+        raise ValueError("`dataset_path` is required when dataset_source='local'.")
+
+    with open(dataset_path, encoding="utf-8") as f:
+        corpus = f.read()
+
+    if not corpus:
+        raise ValueError(f"Local dataset is empty: {dataset_path}")
+
+    print(f"Loaded local dataset from: {dataset_path}")
+    return corpus, corpus.split("\n\n")
+
+
+def _load_hf_corpus(config: Config) -> tuple[str, list[str]]:
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise ImportError(
+            "Hugging Face dataset support requires the `datasets` package. "
+            "Install it with `pip install datasets`."
+        ) from exc
+
+    dataset_name = config.get("hf_dataset_name")
+    if not dataset_name:
+        raise ValueError(
+            "`hf_dataset_name` is required when dataset_source='huggingface'."
+        )
+
+    dataset_config = config.get("hf_dataset_config")
+    split = config.get("hf_dataset_split", "train")
+    streaming = bool(config.get("hf_streaming", False))
+    max_rows = int(config.get("hf_max_rows", 0))
+    if max_rows < 0:
+        raise ValueError(f"`hf_max_rows` must be >= 0, got {max_rows}")
+
+    load_kwargs: dict[str, Any] = {
+        "path": dataset_name,
+        "split": split,
+        "streaming": streaming,
+    }
+    if dataset_config:
+        load_kwargs["name"] = dataset_config
+
+    dataset = load_dataset(**load_kwargs)
+    iterator = iter(dataset)
+
+    try:
+        first_row = next(iterator)
+    except StopIteration as exc:
+        raise ValueError(
+            f"Hugging Face dataset '{dataset_name}' split '{split}' is empty."
+        ) from exc
+
+    if not isinstance(first_row, Mapping):
+        raise ValueError("Expected Hugging Face dataset rows to be dict-like.")
+
+    text_field = config.get("hf_text_field") or _infer_text_field_from_sample(first_row)
+    if text_field not in first_row:
+        available = ", ".join(first_row.keys())
+        raise ValueError(
+            f"`hf_text_field` '{text_field}' not found in dataset rows. "
+            f"Available fields: {available}"
+        )
+
+    segments: list[str] = []
+
+    first_text = _normalize_text_value(first_row.get(text_field))
+    if first_text:
+        segments.append(first_text)
+
+    for row in iterator:
+        if max_rows > 0 and len(segments) >= max_rows:
+            break
+        if not isinstance(row, Mapping):
+            continue
+        text = _normalize_text_value(row.get(text_field))
+        if text:
+            segments.append(text)
+
+    if max_rows > 0:
+        segments = segments[:max_rows]
+
+    if not segments:
+        raise ValueError(
+            f"No usable text found in field '{text_field}' for "
+            f"Hugging Face dataset '{dataset_name}' split '{split}'."
+        )
+
+    dataset_descriptor = dataset_name
+    if dataset_config:
+        dataset_descriptor = f"{dataset_name}/{dataset_config}"
+    rows_note = f"{len(segments):,}"
+    if max_rows > 0:
+        rows_note += f" (capped at hf_max_rows={max_rows})"
+    print(
+        f"Loaded Hugging Face dataset: {dataset_descriptor} | "
+        f"split={split} | text_field={text_field} | rows={rows_note}"
+    )
+    return "\n\n".join(segments), segments
+
+
 def get_data(
     config: Config, pin_memory: bool = False
 ) -> tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
@@ -115,11 +260,16 @@ def get_data(
     data_fraction = float(config.get("data_fraction", 0.1))
     training_stride = int(config.get("training_stride", 1))
 
-    with open(config["dataset_path"]) as f:
-        corpus = f.read()
-
-    if corpus is None:
-        raise Exception("Invalid dataset read!")
+    dataset_source = str(config.get("dataset_source", "local")).strip().lower()
+    if dataset_source == "local":
+        corpus, segments = _load_local_corpus(config)
+    elif dataset_source in {"huggingface", "hf"}:
+        corpus, segments = _load_hf_corpus(config)
+    else:
+        raise ValueError(
+            f"Unsupported dataset_source '{dataset_source}'. "
+            "Use 'local' or 'huggingface'."
+        )
 
     tokenizer = BPETokenizer(
         corpus=corpus,
@@ -142,7 +292,6 @@ def get_data(
 
     token_to_id = {token: idx for idx, token in enumerate(vocab)}
 
-    segments = corpus.split("\n\n")
     token_stream: list[int] = []
     eos_inserted = 0
     for segment in segments:

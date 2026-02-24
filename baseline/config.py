@@ -18,7 +18,14 @@ class Config(TypedDict):
     checkpoint_every_n_steps: int
     checkpoint_path: str
     final_model_path: str
-    dataset_path: str
+    dataset_path: NotRequired[str]
+    dataset_source: NotRequired[str]
+    hf_dataset_name: NotRequired[str]
+    hf_dataset_config: NotRequired[str]
+    hf_dataset_split: NotRequired[str]
+    hf_text_field: NotRequired[str]
+    hf_streaming: NotRequired[bool]
+    hf_max_rows: NotRequired[int]
     tokenizer_vocab_path: str
     resume_from_checkpoint: bool
     run_name: NotRequired[str]
