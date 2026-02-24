@@ -20,6 +20,7 @@ QUIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 MODEL_CONFIG_KEYS = ("vocab_size", "d_model", "n_heads", "layers")
 EOS_TOKEN = "<EOS>"
 PAD_TOKEN = "<PAD>"
+UNK_TOKEN = "<UNK>"
 
 
 def parse_args() -> argparse.Namespace:
@@ -207,7 +208,7 @@ def safe_int(value: Any, key: str) -> int:
 
 def resolve_vocab_and_special_ids(
     config: dict[str, Any],
-) -> tuple[int, int, int, int | None, int | None]:
+) -> tuple[int, int, int, int | None, int | None, int | None]:
     vocab_size = safe_int(config["vocab_size"], "vocab_size")
     base_vocab_size = safe_int(config.get("base_vocab_size", vocab_size), "base_vocab_size")
     num_special_tokens = safe_int(config.get("num_special_tokens", 0), "num_special_tokens")
@@ -222,16 +223,29 @@ def resolve_vocab_and_special_ids(
 
     eos_id = base_vocab_size if num_special_tokens >= 1 else None
     pad_id = base_vocab_size + 1 if num_special_tokens >= 2 else None
-    return vocab_size, base_vocab_size, num_special_tokens, eos_id, pad_id
+    unk_id = base_vocab_size + 2 if num_special_tokens >= 3 else None
+    return vocab_size, base_vocab_size, num_special_tokens, eos_id, pad_id, unk_id
 
 
-def encode_text(text: str, tokenizer: BPETokenizer, token_to_id: dict[Any, int]) -> list[int]:
+def encode_text(
+    text: str,
+    tokenizer: BPETokenizer,
+    token_to_id: dict[Any, int],
+    unk_id: int | None = None,
+) -> list[int]:
     tokenized = tokenizer.encode(text)
     ids: list[int] = []
     for token in tokenized:
-        if token not in token_to_id:
-            raise ValueError(f"Tokenizer produced token not in vocab mapping: {token!r}")
-        ids.append(token_to_id[token])
+        token_id = token_to_id.get(token)
+        if token_id is None:
+            if unk_id is None:
+                raise ValueError(
+                    f"Tokenizer produced unknown token {token!r}, but UNK is not configured. "
+                    "Set num_special_tokens >= 3 and adjust vocab_size."
+                )
+            ids.append(unk_id)
+            continue
+        ids.append(token_id)
     return ids
 
 
@@ -241,17 +255,37 @@ def decode_ids(
     tokenizer: BPETokenizer,
     eos_id: int | None = None,
     pad_id: int | None = None,
+    unk_id: int | None = None,
 ) -> str:
-    tokens: list[Any] = []
+    pieces: list[str] = []
+    byte_tokens: list[Any] = []
+
+    def flush_bytes() -> None:
+        if byte_tokens:
+            pieces.append(tokenizer.decode(byte_tokens))
+            byte_tokens.clear()
+
     for idx in ids:
         if eos_id is not None and idx == eos_id:
             continue
         if pad_id is not None and idx == pad_id:
             continue
+        if unk_id is not None and idx == unk_id:
+            flush_bytes()
+            pieces.append(UNK_TOKEN)
+            continue
+        if idx < 0 or idx >= len(id_to_token):
+            continue
         token = id_to_token[idx]
         if isinstance(token, (int, tuple)):
-            tokens.append(token)
-    return tokenizer.decode(tokens) if tokens else ""
+            byte_tokens.append(token)
+            continue
+        if token == UNK_TOKEN:
+            flush_bytes()
+            pieces.append(UNK_TOKEN)
+
+    flush_bytes()
+    return "".join(pieces)
 
 
 def sample_next_id(
@@ -294,8 +328,9 @@ def generate(
     device: torch.device,
     eos_id: int | None = None,
     pad_id: int | None = None,
+    unk_id: int | None = None,
 ) -> str:
-    prompt_ids = encode_text(prompt_text, tokenizer, token_to_id)
+    prompt_ids = encode_text(prompt_text, tokenizer, token_to_id, unk_id=unk_id)
     if not prompt_ids:
         return ""
 
@@ -322,6 +357,7 @@ def generate(
         tokenizer,
         eos_id=eos_id,
         pad_id=pad_id,
+        unk_id=unk_id,
     )
 
 
@@ -332,6 +368,7 @@ def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[
     list[Any],
     dict[str, Any],
     torch.device,
+    int | None,
     int | None,
     int | None,
 ]:
@@ -352,7 +389,7 @@ def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[
     validate_model_config(config)
 
     tokenizer_vocab_path = resolve_existing_path(config["tokenizer_vocab_path"], model_path=model_path)
-    vocab_size, base_vocab_size, num_special_tokens, eos_id, pad_id = resolve_vocab_and_special_ids(
+    vocab_size, base_vocab_size, num_special_tokens, eos_id, pad_id, unk_id = resolve_vocab_and_special_ids(
         config
     )
     model = BaselineModel(
@@ -380,7 +417,9 @@ def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[
         id_to_token.append(EOS_TOKEN)
     if num_special_tokens >= 2:
         id_to_token.append(PAD_TOKEN)
-    for idx in range(2, num_special_tokens):
+    if num_special_tokens >= 3:
+        id_to_token.append(UNK_TOKEN)
+    for idx in range(3, num_special_tokens):
         id_to_token.append(f"<SPECIAL_{idx}>")
 
     if len(id_to_token) != vocab_size:
@@ -389,7 +428,7 @@ def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[
         )
 
     token_to_id = {token: idx for idx, token in enumerate(id_to_token)}
-    return model, tokenizer, token_to_id, id_to_token, config, device, eos_id, pad_id
+    return model, tokenizer, token_to_id, id_to_token, config, device, eos_id, pad_id, unk_id
 
 
 def run_repl(
@@ -402,6 +441,7 @@ def run_repl(
     args: argparse.Namespace,
     eos_id: int | None,
     pad_id: int | None,
+    unk_id: int | None,
 ) -> None:
     context_window = args.context_window
     if context_window is None:
@@ -462,6 +502,7 @@ def run_repl(
                 device=device,
                 eos_id=eos_id,
                 pad_id=pad_id,
+                unk_id=unk_id,
             )
         except Exception as exc:
             print(f"bot> [generation error] {exc}")
@@ -482,7 +523,7 @@ def run_repl(
 
 def main() -> int:
     args = parse_args()
-    model, tokenizer, token_to_id, id_to_token, config, device, eos_id, pad_id = load_model_and_tokenizer(args)
+    model, tokenizer, token_to_id, id_to_token, config, device, eos_id, pad_id, unk_id = load_model_and_tokenizer(args)
     run_repl(
         model=model,
         tokenizer=tokenizer,
@@ -493,6 +534,7 @@ def main() -> int:
         args=args,
         eos_id=eos_id,
         pad_id=pad_id,
+        unk_id=unk_id,
     )
     return 0
 

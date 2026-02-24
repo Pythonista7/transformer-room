@@ -1,7 +1,7 @@
 {
   "base_vocab_size": 10000,
-  "num_special_tokens": 2,
-  "vocab_size": 10002,
+  "num_special_tokens": 3,
+  "vocab_size": 10003,
   "d_model": 128,
   "n_heads": 8,
   "layers": 2,

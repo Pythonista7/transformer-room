@@ -145,7 +145,7 @@ def make(
     optim.Optimizer,
     CrossEntropyLoss,
 ]:
-    _, _, _, _, pad_id = resolve_special_token_ids(config)
+    _, _, _, _, pad_id, _ = resolve_special_token_ids(config)
     dataloader, val_dataloader = get_data(config, pin_memory)
     # Create the model
     model = BaselineModel(
@@ -400,4 +400,3 @@ def model_pipeline(config: Config, project_name: str):
         )
 
     return model
-

@@ -152,9 +152,11 @@ class BPETokenizer:
                     best_end = j
 
             if best_match is None:
-                print(f"No matching token found for byte sequence starting at position {i}: {byte_arr[i:i+10]}... (consider increasing vocab size or checking corpus)")
-                # use <UNK> token 
-                tokens.append()
+                # Unknown piece: return `None` so callers can map to UNK id if configured.
+                tokens.append(None)
+                i += 1
+                continue
+
             tokens.append(best_match)
             i = best_end
 

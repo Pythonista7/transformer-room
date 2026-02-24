@@ -5,8 +5,8 @@ if __name__ == "__main__":
 
     config: Config = {
         "base_vocab_size": 10_000,
-        "num_special_tokens": 2,  # EOS and PAD
-        "vocab_size": 10_002,
+        "num_special_tokens": 3,  # EOS, PAD, UNK
+        "vocab_size": 10_003,
         "d_model": 128,
         "n_heads": 8,
         "layers": 2,

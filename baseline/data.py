@@ -58,8 +58,10 @@ class CustomShakespeareDataset(Dataset):
         return input_seq, target_seq, key_padding_mask
 
 
-def resolve_special_token_ids(config: Config) -> tuple[int, int, int, int, int]:
-    """Validate vocab sizing config and return `(base_vocab_size, num_special, vocab_size, eos_id, pad_id)`."""
+def resolve_special_token_ids(
+    config: Config,
+) -> tuple[int, int, int, int, int, int | None]:
+    """Validate vocab sizing config and return `(base_vocab_size, num_special, vocab_size, eos_id, pad_id, unk_id)`."""
     base_vocab_size = int(config.get("base_vocab_size", config["vocab_size"]))
     num_special_tokens = int(config.get("num_special_tokens", 0))
     vocab_size = int(config["vocab_size"])
@@ -80,7 +82,8 @@ def resolve_special_token_ids(config: Config) -> tuple[int, int, int, int, int]:
 
     eos_id = base_vocab_size
     pad_id = base_vocab_size + 1
-    return base_vocab_size, num_special_tokens, vocab_size, eos_id, pad_id
+    unk_id = base_vocab_size + 2 if num_special_tokens >= 3 else None
+    return base_vocab_size, num_special_tokens, vocab_size, eos_id, pad_id, unk_id
 
 
 def truncate_stream_by_fraction_at_eos(
@@ -171,7 +174,7 @@ def _load_hf_corpus(config: Config) -> tuple[str, list[str]]:
     except ImportError as exc:
         raise ImportError(
             "Hugging Face dataset support requires the `datasets` package. "
-            "Install it with `pip install datasets`."
+            "Install it with `pip install datasets`." + exec
         ) from exc
 
     dataset_name = config.get("hf_dataset_name")
@@ -256,7 +259,7 @@ def _load_hf_corpus(config: Config) -> tuple[str, list[str]]:
 def get_data(
     config: Config, pin_memory: bool = False
 ) -> tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
-    base_vocab_size, _, _, eos_id, pad_id = resolve_special_token_ids(config)
+    base_vocab_size, _, _, eos_id, pad_id, unk_id = resolve_special_token_ids(config)
     data_fraction = float(config.get("data_fraction", 0.1))
     training_stride = int(config.get("training_stride", 1))
 
@@ -294,8 +297,20 @@ def get_data(
 
     token_stream: list[int] = []
     eos_inserted = 0
+    unk_replacements = 0
     for segment in segments:
-        encoded_segment = [token_to_id[token] for token in tokenizer.encode(segment)]
+        encoded_segment: list[int] = []
+        for token in tokenizer.encode(segment):
+            token_id = token_to_id.get(token)
+            if token_id is None:
+                if unk_id is None:
+                    raise ValueError(
+                        "Tokenizer produced a token outside vocab but UNK is not configured. "
+                        "Set `num_special_tokens >= 3` (EOS, PAD, UNK) and adjust `vocab_size`."
+                    )
+                token_id = unk_id
+                unk_replacements += 1
+            encoded_segment.append(token_id)
         token_stream.extend(encoded_segment)
         token_stream.append(eos_id)
         eos_inserted += 1
@@ -312,7 +327,8 @@ def get_data(
     retained_eos = sum(1 for token in token_stream if token == eos_id)
     print(
         f"Encoded stream tokens: {len(token_stream):,} | "
-        f"EOS inserted: {eos_inserted:,} | EOS retained: {retained_eos:,}"
+        f"EOS inserted: {eos_inserted:,} | EOS retained: {retained_eos:,} | "
+        f"UNK replacements: {unk_replacements:,}"
     )
 
     if any(token < 0 or token >= config["vocab_size"] for token in token_stream):
