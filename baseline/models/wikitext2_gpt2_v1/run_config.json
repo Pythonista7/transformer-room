@@ -1,7 +1,7 @@
 {
   "run": {
     "project_name": "transformer-room-baseline",
-    "run_name": null,
+    "run_name": "wikitext2_gpt2_v1",
     "artifacts_root": "/Users/ashwinm4p/ash/code/transformer-room/baseline/models",
     "resume_from_checkpoint": true,
     "checkpoint_every_n_steps": 250,
