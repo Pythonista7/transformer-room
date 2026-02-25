@@ -1,9 +1,10 @@
 from typing import List
-import torch.nn as nn
-import torch
 
-from layers import EmbeddingLayer, LinearLayer, SelfAttnDecoder
-from positional_encoder import PositionalEncoder
+import torch
+import torch.nn as nn
+
+from .layers import EmbeddingLayer, LinearLayer, SelfAttnDecoder
+from .positional_encoder import PositionalEncoder
 
 
 class BaselineModel(nn.Module):

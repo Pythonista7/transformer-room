@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -9,11 +8,9 @@ import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 BASELINE_DIR = PROJECT_ROOT / "baseline"
-if str(BASELINE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASELINE_DIR))
 
-from model import BaselineModel  # noqa: E402
-from tokenizer import BPETokenizer  # noqa: E402
+from baseline.model import BaselineModel
+from baseline.bpe_tokenizer import BPETokenizer
 
 
 QUIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
