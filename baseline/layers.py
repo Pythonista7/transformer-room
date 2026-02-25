@@ -201,6 +201,7 @@ class BasicMultiHeadSelfAttention(nn.Module):
         if scale is None:
             scale = math.sqrt(self.head_dim)
 
+        # scores shape = Qh_shape_[B, H, T, D/H ] @ Kh_shape_[B, H, D/H, T] => [B,H,T,T] 
         scores = (Q_headed @ K_headed.transpose(-2, -1)) / scale
 
         attention_mask = torch.ones(
@@ -233,7 +234,7 @@ class BasicMultiHeadSelfAttention(nn.Module):
                     f"got {tuple(key_padding_mask.shape)}"
                 )
             # Broadcast key validity over attention heads and query positions.
-            key_mask = key_padding_mask.to(device=scores.device, dtype=torch.bool)
+            key_mask = key_padding_mask.to(device=scores.device, dtype=torch.bool) # shape = [batch_size, seq_len]
             attention_mask = attention_mask & key_mask.unsqueeze(1).unsqueeze(1)
 
         # mask scores with -inf
@@ -245,10 +246,13 @@ class BasicMultiHeadSelfAttention(nn.Module):
         fully_masked = ~attention_mask.any(dim=-1, keepdim=True)
         scores = scores.masked_fill(fully_masked, 0.0)
 
-        scores = self.softmax(scores)
+        scores = self.softmax(scores) # shape = [B,H,T,T] each query attends to all keys with some distribution over them.
 
-        attn = scores @ V_headed
+        attn = scores @ V_headed # shape = [B,H,T,T] @ [B,H,T,D/H] => [B,H,T,D/H]
 
+        # Now join the heads back together and project the output back to the desired output embedding dimension.
+        # Shape before joining heads: [batch, n_heads, seq_len, head_dim]
+        # After joining heads: [batch, seq_len, n_heads * head_dim] = [batch, seq_len, d_model]
         joined_heads = attn.transpose(1, 2).reshape(
             batch_size, seq_len, d_model
         )  # Concat heads back together, n_heads * head_dim = d_model

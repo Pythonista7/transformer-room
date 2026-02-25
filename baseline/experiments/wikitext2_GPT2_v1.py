@@ -111,7 +111,7 @@ def build_config() -> ExperimentConfig:
             artifacts_root=str(project_root / "baseline" / "models"),
             run_name="wikitext2_gpt2_v1",
             resume_from_checkpoint=True,
-            checkpoint_every_n_steps=250,
+            checkpoint_every_n_steps=1000,
             use_torch_compile=False,
             torch_compile_mode="default",
             torch_compile_fullgraph=False,
@@ -136,9 +136,9 @@ def build_config() -> ExperimentConfig:
         train=TrainConfig(
             epochs=3,
             learning_rate=0.001,
-            batch_size=256,
-            seq_len=128,
-            stride=128,
+            batch_size=64,
+            seq_len=1024,
+            stride=1024,
             data_fraction=1.0,
         ),
         split=HoldoutSplitConfig(
