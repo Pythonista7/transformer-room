@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -115,6 +116,21 @@ def maybe_compile_model(
         return compiled_model, True, "enabled"
     except Exception as exc:  # pragma: no cover - backend-specific failure paths.
         return model, False, f"failed: {exc}"
+
+
+def should_enable_bf16_autocast(device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    checker = getattr(torch.cuda, "is_bf16_supported", None)
+    if not callable(checker):
+        return False
+    return bool(checker())
+
+
+def get_autocast_context(device: torch.device, use_bf16: bool):
+    if device.type == "cuda" and use_bf16:
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
 
 
 def truncate_stream_by_fraction_at_eos(
@@ -285,6 +301,7 @@ def evaluate(
     loader: DataLoader,
     loss_fn: CrossEntropyLoss,
     device: torch.device,
+    use_bf16: bool,
 ) -> dict[str, float]:
     model.eval()
     pad_id = int(loss_fn.ignore_index)
@@ -298,11 +315,12 @@ def evaluate(
             target_seq = target_seq.to(device, non_blocking=non_blocking)
             key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
 
-            output = model(input_seq, key_padding_mask=key_padding_mask)
-            loss_sum = loss_fn(
-                output.reshape(-1, output.size(-1)),
-                target_seq.reshape(-1),
-            )
+            with get_autocast_context(device=device, use_bf16=use_bf16):
+                output = model(input_seq, key_padding_mask=key_padding_mask)
+                loss_sum = loss_fn(
+                    output.reshape(-1, output.size(-1)),
+                    target_seq.reshape(-1),
+                )
 
             valid_target_mask = target_seq != pad_id
             tokens = int(valid_target_mask.sum().item())
@@ -330,6 +348,7 @@ def train_loop(
     config: ExperimentConfig,
     logger,
     device: torch.device,
+    use_bf16: bool,
     run_paths: dict[str, Path],
 ) -> tuple[int, float, dict[str, float]]:
     checkpoint_model = get_uncompiled_model(model)
@@ -392,11 +411,12 @@ def train_loop(
             key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
 
             optimizer.zero_grad()
-            output = model(input_seq, key_padding_mask=key_padding_mask)
-            loss_sum = loss_fn(
-                output.reshape(-1, output.size(-1)),
-                target_seq.reshape(-1),
-            )
+            with get_autocast_context(device=device, use_bf16=use_bf16):
+                output = model(input_seq, key_padding_mask=key_padding_mask)
+                loss_sum = loss_fn(
+                    output.reshape(-1, output.size(-1)),
+                    target_seq.reshape(-1),
+                )
             valid_tokens = int((target_seq != pad_id).sum().item())
             if valid_tokens == 0:
                 continue
@@ -434,7 +454,7 @@ def train_loop(
                 logger.save(str(run_paths["checkpoint_path"]))
 
         avg_train_loss = epoch_train_loss_sum / max(epoch_token_count, 1)
-        val_metrics = evaluate(model, val_loader, loss_fn, device)
+        val_metrics = evaluate(model, val_loader, loss_fn, device, use_bf16=use_bf16)
         model.train()
 
         logger.log(
@@ -469,6 +489,8 @@ def model_pipeline(config: ExperimentConfig) -> RunResult:
 
     device = get_best_device()
     print(f"Using device: {device}")
+    use_bf16 = should_enable_bf16_autocast(device)
+    print(f"bf16 autocast: {'enabled' if use_bf16 else 'disabled'}")
 
     run_paths = prepare_run_artifact_paths(config)
 
@@ -513,6 +535,7 @@ def model_pipeline(config: ExperimentConfig) -> RunResult:
         logger.log(
             {
                 "torch_compile_enabled": float(1 if compile_enabled else 0),
+                "bf16_autocast_enabled": float(1 if use_bf16 else 0),
             },
             step=0,
         )
@@ -529,6 +552,7 @@ def model_pipeline(config: ExperimentConfig) -> RunResult:
             config=config,
             logger=logger,
             device=device,
+            use_bf16=use_bf16,
             run_paths=run_paths,
         )
     finally:

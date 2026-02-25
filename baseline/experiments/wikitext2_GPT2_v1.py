@@ -112,7 +112,7 @@ def build_config() -> ExperimentConfig:
             run_name="wikitext2_gpt2_v1",
             resume_from_checkpoint=True,
             checkpoint_every_n_steps=250,
-            use_torch_compile=True,
+            use_torch_compile=False,
             torch_compile_mode="default",
             torch_compile_fullgraph=False,
             torch_compile_dynamic=False,
@@ -129,9 +129,9 @@ def build_config() -> ExperimentConfig:
             vocab_path=str(vocab_path),
         ),
         model=BaselineDecoderConfig(
-            d_model=128,
+            d_model=768,
             n_heads=8,
-            layers=2,
+            layers=12,
         ),
         train=TrainConfig(
             epochs=3,
