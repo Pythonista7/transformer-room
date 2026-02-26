@@ -221,3 +221,5 @@ wandb/
 *.pt
 
 .DS_Store
+
+baseline/models/*
