@@ -19,6 +19,7 @@ class RunConfig:
     torch_compile_mode: str = "default"
     torch_compile_fullgraph: bool = False
     torch_compile_dynamic: bool = False
+    seed: int = 42
 
 
 @dataclass(slots=True)
@@ -131,6 +132,8 @@ def resolve_special_token_ids(tokenizer_cfg: BPETokenizerConfig) -> SpecialToken
 def validate_experiment_config(config: ExperimentConfig) -> None:
     if not config.run.project_name.strip():
         raise ValueError("run.project_name must be non-empty.")
+    if config.run.seed < 0:
+        raise ValueError("run.seed must be >= 0.")
     if not config.run.artifacts_root.strip():
         raise ValueError("run.artifacts_root must be non-empty.")
     if config.run.checkpoint_every_n_steps < 0:

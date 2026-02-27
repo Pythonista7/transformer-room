@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import random
 from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import optim
 from torch.nn import CrossEntropyLoss
@@ -81,6 +83,14 @@ def get_best_device() -> torch.device:
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def move_optimizer_state_to_device(
@@ -486,6 +496,8 @@ def train_loop(
 
 def model_pipeline(config: ExperimentConfig) -> RunResult:
     validate_experiment_config(config)
+    set_seed(config.run.seed)
+    print(f"Using seed: {config.run.seed}")
 
     device = get_best_device()
     print(f"Using device: {device}")
