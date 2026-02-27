@@ -59,6 +59,7 @@ class BaselineDecoderConfig:
     d_model: int = 128
     n_heads: int = 8
     layers: int = 2
+    dropout: float = 0.1
 
 
 ModelConfig = BaselineDecoderConfig
@@ -173,6 +174,8 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("model.n_heads must be > 0.")
     if config.model.layers <= 0:
         raise ValueError("model.layers must be > 0.")
+    if not 0.0 <= config.model.dropout <= 1.0:
+        raise ValueError("model.dropout must be in [0, 1].")
     if config.model.d_model % config.model.n_heads != 0:
         raise ValueError(
             "model.d_model must be divisible by model.n_heads "

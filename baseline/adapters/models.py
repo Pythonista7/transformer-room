@@ -20,6 +20,7 @@ class BaselineDecoderModelAdapter:
             d_model=cfg.d_model,
             n_heads=cfg.n_heads,
             layers=cfg.layers,
+            dropout=cfg.dropout,
             pad_id=special.pad_id,
         )
 

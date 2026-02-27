@@ -8,7 +8,16 @@ from .positional_encoder import PositionalEncoder
 
 
 class BaselineModel(nn.Module):
-    def __init__(self, vocab_size, layers, d_model, n_heads, pad_id=None, **kwargs):
+    def __init__(
+        self,
+        vocab_size,
+        layers,
+        d_model,
+        n_heads,
+        pad_id=None,
+        dropout=0.1,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         
         self.pad_id = pad_id
@@ -20,9 +29,10 @@ class BaselineModel(nn.Module):
         self.layer_count = layers
         self.d_model = d_model
         self.n_heads = n_heads
+        self.dropout = dropout
         self.dec_layers: List[SelfAttnDecoder] = torch.nn.ModuleList(
             [
-                SelfAttnDecoder(d_model=d_model, n_heads=n_heads)
+                SelfAttnDecoder(d_model=d_model, n_heads=n_heads, dropout=dropout)
                 for _ in range(self.layer_count)
             ]
         )
