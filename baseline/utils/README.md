@@ -8,7 +8,7 @@ Module entrypoint: `python -m baseline.utils.util`
 ## What It Supports
 
 1. Shape-only memory estimation (no CUDA allocation, no OOM risk).
-2. FP32 vs BF16 comparison tables in terminal.
+2. FP32 vs BF16 comparison tables in terminal (including parameter counts by bucket/op).
 3. Optional PNG plots (with `matplotlib`).
 4. Optional JSON export for downstream analysis.
 5. One-step real training memory profiling (`forward+loss`, `backward`, `optimizer.step`).

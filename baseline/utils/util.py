@@ -228,6 +228,50 @@ def collect_meta_records(cfg: ShapeConfig) -> list[TensorRecord]:
     return records
 
 
+def _count_direct_params(module: torch.nn.Module) -> int:
+    return sum(int(param.numel()) for param in module.parameters(recurse=False))
+
+
+def _bucket_for_module(name: str) -> str:
+    if name.endswith("multi_head_attention.packed_proj"):
+        return "input-projects"
+    if ".multi_head_attention." in name:
+        return "per-layer-attn"
+    if name.endswith("linear1") or name.endswith("linear2"):
+        return "per-layer-mlp"
+    if name == "output_proj":
+        return "output-project"
+    return "others"
+
+
+def collect_param_counts(
+    cfg: ShapeConfig,
+) -> tuple[dict[str, int], dict[tuple[str, str], int]]:
+    bucket_totals: defaultdict[str, int] = defaultdict(int)
+    op_totals: defaultdict[tuple[str, str], int] = defaultdict(int)
+
+    with torch.device("meta"):
+        model = BaselineModel(
+            vocab_size=cfg.vocab_size,
+            layers=cfg.layers,
+            d_model=cfg.d_model,
+            n_heads=cfg.n_heads,
+            pad_id=cfg.vocab_size - 2,
+        )
+
+    for name, mod in model.named_modules():
+        if not name:
+            continue
+        param_count = _count_direct_params(mod)
+        if param_count <= 0:
+            continue
+        bucket = _bucket_for_module(name)
+        bucket_totals[bucket] += param_count
+        op_totals[(bucket, _normalize_name(name))] += param_count
+
+    return dict(bucket_totals), dict(op_totals)
+
+
 def _record_gib(record: TensorRecord, dtype: str) -> float:
     if record.dtype_kind == "bool":
         return _to_gib(record.numel, BOOL_BYTES)
@@ -262,7 +306,13 @@ def summarize(records: list[TensorRecord], dtype: str) -> tuple[list[tuple[str, 
     return bucket_rows, rows
 
 
-def render_terminal_view(cfg: ShapeConfig, records: list[TensorRecord], top_k: int) -> None:
+def render_terminal_view(
+    cfg: ShapeConfig,
+    records: list[TensorRecord],
+    top_k: int,
+    bucket_param_counts: dict[str, int],
+    op_param_counts: dict[tuple[str, str], int],
+) -> None:
     fp32_buckets, fp32_rows = summarize(records, dtype="fp32")
     bf16_buckets, bf16_rows = summarize(records, dtype="bf16")
 
@@ -275,7 +325,9 @@ def render_terminal_view(cfg: ShapeConfig, records: list[TensorRecord], top_k: i
     print()
 
     bucket_names = sorted(
-        {name for name, _ in fp32_buckets}.union({name for name, _ in bf16_buckets})
+        {name for name, _ in fp32_buckets}
+        .union({name for name, _ in bf16_buckets})
+        .union(bucket_param_counts.keys())
     )
     fp32_map = {name: val for name, val in fp32_buckets}
     bf16_map = {name: val for name, val in bf16_buckets}
@@ -288,6 +340,7 @@ def render_terminal_view(cfg: ShapeConfig, records: list[TensorRecord], top_k: i
         bucket_table_rows.append(
             [
                 name,
+                f"{bucket_param_counts.get(name, 0):,}",
                 f"{fp32_val:7.3f}",
                 f"{bf16_val:7.3f}",
                 _bar(fp32_val, max_bucket),
@@ -296,7 +349,14 @@ def render_terminal_view(cfg: ShapeConfig, records: list[TensorRecord], top_k: i
         )
 
     _print_table(
-        headers=["Bucket", "FP32 GiB", "BF16 GiB", "FP32 Bar", "BF16 Bar"],
+        headers=[
+            "Bucket",
+            "Params",
+            "FP32 GiB",
+            "BF16 GiB",
+            "FP32 Bar",
+            "BF16 Bar",
+        ],
         rows=bucket_table_rows,
     )
 
@@ -306,19 +366,21 @@ def render_terminal_view(cfg: ShapeConfig, records: list[TensorRecord], top_k: i
     bf16_map_rows = {(b, n, c, s): g for b, n, c, s, g in bf16_rows}
     for bucket, name, count, shape, fp32_gib in fp32_rows[:top_k]:
         bf16_gib = bf16_map_rows.get((bucket, name, count, shape), fp32_gib / 2.0)
+        op_params = op_param_counts.get((bucket, name), 0)
         top_rows.append(
             [
                 bucket,
                 name,
                 str(count),
                 _shape_str(shape),
+                f"{op_params:,}",
                 f"{fp32_gib:7.3f}",
                 f"{bf16_gib:7.3f}",
             ]
         )
 
     _print_table(
-        headers=["Bucket", "Op", "Count", "Shape", "FP32 GiB", "BF16 GiB"],
+        headers=["Bucket", "Op", "Count", "Shape", "Params", "FP32 GiB", "BF16 GiB"],
         rows=top_rows,
     )
 
@@ -399,6 +461,8 @@ def save_json(
     cfg: ShapeConfig,
     records: list[TensorRecord],
     path: Path,
+    bucket_param_counts: dict[str, int],
+    op_param_counts: dict[tuple[str, str], int],
 ) -> None:
     fp32_buckets, fp32_rows = summarize(records, dtype="fp32")
     bf16_buckets, bf16_rows = summarize(records, dtype="bf16")
@@ -414,8 +478,22 @@ def save_json(
             "num_special_tokens": cfg.num_special_tokens,
         },
         "bucket_totals": {
-            "fp32": [{"bucket": b, "gib": g} for b, g in fp32_buckets],
-            "bf16": [{"bucket": b, "gib": g} for b, g in bf16_buckets],
+            "fp32": [
+                {
+                    "bucket": b,
+                    "params": int(bucket_param_counts.get(b, 0)),
+                    "gib": g,
+                }
+                for b, g in fp32_buckets
+            ],
+            "bf16": [
+                {
+                    "bucket": b,
+                    "params": int(bucket_param_counts.get(b, 0)),
+                    "gib": g,
+                }
+                for b, g in bf16_buckets
+            ],
         },
         "top_ops": {
             "fp32": [
@@ -424,6 +502,7 @@ def save_json(
                     "name": n,
                     "count": c,
                     "shape": list(s),
+                    "params": int(op_param_counts.get((b, n), 0)),
                     "gib": g,
                 }
                 for b, n, c, s, g in fp32_rows
@@ -434,6 +513,7 @@ def save_json(
                     "name": n,
                     "count": c,
                     "shape": list(s),
+                    "params": int(op_param_counts.get((b, n), 0)),
                     "gib": g,
                 }
                 for b, n, c, s, g in bf16_rows
@@ -738,7 +818,14 @@ def main() -> int:
         )
 
     records = collect_meta_records(cfg)
-    render_terminal_view(cfg=cfg, records=records, top_k=args.top_k)
+    bucket_param_counts, op_param_counts = collect_param_counts(cfg)
+    render_terminal_view(
+        cfg=cfg,
+        records=records,
+        top_k=args.top_k,
+        bucket_param_counts=bucket_param_counts,
+        op_param_counts=op_param_counts,
+    )
 
     if args.plot_dir is not None:
         plotted = render_plots(
@@ -749,7 +836,13 @@ def main() -> int:
             print(f"Saved plots to: {args.plot_dir}")
 
     if args.json_out is not None:
-        save_json(cfg=cfg, records=records, path=args.json_out)
+        save_json(
+            cfg=cfg,
+            records=records,
+            path=args.json_out,
+            bucket_param_counts=bucket_param_counts,
+            op_param_counts=op_param_counts,
+        )
         print(f"Saved JSON summary to: {args.json_out}")
 
     if args.train_step_profile:
