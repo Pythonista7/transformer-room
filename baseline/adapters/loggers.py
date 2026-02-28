@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import torch
 
 from baseline.core.config import LoggingConfig
 from baseline.core.registry import register_logger_adapter
 from baseline.core.types import LoggerSession
+
+if TYPE_CHECKING:
+    from wandb.apis.public.api import Api as WandbApi
+    from wandb.sdk.artifacts.artifact import Artifact as WandbArtifact
+    from wandb.sdk.wandb_run import Run as WandbRun
 
 EPHEMERAL_ARTIFACT_TYPES = {"checkpoint", "model"}
 
@@ -32,16 +37,12 @@ def _wandb_artifact_not_found(exc: Exception) -> bool:
     )
 
 
-def _extract_alias_names(aliases: Sequence[Any] | None) -> set[str]:
-    alias_names: set[str] = set()
-    for alias in aliases or ():
-        if isinstance(alias, str):
-            alias_names.add(alias)
-            continue
-        name = getattr(alias, "name", None) or getattr(alias, "alias", None)
-        if isinstance(name, str) and name:
-            alias_names.add(name)
-    return alias_names
+@dataclass(frozen=True, slots=True)
+class WandbRunInfo:
+    entity: str
+    project: str
+    run_name: str
+    run_id: str
 
 
 class ConsoleLoggerSession:
@@ -108,48 +109,43 @@ class ConsoleLoggerAdapter:
 
 
 class WandbLoggerSession:
-    def __init__(self, run: Any, wandb_module: Any):
+    def __init__(
+        self,
+        run: WandbRun,
+        api: WandbApi,
+        artifact_class: type[WandbArtifact],
+    ) -> None:
         self._run = run
-        self._wandb = wandb_module
-
-    def _api(self) -> Any:
-        return self._wandb.Api()
-
-    def _project_name(self) -> str | None:
-        return getattr(self._run, "project", None) or getattr(self._run, "project_name", None)
+        self._api = api
+        self._artifact_class = artifact_class
+        self._run_info = WandbRunInfo(
+            entity=run.entity,
+            project=run.project,
+            run_name=sanitize_wandb_name(run.name or "run"),
+            run_id=sanitize_wandb_name(run.id),
+        )
 
     def _artifact_ref(self, artifact_name: str, alias: str) -> str:
-        project_name = self._project_name()
-        entity = (
-            getattr(self._run, "entity", None)
-            or os.environ.get("WANDB_ENTITY")
-            or getattr(getattr(self._run, "settings", None), "entity", None)
-        )
-        if entity and project_name:
-            return f"{entity}/{project_name}/{artifact_name}:{alias}"
-        if project_name:
-            return f"{project_name}/{artifact_name}:{alias}"
-        return f"{artifact_name}:{alias}"
+        return f"{self._run_info.entity}/{self._run_info.project}/{artifact_name}:{alias}"
+
+    def _artifact_collection_path(self, artifact_name: str) -> str:
+        return f"{self._run_info.entity}/{self._run_info.project}/{artifact_name}"
 
     def _default_artifact_name(self, path: Path, artifact_type: str) -> str:
-        run_label = sanitize_wandb_name(getattr(self._run, "name", None) or "run")
-        run_id = sanitize_wandb_name(getattr(self._run, "id", None) or "session")
         stem = sanitize_wandb_name(path.stem)
-        return f"{run_label}-{run_id}-{artifact_type}-{stem}"
+        return f"{self._run_info.run_name}-{self._run_info.run_id}-{artifact_type}-{stem}"
 
     def _prune_checkpoint_versions(self, artifact_name: str) -> None:
-        versions = list(self._api().artifact_versions("checkpoint", artifact_name))
+        versions = list(
+            self._api.artifacts(
+                "checkpoint",
+                self._artifact_collection_path(artifact_name),
+            )
+        )
         for version in versions:
-            if _extract_alias_names(getattr(version, "aliases", None)) & {"latest", "final"}:
+            if set(version.aliases) & {"latest", "final"}:
                 continue
-            deleter = getattr(version, "delete", None)
-            if callable(deleter):
-                deleter(delete_aliases=True)
-
-    def _wait_for_artifact(self, artifact: Any) -> None:
-        waiter = getattr(artifact, "wait", None)
-        if callable(waiter):
-            waiter()
+            version.delete(delete_aliases=True)
 
     def log(self, metrics: Mapping[str, float], step: int | None = None) -> None:
         self._run.log(dict(metrics), step=step)
@@ -172,7 +168,7 @@ class WandbLoggerSession:
         resolved_name = sanitize_wandb_name(
             artifact_name or self._default_artifact_name(resolved_path, resolved_type)
         )
-        artifact = self._wandb.Artifact(
+        artifact = self._artifact_class(
             name=resolved_name,
             type=resolved_type,
             metadata=dict(metadata) if metadata is not None else None,
@@ -184,13 +180,16 @@ class WandbLoggerSession:
             add_file_kwargs["skip_cache"] = True
         artifact.add_file(str(resolved_path), **add_file_kwargs)
         logged_artifact = self._run.log_artifact(artifact, aliases=alias_list)
-        if logged_artifact is not None:
-            self._wait_for_artifact(logged_artifact)
-        else:
-            self._wait_for_artifact(artifact)
+        logged_artifact.wait()
 
         if resolved_type == "checkpoint":
-            self._prune_checkpoint_versions(resolved_name)
+            try:
+                self._prune_checkpoint_versions(resolved_name)
+            except Exception as exc:
+                print(
+                    "Warning: unable to prune older W&B checkpoint versions for "
+                    f"{resolved_name}: {exc}"
+                )
         if resolved_type in EPHEMERAL_ARTIFACT_TYPES and resolved_path.exists():
             resolved_path.unlink()
 
@@ -211,11 +210,7 @@ class WandbLoggerSession:
         artifact_ref = self._artifact_ref(artifact_name, alias)
 
         try:
-            use_artifact = getattr(self._run, "use_artifact", None)
-            if callable(use_artifact):
-                artifact = use_artifact(artifact_ref)
-            else:
-                artifact = self._api().artifact(artifact_ref)
+            artifact = self._run.use_artifact(artifact_ref)
         except Exception as exc:
             if _wandb_artifact_not_found(exc):
                 return False
@@ -249,11 +244,20 @@ class WandbLoggerSession:
 
 
 class WandbLoggerAdapter:
-    def _artifact_ref(self, project_name: str, artifact_name: str, alias: str) -> str:
-        entity = os.environ.get("WANDB_ENTITY")
-        if entity:
-            return f"{entity}/{project_name}/{artifact_name}:{alias}"
-        return f"{project_name}/{artifact_name}:{alias}"
+    def _artifact_ref(
+        self,
+        api: WandbApi,
+        project_name: str,
+        artifact_name: str,
+        alias: str,
+    ) -> str:
+        entity = api.default_entity
+        if entity is None:
+            raise ValueError(
+                "Could not determine W&B entity for artifact lookup. "
+                "Please configure the W&B API client with an entity."
+            )
+        return f"{entity}/{project_name}/{artifact_name}:{alias}"
 
     def has_remote_artifact(
         self,
@@ -270,7 +274,8 @@ class WandbLoggerAdapter:
             ) from exc
 
         try:
-            wandb.Api().artifact(self._artifact_ref(project_name, artifact_name, alias))
+            api = wandb.Api()
+            api.artifact(self._artifact_ref(api, project_name, artifact_name, alias))
             return True
         except Exception as exc:
             if _wandb_artifact_not_found(exc):
@@ -283,7 +288,7 @@ class WandbLoggerAdapter:
         project_name: str,
         run_name: str | None,
         group_name: str | None,
-        config_payload: dict[str, Any],
+            config_payload: dict[str, Any],
     ) -> LoggerSession:
         _ = cfg
         try:
@@ -299,7 +304,11 @@ class WandbLoggerAdapter:
             group=group_name,
             config=config_payload,
         )
-        return WandbLoggerSession(run=run, wandb_module=wandb)
+        return WandbLoggerSession(
+            run=run,
+            api=wandb.Api(),
+            artifact_class=wandb.Artifact,
+        )
 
 
 register_logger_adapter("console", ConsoleLoggerAdapter())

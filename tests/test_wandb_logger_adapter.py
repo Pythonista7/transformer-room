@@ -114,12 +114,15 @@ class FakeArtifactStore:
 class FakeApi:
     def __init__(self, store: FakeArtifactStore) -> None:
         self._store = store
+        self.default_entity = "test-entity"
 
     def artifact(self, ref: str) -> FakeArtifactVersion:
         return self._store.artifact(ref)
 
-    def artifact_versions(self, artifact_type: str, artifact_name: str) -> list[FakeArtifactVersion]:
-        return self._store.artifact_versions(artifact_type, artifact_name)
+    def artifacts(self, artifact_type: str, name: str, per_page: int = 50):
+        _ = per_page
+        collection_name = name.split("/")[-1]
+        return self._store.artifact_versions(artifact_type, collection_name)
 
 
 class FakeRun:
