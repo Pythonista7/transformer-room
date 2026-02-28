@@ -39,7 +39,7 @@ The main idea is:
     - `ModelConfig` (`BaselineDecoderConfig`)
     - `TrainConfig`
     - `SplitConfig` (`HoldoutSplitConfig`)
-    - `LoggingConfig`
+    - `LoggingConfig` (`WandbMetricsConfig`)
   - `validate_experiment_config(...)`
 
 ### Adapter interfaces
@@ -124,6 +124,7 @@ from baseline.config import (
     TrainConfig,
     HoldoutSplitConfig,
     LoggingConfig,
+    WandbMetricsConfig,
 )
 from baseline.train import model_pipeline
 
@@ -163,7 +164,27 @@ def build_config() -> ExperimentConfig:
             seed=42,
             shuffle=False,
         ),
-        logging=LoggingConfig(provider="console"),
+        logging=LoggingConfig(
+            provider="wandb",
+            wandb=WandbMetricsConfig(
+                enable_train_loss_vs_tokens=True,
+                enable_val_loss_vs_tokens=True,
+                enable_perplexity=True,
+                enable_step_time=True,
+                enable_peak_memory=True,
+                enable_global_grad_norm=True,
+                enable_activation_norms=True,
+                enable_ln_grad_norms=True,
+                enable_attention_entropy=True,
+                watch_model=False,
+                log_every_n_steps=10,
+                diagnostics_every_n_steps=50,
+                val_every_n_steps=250,
+                attention_entropy_every_n_steps=200,
+                attention_entropy_head_cap=2,
+                attention_entropy_token_cap=128,
+            ),
+        ),
     )
 
 
@@ -189,7 +210,8 @@ Most experiment changes should be config-only:
 - Change model params:
   - `d_model`, `n_heads`, `layers`
 - Change logging:
-  - `LoggingConfig(provider="console")` or `LoggingConfig(provider="wandb")`
+  - `LoggingConfig(provider="console")`
+  - `LoggingConfig(provider="wandb", wandb=WandbMetricsConfig(...))`
 - Change split behavior:
   - `HoldoutSplitConfig(train_fraction=..., seed=..., shuffle=...)`
 
@@ -228,6 +250,47 @@ Each run writes to a run directory inside `run.artifacts_root`:
 
 `run_config.json` stores the full normalized experiment config.  
 `inference_config.json` stores minimal model/tokenizer fields for downstream inference utilities.
+
+---
+
+## W&B metrics configuration
+
+`LoggingConfig` now has a nested `wandb` section:
+
+```python
+LoggingConfig(
+    provider="wandb",
+    wandb=WandbMetricsConfig(...),
+)
+```
+
+### Metric toggles
+
+- `enable_train_loss_vs_tokens`: logs `train_loss` and `tokens_seen_train`
+- `enable_val_loss_vs_tokens`: logs `val_loss` and `tokens_seen_train`
+- `enable_perplexity`: logs `train_perplexity`, `train_perplexity_epoch`, `val_perplexity`
+- `enable_step_time`: logs `step_time_ms`
+- `enable_peak_memory`: logs `peak_memory_gib` (CUDA only)
+- `enable_global_grad_norm`: logs `global_grad_norm`
+- `enable_activation_norms`: logs `activation_norm_first|middle|last`
+- `enable_ln_grad_norms`: logs `ln_weight_grad_norm_first|middle|last` and `ln_bias_grad_norm_first|middle|last`
+- `enable_attention_entropy`: logs `attention_entropy_first|middle|last` (sampled)
+- `watch_model`: gates `wandb.watch(...)`
+
+### Cadence and sampling controls
+
+- `log_every_n_steps`: cadence for step metrics (loss/tokens/perplexity/time/memory)
+- `diagnostics_every_n_steps`: cadence for grad/activation/LN diagnostics
+- `val_every_n_steps`: periodic validation cadence (`0` disables periodic val; epoch-end val remains)
+- `attention_entropy_every_n_steps`: cadence for entropy collection
+- `attention_entropy_head_cap`: number of heads sampled for entropy
+- `attention_entropy_token_cap`: number of tokens sampled per axis for entropy
+
+### Overhead guidance
+
+- Keep `watch_model=False` unless you specifically need full parameter/gradient tracking.
+- Attention entropy is sampled by `head_cap` and `token_cap` to avoid full `T x T` cost.
+- `peak_memory_gib` is only emitted on CUDA runs.
 
 ---
 

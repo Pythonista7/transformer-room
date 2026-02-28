@@ -10,6 +10,7 @@ from .types import SpecialTokenIds
 class RunConfig:
     project_name: str
     run_name: str | None = None
+    group_name: str | None = None
     artifacts_root: str = "baseline/models"
     resume_from_checkpoint: bool = True
     checkpoint_every_n_steps: int = 250
@@ -88,8 +89,29 @@ SplitConfig = HoldoutSplitConfig
 
 
 @dataclass(slots=True)
+class WandbMetricsConfig:
+    enable_train_loss_vs_tokens: bool = True
+    enable_val_loss_vs_tokens: bool = True
+    enable_perplexity: bool = True
+    enable_step_time: bool = True
+    enable_peak_memory: bool = True
+    enable_global_grad_norm: bool = True
+    enable_activation_norms: bool = True
+    enable_ln_grad_norms: bool = True
+    enable_attention_entropy: bool = True
+    watch_model: bool = False
+    log_every_n_steps: int = 10
+    diagnostics_every_n_steps: int = 50
+    val_every_n_steps: int = 250
+    attention_entropy_every_n_steps: int = 200
+    attention_entropy_head_cap: int = 2
+    attention_entropy_token_cap: int = 128
+
+
+@dataclass(slots=True)
 class LoggingConfig:
     provider: Literal["console", "wandb"] = "console"
+    wandb: WandbMetricsConfig = field(default_factory=WandbMetricsConfig)
 
 
 @dataclass(slots=True)
@@ -132,6 +154,10 @@ def resolve_special_token_ids(tokenizer_cfg: BPETokenizerConfig) -> SpecialToken
 def validate_experiment_config(config: ExperimentConfig) -> None:
     if not config.run.project_name.strip():
         raise ValueError("run.project_name must be non-empty.")
+    if config.run.run_name is not None and not config.run.run_name.strip():
+        raise ValueError("run.run_name must be non-empty when provided.")
+    if config.run.group_name is not None and not config.run.group_name.strip():
+        raise ValueError("run.group_name must be non-empty when provided.")
     if config.run.seed < 0:
         raise ValueError("run.seed must be >= 0.")
     if not config.run.artifacts_root.strip():
@@ -210,3 +236,17 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             f"Unsupported logging.provider '{config.logging.provider}'. "
             "Expected one of: console, wandb."
         )
+
+    wandb_cfg = config.logging.wandb
+    if wandb_cfg.log_every_n_steps <= 0:
+        raise ValueError("logging.wandb.log_every_n_steps must be > 0.")
+    if wandb_cfg.diagnostics_every_n_steps <= 0:
+        raise ValueError("logging.wandb.diagnostics_every_n_steps must be > 0.")
+    if wandb_cfg.val_every_n_steps < 0:
+        raise ValueError("logging.wandb.val_every_n_steps must be >= 0.")
+    if wandb_cfg.attention_entropy_every_n_steps <= 0:
+        raise ValueError("logging.wandb.attention_entropy_every_n_steps must be > 0.")
+    if wandb_cfg.attention_entropy_head_cap <= 0:
+        raise ValueError("logging.wandb.attention_entropy_head_cap must be > 0.")
+    if wandb_cfg.attention_entropy_token_cap <= 0:
+        raise ValueError("logging.wandb.attention_entropy_token_cap must be > 0.")

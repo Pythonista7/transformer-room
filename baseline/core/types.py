@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, Sequence, runtime_checkable
 
 import torch
 from torch.utils.data import Dataset
@@ -108,8 +108,16 @@ class LoggerSession(Protocol):
     def log(self, metrics: Mapping[str, float], step: int | None = None) -> None:
         """Log scalar metrics."""
 
-    def save(self, path: str) -> None:
-        """Track a saved artifact path."""
+    def save(
+        self,
+        path: str,
+        *,
+        artifact_name: str | None = None,
+        artifact_type: str | None = None,
+        aliases: Sequence[str] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Track or upload a saved artifact path."""
 
     def watch(self, model: torch.nn.Module, loss_fn: torch.nn.Module) -> None:
         """Optionally watch model gradients/weights."""
@@ -125,6 +133,7 @@ class LoggerAdapter(Protocol):
         cfg: LoggingConfig,
         project_name: str,
         run_name: str | None,
+        group_name: str | None,
         config_payload: dict[str, Any],
     ) -> LoggerSession:
         """Start a new logging session."""

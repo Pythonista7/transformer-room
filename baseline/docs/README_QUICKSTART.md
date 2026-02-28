@@ -24,6 +24,7 @@ from baseline.config import (
     TrainConfig,
     HoldoutSplitConfig,
     LoggingConfig,
+    WandbMetricsConfig,
 )
 from baseline.train import model_pipeline
 
@@ -63,7 +64,7 @@ def build_config() -> ExperimentConfig:
             seed=42,
             shuffle=False,
         ),
-        logging=LoggingConfig(provider="console"),  # or "wandb"
+        logging=LoggingConfig(provider="console"),
     )
 
 
@@ -107,7 +108,7 @@ Run artifacts are written under `run.artifacts_root`, usually:
   - Hugging Face text: `HFTextDatasetConfig(...)`
 - Logging:
   - `LoggingConfig(provider="console")` for local iteration
-  - `LoggingConfig(provider="wandb")` for experiment tracking
+  - `LoggingConfig(provider="wandb", wandb=WandbMetricsConfig(...))` for experiment tracking
 - Model size:
   - `d_model`, `n_heads`, `layers`
 - Tokenizer size:
@@ -122,3 +123,29 @@ Run tests:
 ```
 
 For full architecture and adapter extension guide, see `baseline/docs/Readme.md`.
+
+## W&B metrics quick example
+
+```python
+logging=LoggingConfig(
+    provider="wandb",
+    wandb=WandbMetricsConfig(
+        enable_train_loss_vs_tokens=True,
+        enable_val_loss_vs_tokens=True,
+        enable_perplexity=True,
+        enable_step_time=True,
+        enable_peak_memory=True,
+        enable_global_grad_norm=True,
+        enable_activation_norms=True,
+        enable_ln_grad_norms=True,
+        enable_attention_entropy=True,
+        watch_model=False,
+        log_every_n_steps=10,
+        diagnostics_every_n_steps=50,
+        val_every_n_steps=250,
+        attention_entropy_every_n_steps=200,
+        attention_entropy_head_cap=2,
+        attention_entropy_token_cap=128,
+    ),
+)
+```

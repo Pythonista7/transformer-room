@@ -14,6 +14,7 @@ from baseline.config import (
     LoggingConfig,
     RunConfig,
     TrainConfig,
+    WandbMetricsConfig,
     validate_experiment_config,
 )
 from baseline.core.registry import get_dataset_adapter
@@ -53,6 +54,24 @@ class ConfigValidationTests(unittest.TestCase):
         config = make_config()
         config.tokenizer.num_special_tokens = 1
         with self.assertRaisesRegex(ValueError, "at least 2 special tokens"):
+            validate_experiment_config(config)
+
+    def test_invalid_wandb_log_every_n_steps_fails(self) -> None:
+        config = make_config()
+        config.logging = LoggingConfig(
+            provider="wandb",
+            wandb=WandbMetricsConfig(log_every_n_steps=0),
+        )
+        with self.assertRaisesRegex(ValueError, "log_every_n_steps must be > 0"):
+            validate_experiment_config(config)
+
+    def test_invalid_wandb_val_every_n_steps_fails(self) -> None:
+        config = make_config()
+        config.logging = LoggingConfig(
+            provider="wandb",
+            wandb=WandbMetricsConfig(val_every_n_steps=-1),
+        )
+        with self.assertRaisesRegex(ValueError, "val_every_n_steps must be >= 0"):
             validate_experiment_config(config)
 
 

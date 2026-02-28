@@ -14,6 +14,7 @@ from .core.config import (
     SplitConfig,
     TokenizerConfig,
     TrainConfig,
+    WandbMetricsConfig,
     resolve_special_token_ids,
     validate_experiment_config,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "SplitConfig",
     "TokenizerConfig",
     "TrainConfig",
+    "WandbMetricsConfig",
     "resolve_special_token_ids",
     "validate_experiment_config",
 ]
