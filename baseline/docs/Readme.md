@@ -133,6 +133,7 @@ def build_config() -> ExperimentConfig:
     return ExperimentConfig(
         run=RunConfig(
             project_name="my-project",
+            run_name="my-dataset-baseline-v1",
             artifacts_root=str(PROJECT_ROOT / "baseline" / "models"),
             resume_from_checkpoint=False,
             checkpoint_every_n_steps=250,
@@ -251,6 +252,13 @@ Each run writes to a run directory inside `run.artifacts_root`:
 `run_config.json` stores the full normalized experiment config.  
 `inference_config.json` stores minimal model/tokenizer fields for downstream inference utilities.
 
+For W&B-backed runs:
+
+- `run.run_name` is required and should be deterministic across reruns of the same experiment.
+- `run.group_name` may be timestamped for launch grouping, but must not be used to derive artifact identity.
+- Local checkpoint/model `.pt` files may be deleted after a successful W&B upload; the metadata JSON files remain on disk.
+- If a remote checkpoint already exists for the chosen `run_name`, the CLI either resumes the latest lineage or prompts for a manual suffix to create a new lineage.
+
 ---
 
 ## W&B metrics configuration
@@ -263,6 +271,14 @@ LoggingConfig(
     wandb=WandbMetricsConfig(...),
 )
 ```
+
+Recommended W&B environment setup:
+
+```bash
+export WANDB_DATA_DIR="$PWD/.wandb-data"
+```
+
+This keeps W&B staging traffic off small default system volumes.
 
 ### Metric toggles
 

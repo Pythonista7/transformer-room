@@ -37,7 +37,7 @@ class RecordingLoggerSession:
         artifact_type: str | None = None,
         aliases: Sequence[str] | None = None,
         metadata: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> str | None:
         self.saved.append(
             {
                 "path": path,
@@ -47,6 +47,29 @@ class RecordingLoggerSession:
                 "metadata": dict(metadata) if metadata is not None else None,
             }
         )
+        artifact_path = Path(path)
+        if artifact_type in {"checkpoint", "model"} and artifact_path.exists():
+            artifact_path.unlink()
+        primary_alias = aliases[0] if aliases else "latest"
+        return (
+            f"wandb://{artifact_name}:{primary_alias}"
+            if artifact_name is not None
+            else None
+        )
+
+    def restore(
+        self,
+        path: str,
+        *,
+        artifact_name: str,
+        artifact_type: str | None = None,
+        alias: str = "latest",
+    ) -> bool:
+        _ = path
+        _ = artifact_name
+        _ = artifact_type
+        _ = alias
+        return False
 
     def watch(self, model, loss_fn) -> None:
         _ = model
@@ -108,6 +131,7 @@ def _make_config(
     return ExperimentConfig(
         run=RunConfig(
             project_name="wandb-gating-test",
+            run_name="wandb-gating-test-run",
             artifacts_root=str(artifacts_root),
             resume_from_checkpoint=False,
             checkpoint_every_n_steps=0,
@@ -227,6 +251,12 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertIn("metadata", saved_types)
             self.assertIn("checkpoint", saved_types)
             self.assertIn("model", saved_types)
+            self.assertFalse(Path(session.saved[-2]["path"]).exists())
+            self.assertFalse(Path(session.saved[-1]["path"]).exists())
+            self.assertTrue(Path(cfg.run.artifacts_root, "wandb-gating-test-run", "run_config.json").exists())
+            self.assertTrue(
+                Path(cfg.run.artifacts_root, "wandb-gating-test-run", "inference_config.json").exists()
+            )
 
 
 if __name__ == "__main__":

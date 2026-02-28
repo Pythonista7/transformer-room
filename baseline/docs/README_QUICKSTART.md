@@ -101,6 +101,13 @@ Run artifacts are written under `run.artifacts_root`, usually:
 - `baseline/models/<run_name>/run_config.json`
 - `baseline/models/<run_name>/inference_config.json`
 
+For `LoggingConfig(provider="wandb", ...)` runs:
+
+- `run.run_name` is required and should be deterministic.
+- `run.group_name` may include timestamps for launch grouping, but must not be used to derive `run_name`.
+- Checkpoint/model `.pt` files are treated as upload transport files and may be deleted locally after a successful W&B upload.
+- `run_config.json` and `inference_config.json` remain on disk.
+
 ## Quick knobs to change
 
 - Dataset source:
@@ -109,6 +116,7 @@ Run artifacts are written under `run.artifacts_root`, usually:
 - Logging:
   - `LoggingConfig(provider="console")` for local iteration
   - `LoggingConfig(provider="wandb", wandb=WandbMetricsConfig(...))` for experiment tracking
+  - For W&B runs, set a stable `run.run_name` such as `wikitext2-gpt2-lr1e-4-bs20`
 - Model size:
   - `d_model`, `n_heads`, `layers`
 - Tokenizer size:
@@ -127,6 +135,10 @@ For full architecture and adapter extension guide, see `baseline/docs/Readme.md`
 ## W&B metrics quick example
 
 ```python
+run=RunConfig(
+    project_name="my-project",
+    run_name="my-dataset-baseline-v1",
+),
 logging=LoggingConfig(
     provider="wandb",
     wandb=WandbMetricsConfig(
@@ -149,3 +161,10 @@ logging=LoggingConfig(
     ),
 )
 ```
+
+If a W&B run starts with a `run_name` that already has a remote checkpoint, the CLI will either:
+
+1. Resume the existing lineage from the latest remote checkpoint.
+2. Ask for a manual suffix and start a new lineage such as `my-dataset-baseline-v1-rerun1`.
+
+When disk space is tight, set `WANDB_DATA_DIR` to a workspace-backed directory so W&B staging does not hit a small root volume.

@@ -103,6 +103,10 @@ def _build_sweep_group() -> str:
     return f"p0-LRvsBSz-wikitext2_gpt2-sweep-{timestamp}"
 
 
+def _build_run_name(learning_rate: float, batch_size: int) -> str:
+    return f"p0-LRvsBSz-wikitext2-gpt2-lr{_format_lr_slug(learning_rate)}-bs{batch_size}"
+
+
 def build_config(
     learning_rate: float,
     batch_size: int,
@@ -112,7 +116,6 @@ def build_config(
     project_root = PROJECT_ROOT
     dataset_name = "Salesforce/wikitext"
     dataset_config = "wikitext-2-v1"
-    run_prefix = sweep_group or "p0-LRvsBSz-wikitext2_gpt2"
     vocab_path = (
         project_root
         / "baseline"
@@ -129,13 +132,10 @@ def build_config(
         run=RunConfig(
             project_name="transformer-room-baseline",
             artifacts_root=str(project_root / "baseline" / "models"),
-            run_name=(
-                f"{run_prefix}-"
-                f"lr{_format_lr_slug(learning_rate)}-bs{batch_size}"
-            ),
+            run_name=_build_run_name(learning_rate, batch_size),
             group_name=sweep_group,
             resume_from_checkpoint=False,
-            checkpoint_every_n_steps=200, # steps per run is 200 so we can chk_pt every 200 or 1 per run.
+            checkpoint_every_n_steps=10000, # steps per run is 200 so we can just expect the final model here, no need chkpt for smaller runs.
             use_torch_compile=False,
             torch_compile_mode="default",
             torch_compile_fullgraph=False,
@@ -225,6 +225,8 @@ def main() -> int:
                     "run_dir": result.run_artifact_dir,
                     "checkpoint": result.checkpoint_path,
                     "final_model": result.final_model_path,
+                    "checkpoint_artifact_ref": result.checkpoint_artifact_ref,
+                    "final_model_artifact_ref": result.final_model_artifact_ref,
                     "train_loss": result.final_train_loss,
                     "val_loss": result.final_val_loss,
                     "val_ppl": result.final_val_perplexity,
@@ -236,7 +238,9 @@ def main() -> int:
                 f"batch_size={batch_size} | "
                 f"run_dir={result.run_artifact_dir} | "
                 f"checkpoint={result.checkpoint_path} | "
-                f"final_model={result.final_model_path}"
+                f"final_model={result.final_model_path} | "
+                f"checkpoint_artifact={result.checkpoint_artifact_ref} | "
+                f"final_model_artifact={result.final_model_artifact_ref}"
             )
 
             del result

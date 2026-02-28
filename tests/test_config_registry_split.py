@@ -18,6 +18,7 @@ from baseline.config import (
     validate_experiment_config,
 )
 from baseline.core.registry import get_dataset_adapter
+from baseline.experiments.LRvsBatchSizeEmpiricalSweep import build_config as build_lr_vs_batch_config
 
 
 class DummyDataset:
@@ -58,6 +59,7 @@ class ConfigValidationTests(unittest.TestCase):
 
     def test_invalid_wandb_log_every_n_steps_fails(self) -> None:
         config = make_config()
+        config.run.run_name = "wandb-validation-run"
         config.logging = LoggingConfig(
             provider="wandb",
             wandb=WandbMetricsConfig(log_every_n_steps=0),
@@ -67,12 +69,31 @@ class ConfigValidationTests(unittest.TestCase):
 
     def test_invalid_wandb_val_every_n_steps_fails(self) -> None:
         config = make_config()
+        config.run.run_name = "wandb-validation-run"
         config.logging = LoggingConfig(
             provider="wandb",
             wandb=WandbMetricsConfig(val_every_n_steps=-1),
         )
         with self.assertRaisesRegex(ValueError, "val_every_n_steps must be >= 0"):
             validate_experiment_config(config)
+
+    def test_wandb_requires_run_name(self) -> None:
+        config = make_config()
+        config.logging = LoggingConfig(provider="wandb")
+        config.run.run_name = None
+        with self.assertRaisesRegex(ValueError, "requires run.run_name"):
+            validate_experiment_config(config)
+
+    def test_sweep_run_name_is_deterministic_and_group_name_can_vary(self) -> None:
+        config_a = build_lr_vs_batch_config(learning_rate=1e-4, batch_size=20, sweep_group="group-a")
+        config_b = build_lr_vs_batch_config(learning_rate=1e-4, batch_size=20, sweep_group="group-b")
+
+        self.assertEqual(
+            config_a.run.run_name,
+            "p0-LRvsBSz-wikitext2-gpt2-lr0p0001-bs20",
+        )
+        self.assertEqual(config_a.run.run_name, config_b.run.run_name)
+        self.assertNotEqual(config_a.run.group_name, config_b.run.group_name)
 
 
 class RegistryAndSplitTests(unittest.TestCase):

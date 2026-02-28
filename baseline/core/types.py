@@ -64,6 +64,8 @@ class RunResult:
     run_artifact_dir: str
     checkpoint_path: str
     final_model_path: str
+    checkpoint_artifact_ref: str | None
+    final_model_artifact_ref: str | None
     global_step: int
     final_train_loss: float
     final_val_loss: float
@@ -116,8 +118,18 @@ class LoggerSession(Protocol):
         artifact_type: str | None = None,
         aliases: Sequence[str] | None = None,
         metadata: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> str | None:
         """Track or upload a saved artifact path."""
+
+    def restore(
+        self,
+        path: str,
+        *,
+        artifact_name: str,
+        artifact_type: str | None = None,
+        alias: str = "latest",
+    ) -> bool:
+        """Restore an artifact alias into the provided local path."""
 
     def watch(self, model: torch.nn.Module, loss_fn: torch.nn.Module) -> None:
         """Optionally watch model gradients/weights."""

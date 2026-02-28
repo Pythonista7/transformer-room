@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import math
 import random
+import sys
 import time
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -19,6 +21,7 @@ from tqdm import tqdm
 # Import side effect: registers all built-in adapters.
 import baseline.adapters  # noqa: F401
 
+from .adapters.loggers import sanitize_wandb_name
 from .core.config import ExperimentConfig, validate_experiment_config
 from .core.registry import (
     get_dataset_adapter,
@@ -28,6 +31,15 @@ from .core.registry import (
     get_tokenizer_adapter,
 )
 from .core.types import RunResult, TokenizedCorpus
+
+
+@dataclass(slots=True)
+class TrainLoopResult:
+    global_step: int
+    final_train_loss: float
+    final_val_metrics: dict[str, float]
+    checkpoint_artifact_ref: str | None
+    final_model_artifact_ref: str | None
 
 
 class LMWindowDataset(Dataset):
@@ -224,6 +236,118 @@ def prepare_run_artifact_paths(config: ExperimentConfig) -> dict[str, Path]:
     }
     print(f"Run artifacts will be saved to: {run_dir}")
     return paths
+
+
+def build_checkpoint_artifact_name(run_name: str) -> str:
+    return f"{run_name}-checkpoint"
+
+
+def build_final_model_artifact_name(run_name: str) -> str:
+    return f"{run_name}-model"
+
+
+def clone_config_with_run_settings(
+    config: ExperimentConfig,
+    *,
+    run_name: str,
+    resume_from_checkpoint: bool,
+) -> ExperimentConfig:
+    return replace(
+        config,
+        run=replace(
+            config.run,
+            run_name=run_name,
+            resume_from_checkpoint=resume_from_checkpoint,
+        ),
+    )
+
+
+def stdin_is_interactive() -> bool:
+    return bool(getattr(sys.stdin, "isatty", lambda: False)())
+
+
+def resolve_wandb_lineage(
+    config: ExperimentConfig,
+    logger_adapter,
+    *,
+    input_fn: Callable[[str], str] = input,
+    interactive: bool | None = None,
+) -> ExperimentConfig:
+    if config.logging.provider != "wandb":
+        return config
+
+    has_remote_artifact = getattr(logger_adapter, "has_remote_artifact", None)
+    if not callable(has_remote_artifact):
+        return config
+
+    base_run_name = config.run.run_name
+    if base_run_name is None:
+        return config
+
+    def remote_checkpoint_exists(run_name: str) -> bool:
+        return bool(
+            has_remote_artifact(
+                project_name=config.run.project_name,
+                artifact_name=build_checkpoint_artifact_name(run_name),
+                alias="latest",
+            )
+        )
+
+    if not remote_checkpoint_exists(base_run_name):
+        return config
+
+    interactive_mode = stdin_is_interactive() if interactive is None else interactive
+    if not interactive_mode:
+        if config.run.resume_from_checkpoint:
+            print(
+                f"Remote checkpoint already exists for run_name={base_run_name}; "
+                "resuming latest lineage."
+            )
+            return clone_config_with_run_settings(
+                config,
+                run_name=base_run_name,
+                resume_from_checkpoint=True,
+            )
+        raise ValueError(
+            f"Remote checkpoint already exists for run_name={base_run_name}. "
+            "Re-run interactively to resume or provide a distinct run.run_name."
+        )
+
+    print(f"Remote checkpoint already exists for run_name={base_run_name}.")
+    while True:
+        print("1. Resume from the existing latest remote checkpoint.")
+        print("2. Start a new lineage with a manual suffix.")
+        choice = input_fn("Select 1 or 2: ").strip()
+        if choice == "1":
+            return clone_config_with_run_settings(
+                config,
+                run_name=base_run_name,
+                resume_from_checkpoint=True,
+            )
+        if choice != "2":
+            print("Please enter 1 or 2.")
+            continue
+
+        while True:
+            raw_suffix = input_fn("Enter a new lineage suffix: ").strip()
+            if not raw_suffix:
+                print("Suffix must be non-empty.")
+                continue
+
+            suffix = sanitize_wandb_name(raw_suffix)
+            candidate_run_name = f"{base_run_name}-{suffix}"
+            if remote_checkpoint_exists(candidate_run_name):
+                print(
+                    f"Remote checkpoint already exists for run_name={candidate_run_name}. "
+                    "Enter a different suffix."
+                )
+                continue
+
+            return clone_config_with_run_settings(
+                config,
+                run_name=candidate_run_name,
+                resume_from_checkpoint=False,
+            )
 
 
 def write_run_metadata(
@@ -515,7 +639,7 @@ def train_loop(
     device: torch.device,
     use_bf16: bool,
     run_paths: dict[str, Path],
-) -> tuple[int, float, dict[str, float]]:
+) -> TrainLoopResult:
     checkpoint_model = get_uncompiled_model(model)
     pad_id = int(loss_fn.ignore_index)
     wandb_cfg = config.logging.wandb
@@ -525,8 +649,10 @@ def train_loop(
     metric_collector = ForwardMetricCollector()
     tokens_seen_train = 0
     run_label = config.run.run_name or Path(run_paths["run_artifact_dir"]).name
-    checkpoint_artifact_name = f"{run_label}-checkpoint"
-    final_model_artifact_name = f"{run_label}-model"
+    checkpoint_artifact_name = build_checkpoint_artifact_name(run_label)
+    final_model_artifact_name = build_final_model_artifact_name(run_label)
+    last_checkpoint_artifact_ref: str | None = None
+    final_model_artifact_ref: str | None = None
 
     def should_log_every(step: int, every_n_steps: int) -> bool:
         return step > 0 and step % every_n_steps == 0
@@ -537,7 +663,7 @@ def train_loop(
         global_step: int,
         *,
         aliases: tuple[str, ...] = ("latest",),
-    ) -> None:
+    ) -> str | None:
         checkpoint = {
             "epoch": epoch,
             "batch_idx": next_batch_idx,
@@ -548,7 +674,7 @@ def train_loop(
             "config": asdict(config),
         }
         torch.save(checkpoint, run_paths["checkpoint_path"])
-        logger.save(
+        return logger.save(
             str(run_paths["checkpoint_path"]),
             artifact_name=checkpoint_artifact_name,
             artifact_type="checkpoint",
@@ -568,9 +694,17 @@ def train_loop(
             return 0, 0, 0, 0
 
         checkpoint_path = run_paths["checkpoint_path"]
+        restored_from_remote = False
         if not checkpoint_path.exists():
-            print(f"No checkpoint found at {checkpoint_path}, starting fresh.")
-            return 0, 0, 0, 0
+            restored_from_remote = logger.restore(
+                str(checkpoint_path),
+                artifact_name=checkpoint_artifact_name,
+                artifact_type="checkpoint",
+                alias="latest",
+            )
+            if not restored_from_remote:
+                print(f"No checkpoint found at {checkpoint_path}, starting fresh.")
+                return 0, 0, 0, 0
 
         checkpoint = torch.load(checkpoint_path, map_location=device)
         model_state_dict = dict(checkpoint["model_state_dict"])
@@ -588,6 +722,8 @@ def train_loop(
             f"at epoch={start_epoch}, batch={start_batch_idx}, step={global_step}, "
             f"tokens_seen_train={tokens_seen}"
         )
+        if restored_from_remote and checkpoint_path.exists():
+            checkpoint_path.unlink()
         return start_epoch, start_batch_idx, global_step, tokens_seen
 
     model.train()
@@ -774,11 +910,11 @@ def train_loop(
                         next_epoch += 1
                         next_batch_idx = 0
 
-                    save_checkpoint(
+                    last_checkpoint_artifact_ref = save_checkpoint(
                         next_epoch,
                         next_batch_idx,
                         global_step,
-                        aliases=("latest", f"step-{global_step}"),
+                        aliases=("latest",),
                     )
 
             avg_train_loss = epoch_train_loss_sum / max(epoch_token_count, 1)
@@ -815,15 +951,15 @@ def train_loop(
         for handle in hook_handles:
             handle.remove()
 
-    save_checkpoint(
+    last_checkpoint_artifact_ref = save_checkpoint(
         config.train.epochs,
         0,
         global_step,
-        aliases=("latest", "final", f"step-{global_step}"),
+        aliases=("latest", "final"),
     )
 
     torch.save(checkpoint_model.state_dict(), run_paths["final_model_path"])
-    logger.save(
+    final_model_artifact_ref = logger.save(
         str(run_paths["final_model_path"]),
         artifact_name=final_model_artifact_name,
         artifact_type="model",
@@ -837,11 +973,19 @@ def train_loop(
             "group_name": config.run.group_name,
         },
     )
-    return global_step, last_avg_train_loss, last_val_metrics
+    return TrainLoopResult(
+        global_step=global_step,
+        final_train_loss=last_avg_train_loss,
+        final_val_metrics=last_val_metrics,
+        checkpoint_artifact_ref=last_checkpoint_artifact_ref,
+        final_model_artifact_ref=final_model_artifact_ref,
+    )
 
 
 def model_pipeline(config: ExperimentConfig) -> RunResult:
     validate_experiment_config(config)
+    logger_adapter = get_logger_adapter(config.logging.provider)
+    config = resolve_wandb_lineage(config, logger_adapter)
     set_seed(config.run.seed)
     print(f"Using seed: {config.run.seed}")
 
@@ -880,7 +1024,6 @@ def model_pipeline(config: ExperimentConfig) -> RunResult:
     optimizer = optim.Adam(model.parameters(), lr=config.train.learning_rate)
     loss_fn = CrossEntropyLoss(ignore_index=tokenized.vocab.special.pad_id, reduction="sum")
 
-    logger_adapter = get_logger_adapter(config.logging.provider)
     logger = logger_adapter.start(
         cfg=config.logging,
         project_name=config.run.project_name,
@@ -926,7 +1069,7 @@ def model_pipeline(config: ExperimentConfig) -> RunResult:
         if config.logging.provider == "wandb" and config.logging.wandb.watch_model:
             logger.watch(get_uncompiled_model(model), loss_fn)
 
-        global_step, final_train_loss, final_val_metrics = train_loop(
+        train_result = train_loop(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
@@ -947,8 +1090,10 @@ def model_pipeline(config: ExperimentConfig) -> RunResult:
         run_artifact_dir=str(run_paths["run_artifact_dir"]),
         checkpoint_path=str(run_paths["checkpoint_path"]),
         final_model_path=str(run_paths["final_model_path"]),
-        global_step=global_step,
-        final_train_loss=final_train_loss,
-        final_val_loss=float(final_val_metrics["val_loss"]),
-        final_val_perplexity=float(final_val_metrics["val_perplexity"]),
+        checkpoint_artifact_ref=train_result.checkpoint_artifact_ref,
+        final_model_artifact_ref=train_result.final_model_artifact_ref,
+        global_step=train_result.global_step,
+        final_train_loss=train_result.final_train_loss,
+        final_val_loss=float(train_result.final_val_metrics["val_loss"]),
+        final_val_perplexity=float(train_result.final_val_metrics["val_perplexity"]),
     )

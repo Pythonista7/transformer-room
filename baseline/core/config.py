@@ -236,6 +236,12 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             f"Unsupported logging.provider '{config.logging.provider}'. "
             "Expected one of: console, wandb."
         )
+    if config.logging.provider == "wandb" and (
+        config.run.run_name is None or not config.run.run_name.strip()
+    ):
+        raise ValueError(
+            "logging.provider='wandb' requires run.run_name to be set to a stable value."
+        )
 
     wandb_cfg = config.logging.wandb
     if wandb_cfg.log_every_n_steps <= 0:
