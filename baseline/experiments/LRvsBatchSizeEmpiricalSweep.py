@@ -160,7 +160,7 @@ def build_config(
             dropout=0.1,
         ),
         train=TrainConfig(
-            epochs=3,
+            epochs=5, # we get around 200 steps per run with these settings, so 5 epochs should be enough to see some signal in the results while keeping runtime reasonable.
             learning_rate=learning_rate,
             batch_size=batch_size,
             seq_len=1024,
