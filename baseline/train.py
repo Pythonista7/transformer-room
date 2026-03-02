@@ -841,7 +841,6 @@ def train_loop(
                     )
 
                     if wandb_cfg.enable_train_loss_vs_tokens:
-                        step_metrics["train_loss"] = step_loss
                         step_metrics["train_loss_step"] = step_loss
                         step_metrics["tokens_seen_train"] = float(tokens_seen_train)
 
