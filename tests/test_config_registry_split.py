@@ -90,7 +90,7 @@ class ConfigValidationTests(unittest.TestCase):
 
         self.assertEqual(
             config_a.run.run_name,
-            "p0-LRvsBSz-wikitext2-gpt2-lr0p0001-bs20",
+            "p0-group-LRvsBSz-wikitext2-gpt2-lr0p0001-bs20",
         )
         self.assertEqual(config_a.run.run_name, config_b.run.run_name)
         self.assertNotEqual(config_a.run.group_name, config_b.run.group_name)

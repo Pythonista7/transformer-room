@@ -100,11 +100,11 @@ def _format_lr_slug(learning_rate: float) -> str:
 
 def _build_sweep_group() -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    return f"p0-LRvsBSz-wikitext2_gpt2-sweep-{timestamp}"
+    return f"p0-group-LRvsBSz-wikitext2_gpt2-sweep-{timestamp}"
 
 
 def _build_run_name(learning_rate: float, batch_size: int) -> str:
-    return f"p0-LRvsBSz-wikitext2-gpt2-lr{_format_lr_slug(learning_rate)}-bs{batch_size}"
+    return f"p0-group-LRvsBSz-wikitext2-gpt2-lr{_format_lr_slug(learning_rate)}-bs{batch_size}"
 
 
 def build_config(
@@ -198,7 +198,7 @@ def build_config(
 
 def main() -> int:
     learning_rates = (1e-5, 3e-5, 1e-4, 3e-4, 1e-3)
-    batch_sizes = (20,) # TODO: revisit once we have grad-acc in place.
+    batch_sizes = (12, 20) # TODO: revisit once we have grad-acc in place.
     sweep_group = _build_sweep_group()
 
     print(f"Starting sweep group: {sweep_group}")
