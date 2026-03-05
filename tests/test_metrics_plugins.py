@@ -64,15 +64,19 @@ def _make_schedule(
     *,
     should_log_step_metrics: bool = True,
     should_log_diagnostics: bool = True,
+    should_log_parameter_optimizer_norms: bool | None = None,
     should_log_attention_entropy: bool = True,
     capture_activation_norms: bool = True,
     capture_attention_entropy: bool = True,
     should_log_this_step: bool = True,
     periodic_val_due: bool = True,
 ) -> MetricSchedule:
+    if should_log_parameter_optimizer_norms is None:
+        should_log_parameter_optimizer_norms = should_log_diagnostics
     return MetricSchedule(
         should_log_step_metrics=should_log_step_metrics,
         should_log_diagnostics=should_log_diagnostics,
+        should_log_parameter_optimizer_norms=should_log_parameter_optimizer_norms,
         should_log_attention_entropy=should_log_attention_entropy,
         capture_activation_norms=capture_activation_norms,
         capture_attention_entropy=capture_attention_entropy,
@@ -337,6 +341,124 @@ class ForwardHookMetricsPluginTests(unittest.TestCase):
 
 
 class ParameterOptimizerNormsPluginTests(unittest.TestCase):
+    def _finalize_norm(self, total_sq: torch.Tensor | None) -> float | None:
+        if total_sq is None:
+            return None
+        return float(total_sq.sqrt().item())
+
+    def _expected_metrics_from_reference(
+        self,
+        *,
+        model: _FakeDecoderModel,
+        optimizer: torch.optim.Optimizer,
+        layer_labels: dict[int, list[str]],
+        pre_step_param_snapshot: dict[int, torch.Tensor],
+        pre_step_global_param_norm: float | None,
+    ) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+
+        global_sq: torch.Tensor | None = None
+        for param in model.parameters():
+            if not param.requires_grad:
+                continue
+            term = param.detach().float().pow(2).sum()
+            global_sq = term if global_sq is None else global_sq + term
+        global_param_norm = self._finalize_norm(global_sq)
+        if global_param_norm is not None:
+            metrics["global_param_norm"] = global_param_norm
+
+        dec_layers = model.dec_layers
+        for layer_idx, labels in layer_labels.items():
+            layer_sq: torch.Tensor | None = None
+            for param in dec_layers[layer_idx].parameters():
+                term = param.detach().float().pow(2).sum()
+                layer_sq = term if layer_sq is None else layer_sq + term
+            layer_norm = self._finalize_norm(layer_sq)
+            if layer_norm is None:
+                continue
+            for label in labels:
+                metrics[f"layer_param_norm_{label}"] = layer_norm
+
+        update_sq: torch.Tensor | None = None
+        for param in model.parameters():
+            pre_step = pre_step_param_snapshot.get(id(param))
+            if pre_step is None:
+                continue
+            update = param.detach().float() - pre_step
+            term = update.pow(2).sum()
+            update_sq = term if update_sq is None else update_sq + term
+        update_norm = self._finalize_norm(update_sq)
+        if update_norm is not None:
+            metrics["param_update_norm"] = update_norm
+            if (
+                pre_step_global_param_norm is not None
+                and pre_step_global_param_norm > 0.0
+            ):
+                metrics["update_to_weight_ratio"] = float(update_norm / pre_step_global_param_norm)
+
+        if isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):
+            beta1, beta2 = optimizer.param_groups[0].get("betas", (0.9, 0.999))
+            m_sq: torch.Tensor | None = None
+            v_sq: torch.Tensor | None = None
+            snr_sq: torch.Tensor | None = None
+
+            for state in optimizer.state.values():
+                exp_avg = state.get("exp_avg")
+                exp_avg_sq = state.get("exp_avg_sq")
+                step_val = state.get("step")
+                if not torch.is_tensor(exp_avg) or not torch.is_tensor(exp_avg_sq):
+                    continue
+
+                m_hat = exp_avg.detach().float()
+                v_hat = exp_avg_sq.detach().float()
+                if step_val is not None:
+                    t = float(step_val.item() if torch.is_tensor(step_val) else step_val)
+                    if t > 0.0:
+                        m_hat = m_hat / (1 - beta1**t)
+                        v_hat = v_hat / (1 - beta2**t)
+
+                m_term = m_hat.pow(2).sum()
+                v_term = v_hat.pow(2).sum()
+                snr_term = (m_hat / (v_hat.sqrt() + 1e-8)).pow(2).sum()
+                m_sq = m_term if m_sq is None else m_sq + m_term
+                v_sq = v_term if v_sq is None else v_sq + v_term
+                snr_sq = snr_term if snr_sq is None else snr_sq + snr_term
+
+            m_norm = self._finalize_norm(m_sq)
+            v_norm = self._finalize_norm(v_sq)
+            snr_norm = self._finalize_norm(snr_sq)
+            if m_norm is not None and v_norm is not None:
+                metrics["adam_m_norm"] = m_norm
+                metrics["adam_v_norm"] = v_norm
+                metrics["adam_elemwise_snr_norm"] = float(snr_norm) if snr_norm is not None else 0.0
+
+            for layer_idx, labels in layer_labels.items():
+                layer_v_sq: torch.Tensor | None = None
+                for param in dec_layers[layer_idx].parameters():
+                    state = optimizer.state.get(param)
+                    if not state:
+                        continue
+                    exp_avg_sq = state.get("exp_avg_sq")
+                    step_val = state.get("step")
+                    if not torch.is_tensor(exp_avg_sq):
+                        continue
+
+                    v_hat = exp_avg_sq.detach().float()
+                    if step_val is not None:
+                        t = float(step_val.item() if torch.is_tensor(step_val) else step_val)
+                        if t > 0.0:
+                            v_hat = v_hat / (1 - beta2**t)
+                    term = v_hat.pow(2).sum()
+                    layer_v_sq = term if layer_v_sq is None else layer_v_sq + term
+
+                layer_v_norm = self._finalize_norm(layer_v_sq)
+                if layer_v_norm is None:
+                    continue
+                for label in labels:
+                    metrics[f"layer_estimated_variance_norm_{label}"] = layer_v_norm
+
+        return metrics
+
     def _run_single_optimization_step(
         self,
         *,
@@ -355,6 +477,89 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
 
         plugin.after_optimizer_step(ctx)
         return plugin.collect_step_metrics(ctx)
+
+    def test_exact_metric_values_match_reference_formula(self) -> None:
+        torch.manual_seed(7)
+        model = _FakeDecoderModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        layer_labels = get_decoder_layer_labels(model)
+        plugin = ParameterOptimizerNormsPlugin(
+            wandb_cfg=WandbMetricsConfig(
+                enable_global_param_norm=True,
+                enable_layer_param_norms=True,
+                enable_param_update_norm=True,
+                enable_update_to_weight_ratio=True,
+                enable_optimizer_state_norms=True,
+            ),
+            model=model,
+            optimizer=optimizer,
+            layer_labels=layer_labels,
+        )
+        schedule = _make_schedule(should_log_diagnostics=True)
+        ctx = _step_ctx(schedule)
+
+        plugin.on_step_start(ctx)
+        pre_step_snapshot = {
+            key: value.clone() for key, value in plugin._pre_step_param_snapshot.items()
+        }
+        self.assertTrue(pre_step_snapshot)
+        self.assertTrue(all(value.device.type == "cpu" for value in pre_step_snapshot.values()))
+        pre_step_global_norm = plugin._pre_step_global_param_norm
+
+        optimizer.zero_grad()
+        torch.manual_seed(11)
+        loss = model(torch.randn(2, 4, 8)).pow(2).mean()
+        loss.backward()
+        optimizer.step()
+
+        plugin.after_optimizer_step(ctx)
+        actual = plugin.collect_step_metrics(ctx)
+        expected = self._expected_metrics_from_reference(
+            model=model,
+            optimizer=optimizer,
+            layer_labels=layer_labels,
+            pre_step_param_snapshot=pre_step_snapshot,
+            pre_step_global_param_norm=pre_step_global_norm,
+        )
+
+        self.assertEqual(set(actual.keys()), set(expected.keys()))
+        for key, expected_value in expected.items():
+            self.assertAlmostEqual(actual[key], expected_value, places=5, msg=key)
+
+    def test_clears_snapshot_buffers_after_step_and_train_end(self) -> None:
+        model = _FakeDecoderModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        plugin = ParameterOptimizerNormsPlugin(
+            wandb_cfg=WandbMetricsConfig(
+                enable_param_update_norm=True,
+                enable_update_to_weight_ratio=True,
+            ),
+            model=model,
+            optimizer=optimizer,
+            layer_labels=get_decoder_layer_labels(model),
+        )
+        schedule = _make_schedule(should_log_diagnostics=True)
+        ctx = _step_ctx(schedule)
+
+        plugin.on_step_start(ctx)
+        self.assertTrue(plugin._pre_step_param_snapshot)
+        self.assertIsNotNone(plugin._pre_step_global_param_norm)
+
+        optimizer.zero_grad()
+        loss = model(torch.randn(2, 4, 8)).pow(2).mean()
+        loss.backward()
+        optimizer.step()
+        plugin.after_optimizer_step(ctx)
+
+        self.assertEqual(plugin._pre_step_param_snapshot, {})
+        self.assertIsNone(plugin._pre_step_global_param_norm)
+
+        plugin.on_step_start(ctx)
+        self.assertTrue(plugin._pre_step_param_snapshot)
+        plugin.on_train_end()
+        self.assertEqual(plugin._pre_step_param_snapshot, {})
+        self.assertIsNone(plugin._pre_step_global_param_norm)
+        self.assertEqual(plugin._metrics, {})
 
     def test_emits_param_update_and_layer_norms_when_enabled(self) -> None:
         model = _FakeDecoderModel()

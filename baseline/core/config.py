@@ -114,6 +114,7 @@ class WandbMetricsConfig:
     watch_model: bool = False
     log_every_n_steps: int = 10
     diagnostics_every_n_steps: int = 50
+    parameter_optimizer_norms_every_n_steps: int | None = None
     val_every_n_steps: int = 250
     attention_entropy_every_n_steps: int = 200
     attention_entropy_head_cap: int = 2
@@ -268,6 +269,13 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("logging.wandb.log_every_n_steps must be > 0.")
     if wandb_cfg.diagnostics_every_n_steps <= 0:
         raise ValueError("logging.wandb.diagnostics_every_n_steps must be > 0.")
+    if (
+        wandb_cfg.parameter_optimizer_norms_every_n_steps is not None
+        and wandb_cfg.parameter_optimizer_norms_every_n_steps <= 0
+    ):
+        raise ValueError(
+            "logging.wandb.parameter_optimizer_norms_every_n_steps must be > 0 when set."
+        )
     if wandb_cfg.val_every_n_steps < 0:
         raise ValueError("logging.wandb.val_every_n_steps must be >= 0.")
     if wandb_cfg.attention_entropy_every_n_steps <= 0:

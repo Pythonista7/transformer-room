@@ -34,6 +34,8 @@ This package keeps training metrics modular and logger-agnostic.
 - `layer_estimated_variance_norm_first|middle|last`
 
 `param_update_norm` is computed from pre-step vs post-step parameter snapshots. It is not directly exposed by optimizer state dicts.
+For VRAM safety, heavy parameter/optimizer diagnostics are reduced from CPU snapshots instead of GPU-resident clones.
+Use `parameter_optimizer_norms_every_n_steps` to decouple these heavy metrics from the general diagnostics cadence.
 
 ## Add a New Metric
 

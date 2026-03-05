@@ -4,7 +4,7 @@ Example:
     --shutdown-cmd "sudo shutdown -h now" \
     --log-dir runs/logs \
     --run-name optim-adam-vs-adamw \
-    -- .venv/bin/python baseline/experiments/OptimAdamVsW.py
+    -- python baseline/experiments/OptimAdamVsW.py
 """
 
 from __future__ import annotations

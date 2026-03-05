@@ -161,6 +161,7 @@ logging=LoggingConfig(
         watch_model=False,
         log_every_n_steps=10,
         diagnostics_every_n_steps=50,
+        parameter_optimizer_norms_every_n_steps=None,  # defaults to diagnostics cadence
         val_every_n_steps=250,
         attention_entropy_every_n_steps=200,
         attention_entropy_head_cap=2,

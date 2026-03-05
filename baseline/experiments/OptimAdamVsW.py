@@ -196,6 +196,7 @@ def build_config(
                 watch_model=True,
                 log_every_n_steps=10,
                 diagnostics_every_n_steps=50,
+                parameter_optimizer_norms_every_n_steps=100,
                 val_every_n_steps=250,
                 attention_entropy_every_n_steps=200,
                 attention_entropy_head_cap=2,

@@ -108,6 +108,19 @@ class ConfigValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "val_every_n_steps must be >= 0"):
             validate_experiment_config(config)
 
+    def test_invalid_wandb_param_optimizer_norms_every_n_steps_fails(self) -> None:
+        config = make_config()
+        config.run.run_name = "wandb-validation-run"
+        config.logging = LoggingConfig(
+            provider="wandb",
+            wandb=WandbMetricsConfig(parameter_optimizer_norms_every_n_steps=0),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "parameter_optimizer_norms_every_n_steps must be > 0",
+        ):
+            validate_experiment_config(config)
+
     def test_wandb_requires_run_name(self) -> None:
         config = make_config()
         config.logging = LoggingConfig(provider="wandb")

@@ -185,6 +185,7 @@ def build_config() -> ExperimentConfig:
                 watch_model=False,
                 log_every_n_steps=10,
                 diagnostics_every_n_steps=50,
+                parameter_optimizer_norms_every_n_steps=None,  # defaults to diagnostics cadence
                 val_every_n_steps=250,
                 attention_entropy_every_n_steps=200,
                 attention_entropy_head_cap=2,
@@ -304,6 +305,7 @@ This keeps W&B staging traffic off small default system volumes.
 
 - `log_every_n_steps`: cadence for step metrics (loss/tokens/perplexity/time/memory)
 - `diagnostics_every_n_steps`: cadence for grad/activation/LN diagnostics
+- `parameter_optimizer_norms_every_n_steps`: cadence override for parameter/optimizer norm metrics (defaults to `diagnostics_every_n_steps` when omitted)
 - `val_every_n_steps`: periodic validation cadence (`0` disables periodic val; epoch-end val remains)
 - `attention_entropy_every_n_steps`: cadence for entropy collection
 - `attention_entropy_head_cap`: number of heads sampled for entropy
