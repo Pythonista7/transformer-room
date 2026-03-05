@@ -15,6 +15,7 @@ from baseline.config import (
     HoldoutSplitConfig,
     LocalTextDatasetConfig,
     LoggingConfig,
+    OptimizerConfig,
     RunConfig,
     TrainConfig,
     WandbMetricsConfig,
@@ -162,7 +163,7 @@ def make_wandb_config(tmp_path: Path, *, run_name: str, resume_from_checkpoint: 
         model=BaselineDecoderConfig(d_model=32, n_heads=4, layers=1),
         train=TrainConfig(
             epochs=1,
-            learning_rate=1e-3,
+            optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
             batch_size=4,
             seq_len=16,
             stride=16,
@@ -202,7 +203,11 @@ def build_checkpoint_payload(config: ExperimentConfig) -> dict[str, Any]:
         vocab=vocab,
         special=special,
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.train.learning_rate)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config.train.optimizer.learning_rate,
+        weight_decay=config.train.optimizer.weight_decay,
+    )
     return {
         "epoch": 1,
         "batch_idx": 0,

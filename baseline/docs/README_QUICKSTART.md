@@ -21,6 +21,7 @@ from baseline.config import (
     LocalTextDatasetConfig,
     BPETokenizerConfig,
     BaselineDecoderConfig,
+    OptimizerConfig,
     TrainConfig,
     HoldoutSplitConfig,
     LoggingConfig,
@@ -53,7 +54,11 @@ def build_config() -> ExperimentConfig:
         ),
         train=TrainConfig(
             epochs=1,
-            learning_rate=1e-3,
+            optimizer=OptimizerConfig(
+                name="adamw",
+                learning_rate=1e-3,
+                weight_decay=1e-2,
+            ),
             batch_size=128,
             seq_len=128,
             stride=128,
@@ -119,6 +124,8 @@ For `LoggingConfig(provider="wandb", ...)` runs:
   - For W&B runs, set a stable `run.run_name` such as `wikitext2-gpt2-lr1e-4-bs20`
 - Model size:
   - `d_model`, `n_heads`, `layers`
+- Optimizer:
+  - `OptimizerConfig(name="adam" | "adamw" | "sgd", learning_rate=..., weight_decay=...)`
 - Tokenizer size:
   - `base_vocab_size`
 

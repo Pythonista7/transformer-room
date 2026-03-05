@@ -12,6 +12,7 @@ from baseline.config import (
     HoldoutSplitConfig,
     LocalTextDatasetConfig,
     LoggingConfig,
+    OptimizerConfig,
     RunConfig,
     TrainConfig,
     WandbMetricsConfig,
@@ -146,7 +147,7 @@ def _make_config(
         model=BaselineDecoderConfig(d_model=32, n_heads=4, layers=3),
         train=TrainConfig(
             epochs=1,
-            learning_rate=1e-3,
+            optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
             batch_size=4,
             seq_len=16,
             stride=16,

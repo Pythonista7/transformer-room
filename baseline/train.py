@@ -157,6 +157,27 @@ def get_autocast_context(device: torch.device, use_bf16: bool):
     return nullcontext()
 
 
+def build_optimizer(
+    model: torch.nn.Module,
+    config: ExperimentConfig,
+) -> optim.Optimizer:
+    optimizer_cfg = config.train.optimizer
+    optimizer_kwargs = {
+        "lr": optimizer_cfg.learning_rate,
+        "weight_decay": optimizer_cfg.weight_decay,
+    }
+    if optimizer_cfg.name == "adam":
+        return optim.Adam(model.parameters(), **optimizer_kwargs)
+    if optimizer_cfg.name == "adamw":
+        return optim.AdamW(model.parameters(), **optimizer_kwargs)
+    if optimizer_cfg.name == "sgd":
+        return optim.SGD(model.parameters(), **optimizer_kwargs)
+    raise ValueError(
+        f"Unsupported train.optimizer.name '{optimizer_cfg.name}'. "
+        "Expected one of: adam, adamw, sgd."
+    )
+
+
 def truncate_stream_by_fraction_at_eos(
     token_stream: list[int], data_fraction: float, eos_id: int
 ) -> list[int]:
@@ -1020,7 +1041,7 @@ def model_pipeline(config: ExperimentConfig) -> RunResult:
     print(f"Model parameters: {param_count:,}")
 
     model = model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=config.train.learning_rate)
+    optimizer = build_optimizer(model, config)
     loss_fn = CrossEntropyLoss(ignore_index=tokenized.vocab.special.pad_id, reduction="sum")
 
     logger = logger_adapter.start(

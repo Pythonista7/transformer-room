@@ -12,6 +12,7 @@ from baseline.config import (
     HoldoutSplitConfig,
     LocalTextDatasetConfig,
     LoggingConfig,
+    OptimizerConfig,
     RunConfig,
     TrainConfig,
     WandbMetricsConfig,
@@ -38,7 +39,13 @@ def make_config() -> ExperimentConfig:
         dataset=LocalTextDatasetConfig(path="/tmp/dataset.txt"),
         tokenizer=BPETokenizerConfig(vocab_path="/tmp/vocab.txt"),
         model=BaselineDecoderConfig(d_model=32, n_heads=4, layers=1),
-        train=TrainConfig(epochs=1, learning_rate=1e-3, batch_size=4, seq_len=16, stride=16),
+        train=TrainConfig(
+            epochs=1,
+            optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
+            batch_size=4,
+            seq_len=16,
+            stride=16,
+        ),
         split=HoldoutSplitConfig(train_fraction=0.9, seed=42, shuffle=True),
         logging=LoggingConfig(provider="console"),
     )
@@ -55,6 +62,30 @@ class ConfigValidationTests(unittest.TestCase):
         config = make_config()
         config.tokenizer.num_special_tokens = 1
         with self.assertRaisesRegex(ValueError, "at least 2 special tokens"):
+            validate_experiment_config(config)
+
+    def test_invalid_optimizer_weight_decay_fails(self) -> None:
+        config = make_config()
+        config.train.optimizer.weight_decay = -0.1
+        with self.assertRaisesRegex(
+            ValueError,
+            "train.optimizer.weight_decay must be >= 0",
+        ):
+            validate_experiment_config(config)
+
+    def test_supported_optimizer_names_pass_validation(self) -> None:
+        for optimizer_name in ("adam", "adamw", "sgd"):
+            config = make_config()
+            config.train.optimizer.name = optimizer_name
+            validate_experiment_config(config)
+
+    def test_invalid_optimizer_name_fails(self) -> None:
+        config = make_config()
+        config.train.optimizer.name = "rmsprop"  # type: ignore[assignment]
+        with self.assertRaisesRegex(
+            ValueError,
+            "Expected one of: adam, adamw, sgd",
+        ):
             validate_experiment_config(config)
 
     def test_invalid_wandb_log_every_n_steps_fails(self) -> None:

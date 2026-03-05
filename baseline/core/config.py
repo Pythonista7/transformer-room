@@ -68,9 +68,16 @@ ModelConfig = BaselineDecoderConfig
 
 
 @dataclass(slots=True)
+class OptimizerConfig:
+    name: Literal["adam", "adamw", "sgd"] = "adam"
+    learning_rate: float = 0.001
+    weight_decay: float = 0.0
+
+
+@dataclass(slots=True)
 class TrainConfig:
     epochs: int = 3
-    learning_rate: float = 0.001
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     batch_size: int = 256
     seq_len: int = 128
     stride: int = 128
@@ -213,8 +220,16 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
 
     if config.train.epochs <= 0:
         raise ValueError("train.epochs must be > 0.")
-    if config.train.learning_rate <= 0:
-        raise ValueError("train.learning_rate must be > 0.")
+    supported_optimizers = {"adam", "adamw", "sgd"}
+    if config.train.optimizer.name not in supported_optimizers:
+        raise ValueError(
+            f"Unsupported train.optimizer.name '{config.train.optimizer.name}'. "
+            "Expected one of: adam, adamw, sgd."
+        )
+    if config.train.optimizer.learning_rate <= 0:
+        raise ValueError("train.optimizer.learning_rate must be > 0.")
+    if config.train.optimizer.weight_decay < 0:
+        raise ValueError("train.optimizer.weight_decay must be >= 0.")
     if config.train.batch_size <= 0:
         raise ValueError("train.batch_size must be > 0.")
     if config.train.seq_len <= 0:

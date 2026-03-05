@@ -11,6 +11,7 @@ from baseline.config import (
     HoldoutSplitConfig,
     LocalTextDatasetConfig,
     LoggingConfig,
+    OptimizerConfig,
     RunConfig,
     TrainConfig,
 )
@@ -50,7 +51,11 @@ class PipelineSmokeTests(unittest.TestCase):
                 model=BaselineDecoderConfig(d_model=32, n_heads=4, layers=1),
                 train=TrainConfig(
                     epochs=1,
-                    learning_rate=1e-3,
+                    optimizer=OptimizerConfig(
+                        name="adamw",
+                        learning_rate=1e-3,
+                        weight_decay=1e-2,
+                    ),
                     batch_size=8,
                     seq_len=16,
                     stride=16,

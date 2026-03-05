@@ -19,6 +19,7 @@ from baseline.config import (
     HoldoutSplitConfig,
     HFTextDatasetConfig,
     LoggingConfig,
+    OptimizerConfig,
     RunConfig,
     TrainConfig,
     WandbMetricsConfig,
@@ -161,7 +162,10 @@ def build_config(
         ),
         train=TrainConfig(
             epochs=5, # we get around 200 steps per run with these settings, so 5 epochs should be enough to see some signal in the results while keeping runtime reasonable.
-            learning_rate=learning_rate,
+            optimizer=OptimizerConfig(
+                learning_rate=learning_rate,
+                weight_decay=0.0,
+            ),
             batch_size=batch_size,
             seq_len=1024,
             stride=1024,

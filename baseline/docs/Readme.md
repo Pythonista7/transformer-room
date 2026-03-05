@@ -121,6 +121,7 @@ from baseline.config import (
     LocalTextDatasetConfig,
     BPETokenizerConfig,
     BaselineDecoderConfig,
+    OptimizerConfig,
     TrainConfig,
     HoldoutSplitConfig,
     LoggingConfig,
@@ -154,7 +155,11 @@ def build_config() -> ExperimentConfig:
         ),
         train=TrainConfig(
             epochs=3,
-            learning_rate=1e-3,
+            optimizer=OptimizerConfig(
+                name="adamw",
+                learning_rate=1e-3,
+                weight_decay=1e-2,
+            ),
             batch_size=256,
             seq_len=128,
             stride=128,
@@ -210,6 +215,8 @@ Most experiment changes should be config-only:
   - `base_vocab_size`, `vocab_path`, `num_special_tokens`
 - Change model params:
   - `d_model`, `n_heads`, `layers`
+- Change optimizer:
+  - `OptimizerConfig(name="adam" | "adamw" | "sgd", learning_rate=..., weight_decay=...)`
 - Change logging:
   - `LoggingConfig(provider="console")`
   - `LoggingConfig(provider="wandb", wandb=WandbMetricsConfig(...))`

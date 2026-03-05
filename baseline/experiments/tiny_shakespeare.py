@@ -14,6 +14,7 @@ from baseline.config import (
     HoldoutSplitConfig,
     LocalTextDatasetConfig,
     LoggingConfig,
+    OptimizerConfig,
     RunConfig,
     TrainConfig,
 )
@@ -55,7 +56,7 @@ def build_config() -> ExperimentConfig:
         ),
         train=TrainConfig(
             epochs=3,
-            learning_rate=0.001,
+            optimizer=OptimizerConfig(learning_rate=0.001, weight_decay=0.0),
             batch_size=256,
             seq_len=128,
             stride=128,
