@@ -1,7 +1,7 @@
 """
 Example:
   .venv/bin/python baseline/utils/run_and_shutdown.py \
-    --shutdown-cmd "sudo shutdown -h now" \
+    --shutdown-provider vast \
     --log-dir runs/logs \
     --run-name optim-adam-vs-adamw \
     -- python baseline/experiments/OptimAdamVsW.py
@@ -22,6 +22,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from baseline.utils.vast import (
+    resolve_vast_api_key,
+    resolve_vast_instance_id,
+    stop_vast_instance,
+)
 
 DEFAULT_PYTORCH_ALLOC_CONF = "expandable_segments:True"
 
@@ -90,13 +100,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run an experiment command, tee stdout/stderr to a log file, "
-            "persist metadata, then run a shutdown command."
+            "persist metadata, then stop the backing instance."
         )
     )
     parser.add_argument(
         "--shutdown-cmd",
-        required=True,
+        default=None,
         help="Shell command to execute after the experiment process exits.",
+    )
+    parser.add_argument(
+        "--shutdown-provider",
+        choices=("auto", "command", "vast"),
+        default="auto",
+        help=(
+            "How to stop the backing instance after the child exits. "
+            "'auto' uses --shutdown-cmd when provided, otherwise Vast in-container "
+            "shutdown when Vast env vars are available."
+        ),
     )
     parser.add_argument(
         "--log-dir",
@@ -136,6 +156,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("missing command after '--'")
     if args.shutdown_timeout_sec <= 0:
         parser.error("--shutdown-timeout-sec must be > 0")
+    if args.shutdown_provider == "command" and not args.shutdown_cmd:
+        parser.error("--shutdown-cmd is required when --shutdown-provider=command")
+    if args.shutdown_provider == "vast" and args.shutdown_cmd:
+        parser.error("--shutdown-cmd cannot be used when --shutdown-provider=vast")
 
     args.command = command
     return args
@@ -160,10 +184,47 @@ def _forward_signal_to_child(signum: int, child: subprocess.Popen[str] | None) -
         return
 
 
+def _prompt_for_secret(*, env_key: str, tee: _Tee) -> str:
+    tee.write_message(f"[wrapper] {env_key} is not set; prompting for input.")
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            f"{env_key} is not set and no interactive TTY is available. "
+            f"Set {env_key} in your environment or pass --set-env {env_key}=..."
+        )
+
+    while True:
+        entered = getpass.getpass(f"Enter {env_key}: ").strip()
+        if entered:
+            return entered
+        print(f"{env_key} cannot be empty.", file=sys.stderr)
+
+
+def _resolve_shutdown_provider(
+    *,
+    requested_provider: str,
+    shutdown_cmd: str | None,
+    vast_instance_id: int | None,
+) -> str:
+    if requested_provider == "command":
+        return "command"
+    if requested_provider == "vast":
+        return "vast"
+    if shutdown_cmd:
+        return "command"
+    if vast_instance_id is not None:
+        return "vast"
+    raise RuntimeError(
+        "Unable to resolve shutdown provider automatically. "
+        "Provide --shutdown-cmd or run inside Vast with CONTAINER_ID/VAST_CONTAINERLABEL."
+    )
+
+
 def _prepare_child_env(
     *,
     extra_env: list[tuple[str, str]],
     tee: _Tee,
+    requested_shutdown_provider: str,
+    shutdown_cmd: str | None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     env = dict(os.environ)
     extra_env_keys: set[str] = set()
@@ -177,6 +238,11 @@ def _prepare_child_env(
         "pytorch_alloc_conf": None,
         "wandb_api_key_set": False,
         "wandb_api_key_source": None,
+        "shutdown_provider": None,
+        "vast_api_key_set": False,
+        "vast_api_key_source": None,
+        "vast_instance_id": None,
+        "vast_instance_id_source": None,
     }
 
     alloc_conf = env.get("PYTORCH_ALLOC_CONF", "").strip()
@@ -195,23 +261,51 @@ def _prepare_child_env(
         env_summary["wandb_api_key_source"] = (
             "cli" if "WANDB_API_KEY" in extra_env_keys else "existing"
         )
+    else:
+        env["WANDB_API_KEY"] = _prompt_for_secret(env_key="WANDB_API_KEY", tee=tee)
+        env_summary["wandb_api_key_set"] = True
+        env_summary["wandb_api_key_source"] = "prompted"
+
+    vast_instance_id: int | None = None
+    vast_instance_id_source: str | None = None
+    try:
+        vast_instance_id, vast_instance_id_source = resolve_vast_instance_id(env)
+    except ValueError as exc:
+        if requested_shutdown_provider == "vast" or (
+            requested_shutdown_provider == "auto" and not shutdown_cmd
+        ):
+            raise RuntimeError(str(exc)) from exc
+    env_summary["vast_instance_id"] = vast_instance_id
+    env_summary["vast_instance_id_source"] = vast_instance_id_source
+    if vast_instance_id is not None and "CONTAINER_ID" not in env:
+        env["CONTAINER_ID"] = str(vast_instance_id)
+
+    shutdown_provider = _resolve_shutdown_provider(
+        requested_provider=requested_shutdown_provider,
+        shutdown_cmd=shutdown_cmd,
+        vast_instance_id=vast_instance_id,
+    )
+    env_summary["shutdown_provider"] = shutdown_provider
+
+    if shutdown_provider != "vast":
         return env, env_summary
 
-    tee.write_message("[wrapper] WANDB_API_KEY is not set; prompting for input.")
-    if not sys.stdin.isatty():
+    if vast_instance_id is None:
         raise RuntimeError(
-            "WANDB_API_KEY is not set and no interactive TTY is available. "
-            "Set WANDB_API_KEY in your environment or pass --set-env WANDB_API_KEY=..."
+            "Vast shutdown requested but CONTAINER_ID/VAST_CONTAINERLABEL is not set."
         )
 
-    while True:
-        entered = getpass.getpass("Enter WANDB_API_KEY: ").strip()
-        if entered:
-            env["WANDB_API_KEY"] = entered
-            env_summary["wandb_api_key_set"] = True
-            env_summary["wandb_api_key_source"] = "prompted"
-            return env, env_summary
-        print("WANDB_API_KEY cannot be empty.", file=sys.stderr)
+    vast_api_key, vast_api_key_source = resolve_vast_api_key(env)
+    if not vast_api_key:
+        vast_api_key = _prompt_for_secret(env_key="VAST_API_KEY", tee=tee)
+        env["VAST_API_KEY"] = vast_api_key
+        vast_api_key_source = "prompted"
+
+    env_summary["vast_api_key_set"] = True
+    env_summary["vast_api_key_source"] = (
+        "cli" if vast_api_key_source in extra_env_keys else vast_api_key_source
+    )
+    return env, env_summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -245,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         "received_signals": [],
         "env": {},
         "shutdown": {
+            "provider": None,
             "command": args.shutdown_cmd,
             "attempted": False,
             "timeout_sec": float(args.shutdown_timeout_sec),
@@ -253,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
             "duration_sec": None,
             "return_code": None,
             "error": None,
+            "response": None,
+            "vast_instance_id": None,
         },
     }
 
@@ -281,13 +378,18 @@ def main(argv: list[str] | None = None) -> int:
                 child_env, env_summary = _prepare_child_env(
                     extra_env=list(args.set_env),
                     tee=tee,
+                    requested_shutdown_provider=args.shutdown_provider,
+                    shutdown_cmd=args.shutdown_cmd,
                 )
                 metadata["env"] = env_summary
+                metadata["shutdown"]["provider"] = env_summary["shutdown_provider"]
+                metadata["shutdown"]["vast_instance_id"] = env_summary["vast_instance_id"]
                 tee.write_message(
                     "[wrapper] env prepared | "
                     f"PYTORCH_ALLOC_CONF={env_summary['pytorch_alloc_conf']} "
                     f"({env_summary['pytorch_alloc_conf_source']}) | "
-                    f"WANDB_API_KEY source={env_summary['wandb_api_key_source']}"
+                    f"WANDB_API_KEY source={env_summary['wandb_api_key_source']} | "
+                    f"shutdown_provider={env_summary['shutdown_provider']}"
                 )
             except RuntimeError as exc:
                 metadata["env"] = {"error": str(exc)}
@@ -346,35 +448,57 @@ def main(argv: list[str] | None = None) -> int:
                 shutdown_meta["attempted"] = True
                 shutdown_start = _utc_now()
                 shutdown_meta["start_time_utc"] = _utc_iso(shutdown_start)
-                tee.write_message("[wrapper] running shutdown command")
-                tee.write_message(
-                    f"[wrapper] shutdown_cmd={args.shutdown_cmd} | timeout={args.shutdown_timeout_sec}s"
-                )
+                tee.write_message("[wrapper] running shutdown step")
+                if shutdown_meta["provider"] == "command":
+                    tee.write_message(
+                        f"[wrapper] shutdown_cmd={args.shutdown_cmd} | timeout={args.shutdown_timeout_sec}s"
+                    )
+                else:
+                    tee.write_message(
+                        f"[wrapper] vast_instance_id={shutdown_meta['vast_instance_id']}"
+                    )
 
                 try:
-                    shutdown_result = subprocess.run(
-                        args.shutdown_cmd,
-                        shell=True,
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=float(args.shutdown_timeout_sec),
-                    )
-                    shutdown_meta["return_code"] = int(shutdown_result.returncode)
-                    if shutdown_result.stdout:
-                        tee.write_message("[wrapper] shutdown stdout:")
-                        for line in shutdown_result.stdout.splitlines():
-                            tee.write_message(f"[shutdown][stdout] {line}")
-                    if shutdown_result.stderr:
-                        tee.write_message("[wrapper] shutdown stderr:")
-                        for line in shutdown_result.stderr.splitlines():
-                            tee.write_message(f"[shutdown][stderr] {line}")
-                    if shutdown_result.returncode != 0:
-                        shutdown_meta["error"] = (
-                            f"shutdown command exited with code {shutdown_result.returncode}"
+                    if shutdown_meta["provider"] == "command":
+                        shutdown_result = subprocess.run(
+                            args.shutdown_cmd,
+                            shell=True,
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=float(args.shutdown_timeout_sec),
                         )
+                        shutdown_meta["return_code"] = int(shutdown_result.returncode)
+                        if shutdown_result.stdout:
+                            tee.write_message("[wrapper] shutdown stdout:")
+                            for line in shutdown_result.stdout.splitlines():
+                                tee.write_message(f"[shutdown][stdout] {line}")
+                        if shutdown_result.stderr:
+                            tee.write_message("[wrapper] shutdown stderr:")
+                            for line in shutdown_result.stderr.splitlines():
+                                tee.write_message(f"[shutdown][stderr] {line}")
+                        if shutdown_result.returncode != 0:
+                            shutdown_meta["error"] = (
+                                f"shutdown command exited with code {shutdown_result.returncode}"
+                            )
+                            tee.write_message(
+                                f"[wrapper] shutdown command failed with code {shutdown_result.returncode}"
+                            )
+                    else:
+                        response = stop_vast_instance(
+                            instance_id=int(shutdown_meta["vast_instance_id"]),
+                            api_key=str(
+                                child_env.get("CONTAINER_API_KEY")
+                                or child_env.get("VAST_API_KEY")
+                                or ""
+                            ),
+                        )
+                        shutdown_meta["return_code"] = 0
+                        shutdown_meta["response"] = response
+                        tee.write_message("[wrapper] Vast stop_instance completed")
                         tee.write_message(
-                            f"[wrapper] shutdown command failed with code {shutdown_result.returncode}"
+                            "[shutdown][vast] "
+                            + json.dumps(response, sort_keys=True)
                         )
                 except subprocess.TimeoutExpired as exc:
                     shutdown_meta["error"] = (
@@ -389,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
                             tee.write_message(f"[shutdown][stderr] {line}")
                 except Exception as exc:  # pragma: no cover - defensive path.
                     shutdown_meta["error"] = str(exc)
-                    tee.write_message(f"[wrapper] shutdown command raised: {exc}")
+                    tee.write_message(f"[wrapper] shutdown step raised: {exc}")
                 finally:
                     shutdown_end = _utc_now()
                     shutdown_meta["end_time_utc"] = _utc_iso(shutdown_end)
