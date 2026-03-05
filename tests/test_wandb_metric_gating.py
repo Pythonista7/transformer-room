@@ -195,10 +195,13 @@ class WandbMetricGatingTests(unittest.TestCase):
             session = self.recording_adapter.sessions[-1]
 
             keys = _flatten_logged_keys(session)
-            self.assertNotIn("train_loss", keys)
+            self.assertIn("train_loss_epoch", keys)
+            self.assertNotIn("train_loss_step", keys)
             self.assertNotIn("tokens_seen_train", keys)
             self.assertNotIn("val_loss", keys)
             self.assertNotIn("val_perplexity", keys)
+            self.assertNotIn("train_perplexity", keys)
+            self.assertNotIn("train_perplexity_epoch", keys)
             self.assertNotIn("global_grad_norm", keys)
             self.assertNotIn("activation_norm_first", keys)
             self.assertNotIn("ln_weight_grad_norm_first", keys)
@@ -233,10 +236,12 @@ class WandbMetricGatingTests(unittest.TestCase):
             session = self.recording_adapter.sessions[-1]
 
             keys = _flatten_logged_keys(session)
-            self.assertIn("train_loss", keys)
+            self.assertIn("train_loss_step", keys)
+            self.assertIn("train_loss_epoch", keys)
             self.assertIn("tokens_seen_train", keys)
             self.assertIn("val_loss", keys)
             self.assertIn("train_perplexity", keys)
+            self.assertIn("train_perplexity_epoch", keys)
             self.assertIn("val_perplexity", keys)
             self.assertIn("step_time_ms", keys)
             self.assertIn("global_grad_norm", keys)
@@ -257,6 +262,70 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertTrue(Path(cfg.run.artifacts_root, "wandb-gating-test-run", "run_config.json").exists())
             self.assertTrue(
                 Path(cfg.run.artifacts_root, "wandb-gating-test-run", "inference_config.json").exists()
+            )
+
+    def test_metric_payload_parity_snapshot_across_step_periodic_and_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                wandb_cfg=WandbMetricsConfig(
+                    enable_train_loss_vs_tokens=True,
+                    enable_val_loss_vs_tokens=True,
+                    enable_perplexity=True,
+                    enable_step_time=False,
+                    enable_peak_memory=False,
+                    enable_global_grad_norm=True,
+                    enable_activation_norms=True,
+                    enable_ln_grad_norms=True,
+                    enable_attention_entropy=True,
+                    log_every_n_steps=1,
+                    diagnostics_every_n_steps=1,
+                    val_every_n_steps=1,
+                    attention_entropy_every_n_steps=1,
+                    attention_entropy_head_cap=1,
+                    attention_entropy_token_cap=8,
+                ),
+                watch_model=False,
+            )
+            model_pipeline(cfg)
+            session = self.recording_adapter.sessions[-1]
+
+            payloads = [payload for _, payload in session.logged]
+
+            expected_step_subset = {
+                "epoch",
+                "train_loss_step",
+                "tokens_seen_train",
+                "train_perplexity",
+                "global_grad_norm",
+                "activation_norm_first",
+                "ln_weight_grad_norm_first",
+                "ln_bias_grad_norm_first",
+                "attention_entropy_first",
+            }
+            expected_periodic_val_subset = {
+                "epoch",
+                "val_loss",
+                "val_perplexity",
+                "tokens_seen_train",
+            }
+            expected_epoch_subset = {
+                "epoch",
+                "train_loss_epoch",
+                "val_loss",
+                "val_perplexity",
+                "train_perplexity_epoch",
+                "tokens_seen_train",
+            }
+
+            self.assertTrue(
+                any(expected_step_subset.issubset(set(payload.keys())) for payload in payloads)
+            )
+            self.assertTrue(
+                any(expected_periodic_val_subset.issubset(set(payload.keys())) for payload in payloads)
+            )
+            self.assertTrue(
+                any(expected_epoch_subset.issubset(set(payload.keys())) for payload in payloads)
             )
 
 

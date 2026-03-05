@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import json
-import math
 import random
 import sys
-import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
 import torch
@@ -31,6 +29,18 @@ from .core.registry import (
     get_tokenizer_adapter,
 )
 from .core.types import RunResult, TokenizedCorpus
+from .training.metrics import (
+    EpochMetricsContext,
+    MetricsEngine,
+    PeriodicValMetricsContext,
+    StepMetricsContext,
+    build_default_metric_plugins,
+    build_metric_schedule,
+    get_decoder_layer_labels,
+)
+
+if TYPE_CHECKING:
+    from .training.metrics import MetricPlugin
 
 
 @dataclass(slots=True)
@@ -496,159 +506,6 @@ def evaluate(
     }
 
 
-class ForwardMetricCollector:
-    def __init__(self) -> None:
-        self.capture_activation_norms = False
-        self.capture_attention_entropy = False
-        self.activation_norms: dict[str, torch.Tensor] = {}
-        self.attention_entropy: dict[str, torch.Tensor] = {}
-
-    def begin_step(
-        self,
-        *,
-        capture_activation_norms: bool,
-        capture_attention_entropy: bool,
-    ) -> None:
-        self.capture_activation_norms = capture_activation_norms
-        self.capture_attention_entropy = capture_attention_entropy
-        self.activation_norms.clear()
-        self.attention_entropy.clear()
-
-    def take_metrics(self) -> dict[str, float]:
-        metrics: dict[str, float] = {}
-        for key, value in self.activation_norms.items():
-            metrics[key] = float(value.item())
-        for key, value in self.attention_entropy.items():
-            metrics[key] = float(value.item())
-        self.activation_norms.clear()
-        self.attention_entropy.clear()
-        return metrics
-
-
-def get_decoder_layer_labels(model: torch.nn.Module) -> dict[int, list[str]]:
-    dec_layers = getattr(model, "dec_layers", None)
-    if dec_layers is None:
-        return {}
-
-    layer_count = len(dec_layers)
-    if layer_count <= 0:
-        return {}
-
-    selected = [
-        ("first", 0),
-        ("middle", layer_count // 2),
-        ("last", layer_count - 1),
-    ]
-
-    layer_labels: dict[int, list[str]] = {}
-    for label, idx in selected:
-        layer_labels.setdefault(idx, []).append(label)
-    return layer_labels
-
-
-def register_forward_metric_hooks(
-    model: torch.nn.Module,
-    collector: ForwardMetricCollector,
-    layer_labels: dict[int, list[str]],
-    attention_head_cap: int,
-    attention_token_cap: int,
-) -> list[torch.utils.hooks.RemovableHandle]:
-    handles: list[torch.utils.hooks.RemovableHandle] = []
-    dec_layers = getattr(model, "dec_layers", None)
-    if dec_layers is None:
-        return handles
-
-    for layer_idx, labels in layer_labels.items():
-        layer = dec_layers[layer_idx]
-        label_tuple = tuple(labels)
-
-        def activation_hook(_module, _inputs, output, label_tuple=label_tuple):
-            if not collector.capture_activation_norms:
-                return
-            if not torch.is_tensor(output):
-                return
-            activation_norm = output.detach().float().pow(2).mean().sqrt()
-            for label in label_tuple:
-                collector.activation_norms[f"activation_norm_{label}"] = activation_norm
-
-        handles.append(layer.register_forward_hook(activation_hook))
-
-        attn = getattr(layer, "multi_head_attention", None)
-        softmax_module = getattr(attn, "softmax", None)
-        if softmax_module is None:
-            continue
-
-        def attention_entropy_hook(_module, _inputs, output, label_tuple=label_tuple):
-            if not collector.capture_attention_entropy:
-                return
-            if not torch.is_tensor(output) or output.dim() != 4:
-                return
-
-            _, heads, query_len, key_len = output.shape
-            sampled_heads = min(attention_head_cap, heads)
-            sampled_tokens = min(attention_token_cap, query_len, key_len)
-            if sampled_heads <= 0 or sampled_tokens <= 0:
-                return
-
-            probs = output[:, :sampled_heads, :sampled_tokens, :sampled_tokens].detach().float()
-            probs = probs.clamp_min(1e-12)
-            entropy = -(probs * probs.log()).sum(dim=-1).mean()
-            for label in label_tuple:
-                collector.attention_entropy[f"attention_entropy_{label}"] = entropy
-
-        handles.append(softmax_module.register_forward_hook(attention_entropy_hook))
-
-    return handles
-
-
-def compute_global_grad_norm(model: torch.nn.Module) -> float | None:
-    grad_norm_sq: torch.Tensor | None = None
-    for param in model.parameters():
-        if param.grad is None:
-            continue
-        grad_sq = param.grad.detach().float().pow(2).sum()
-        grad_norm_sq = grad_sq if grad_norm_sq is None else grad_norm_sq + grad_sq
-
-    if grad_norm_sq is None:
-        return None
-    return float(grad_norm_sq.sqrt().item())
-
-
-def compute_layernorm_grad_norms(
-    model: torch.nn.Module,
-    layer_labels: dict[int, list[str]],
-) -> dict[str, float]:
-    dec_layers = getattr(model, "dec_layers", None)
-    if dec_layers is None:
-        return {}
-
-    metrics: dict[str, float] = {}
-    for layer_idx, labels in layer_labels.items():
-        layer = dec_layers[layer_idx]
-
-        weight_sq: torch.Tensor | None = None
-        for grad in (layer.ln1.gamma.grad, layer.ln2.gamma.grad):
-            if grad is None:
-                continue
-            grad_sq = grad.detach().float().pow(2).sum()
-            weight_sq = grad_sq if weight_sq is None else weight_sq + grad_sq
-
-        bias_sq: torch.Tensor | None = None
-        for grad in (layer.ln1.beta.grad, layer.ln2.beta.grad):
-            if grad is None:
-                continue
-            grad_sq = grad.detach().float().pow(2).sum()
-            bias_sq = grad_sq if bias_sq is None else bias_sq + grad_sq
-
-        for label in labels:
-            if weight_sq is not None:
-                metrics[f"ln_weight_grad_norm_{label}"] = float(weight_sq.sqrt().item())
-            if bias_sq is not None:
-                metrics[f"ln_bias_grad_norm_{label}"] = float(bias_sq.sqrt().item())
-
-    return metrics
-
-
 def train_loop(
     model: torch.nn.Module,
     train_loader: DataLoader,
@@ -660,23 +517,32 @@ def train_loop(
     device: torch.device,
     use_bf16: bool,
     run_paths: dict[str, Path],
+    *,
+    extra_metric_plugins: Sequence[MetricPlugin] | None = None,
+    metrics_debug_timing: bool = False,
 ) -> TrainLoopResult:
     checkpoint_model = get_uncompiled_model(model)
     pad_id = int(loss_fn.ignore_index)
     wandb_cfg = config.logging.wandb
     wandb_enabled = config.logging.provider == "wandb"
-    has_decoder_layers = bool(getattr(checkpoint_model, "dec_layers", None))
-    layer_labels = get_decoder_layer_labels(checkpoint_model) if has_decoder_layers else {}
-    metric_collector = ForwardMetricCollector()
+    layer_labels = get_decoder_layer_labels(checkpoint_model)
+    metrics_engine = MetricsEngine(
+        build_default_metric_plugins(
+            config=config,
+            checkpoint_model=checkpoint_model,
+            device=device,
+            layer_labels=layer_labels,
+            wandb_enabled=wandb_enabled,
+            extra_plugins=extra_metric_plugins,
+        ),
+        enable_timing_debug=metrics_debug_timing,
+    )
     tokens_seen_train = 0
     run_label = config.run.run_name or Path(run_paths["run_artifact_dir"]).name
     checkpoint_artifact_name = build_checkpoint_artifact_name(run_label)
     final_model_artifact_name = build_final_model_artifact_name(run_label)
     last_checkpoint_artifact_ref: str | None = None
     final_model_artifact_ref: str | None = None
-
-    def should_log_every(step: int, every_n_steps: int) -> bool:
-        return step > 0 and step % every_n_steps == 0
 
     def save_checkpoint(
         epoch: int,
@@ -754,26 +620,9 @@ def train_loop(
 
     last_avg_train_loss = 0.0
     last_val_metrics = {"val_loss": 0.0, "val_perplexity": 0.0}
-    hook_handles: list[torch.utils.hooks.RemovableHandle] = []
-
-    if wandb_enabled and layer_labels and (
-        wandb_cfg.enable_activation_norms or wandb_cfg.enable_attention_entropy
-    ):
-        hook_handles = register_forward_metric_hooks(
-            model=checkpoint_model,
-            collector=metric_collector,
-            layer_labels=layer_labels,
-            attention_head_cap=wandb_cfg.attention_entropy_head_cap,
-            attention_token_cap=wandb_cfg.attention_entropy_token_cap,
-        )
-
-    periodic_val_enabled = (
-        wandb_enabled
-        and wandb_cfg.val_every_n_steps > 0
-        and (wandb_cfg.enable_val_loss_vs_tokens or wandb_cfg.enable_perplexity)
-    )
 
     try:
+        metrics_engine.on_train_start()
         for epoch in tqdm(range(start_epoch, config.train.epochs), desc="Epochs"):
             epoch_train_loss_sum = 0.0
             epoch_token_count = 0
@@ -783,42 +632,23 @@ def train_loop(
                     continue
 
                 next_global_step = global_step + 1
-                should_log_step_metrics = (
-                    wandb_enabled and should_log_every(next_global_step, wandb_cfg.log_every_n_steps)
+                schedule = build_metric_schedule(
+                    next_global_step=next_global_step,
+                    wandb_enabled=wandb_enabled,
+                    wandb_cfg=wandb_cfg,
+                    layer_labels_available=bool(layer_labels),
                 )
-                should_log_diagnostics = (
-                    wandb_enabled
-                    and should_log_every(next_global_step, wandb_cfg.diagnostics_every_n_steps)
+                step_ctx = StepMetricsContext(
+                    schedule=schedule,
+                    global_step=global_step,
+                    next_global_step=next_global_step,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    train_loader_len=len(train_loader),
+                    tokens_seen_train=tokens_seen_train,
+                    step_loss=None,
                 )
-                should_log_attention_entropy = (
-                    wandb_enabled
-                    and wandb_cfg.enable_attention_entropy
-                    and should_log_every(next_global_step, wandb_cfg.attention_entropy_every_n_steps)
-                )
-                capture_activation_norms = (
-                    should_log_diagnostics
-                    and wandb_cfg.enable_activation_norms
-                    and bool(layer_labels)
-                )
-                capture_attention_entropy = should_log_attention_entropy and bool(layer_labels)
-                should_log_this_step = (
-                    should_log_step_metrics or should_log_diagnostics or should_log_attention_entropy
-                )
-
-                metric_collector.begin_step(
-                    capture_activation_norms=capture_activation_norms,
-                    capture_attention_entropy=capture_attention_entropy,
-                )
-
-                step_start_time: float | None = None
-                if should_log_step_metrics and wandb_cfg.enable_step_time:
-                    step_start_time = time.perf_counter()
-                if (
-                    should_log_step_metrics
-                    and wandb_cfg.enable_peak_memory
-                    and device.type == "cuda"
-                ):
-                    torch.cuda.reset_peak_memory_stats(device)
+                metrics_engine.on_step_start(step_ctx)
 
                 input_seq = input_seq.to(device, non_blocking=non_blocking)
                 target_seq = target_seq.to(device, non_blocking=non_blocking)
@@ -837,68 +667,27 @@ def train_loop(
 
                 loss = loss_sum / valid_tokens
                 loss.backward()
-
-                step_metrics: dict[str, float] = {}
-                if should_log_diagnostics and wandb_cfg.enable_global_grad_norm:
-                    global_grad_norm = compute_global_grad_norm(checkpoint_model)
-                    if global_grad_norm is not None:
-                        step_metrics["global_grad_norm"] = global_grad_norm
-                if should_log_diagnostics and wandb_cfg.enable_ln_grad_norms:
-                    step_metrics.update(
-                        compute_layernorm_grad_norms(checkpoint_model, layer_labels)
-                    )
+                step_ctx = replace(step_ctx, step_loss=float(loss.item()))
+                metrics_engine.after_backward(step_ctx)
 
                 optimizer.step()
                 global_step = next_global_step
                 tokens_seen_train += valid_tokens
+                step_ctx = replace(
+                    step_ctx,
+                    global_step=global_step,
+                    tokens_seen_train=tokens_seen_train,
+                )
+                metrics_engine.after_optimizer_step(step_ctx)
 
                 epoch_token_count += valid_tokens
                 epoch_train_loss_sum += loss_sum.item()
 
-                if should_log_this_step:
-                    step_loss = float(loss.item())
-                    step_metrics["epoch"] = float(
-                        epoch + (batch_idx + 1) / max(len(train_loader), 1)
-                    )
-
-                    if wandb_cfg.enable_train_loss_vs_tokens:
-                        step_metrics["train_loss_step"] = step_loss
-                        step_metrics["tokens_seen_train"] = float(tokens_seen_train)
-
-                    if wandb_cfg.enable_perplexity:
-                        bounded = min(step_loss, 60.0)
-                        step_metrics["train_perplexity"] = float(math.exp(bounded))
-                        step_metrics.setdefault("tokens_seen_train", float(tokens_seen_train))
-
-                    if device.type == "cuda" and should_log_step_metrics and (
-                        wandb_cfg.enable_step_time or wandb_cfg.enable_peak_memory
-                    ):
-                        torch.cuda.synchronize(device)
-
-                    if (
-                        should_log_step_metrics
-                        and wandb_cfg.enable_step_time
-                        and step_start_time is not None
-                    ):
-                        elapsed_ms = (time.perf_counter() - step_start_time) * 1000.0
-                        step_metrics["step_time_ms"] = float(elapsed_ms)
-                    if (
-                        should_log_step_metrics
-                        and wandb_cfg.enable_peak_memory
-                        and device.type == "cuda"
-                    ):
-                        peak_mem_gib = torch.cuda.max_memory_allocated(device) / (1024**3)
-                        step_metrics["peak_memory_gib"] = float(peak_mem_gib)
-
-                    if capture_activation_norms or capture_attention_entropy:
-                        step_metrics.update(metric_collector.take_metrics())
-
+                if schedule.should_log_this_step:
+                    step_metrics = metrics_engine.collect_step_metrics(step_ctx)
                     logger.log(step_metrics, step=global_step)
 
-                if (
-                    periodic_val_enabled
-                    and should_log_every(global_step, wandb_cfg.val_every_n_steps)
-                ):
+                if schedule.periodic_val_due:
                     val_metrics = evaluate(
                         model,
                         val_loader,
@@ -908,16 +697,17 @@ def train_loop(
                     )
                     model.train()
                     last_val_metrics = val_metrics
-
-                    val_log_metrics = {
-                        "epoch": float(epoch + (batch_idx + 1) / max(len(train_loader), 1)),
-                    }
-                    if wandb_cfg.enable_val_loss_vs_tokens:
-                        val_log_metrics["val_loss"] = float(val_metrics["val_loss"])
-                        val_log_metrics["tokens_seen_train"] = float(tokens_seen_train)
-                    if wandb_cfg.enable_perplexity:
-                        val_log_metrics["val_perplexity"] = float(val_metrics["val_perplexity"])
-                        val_log_metrics.setdefault("tokens_seen_train", float(tokens_seen_train))
+                    val_log_metrics = metrics_engine.collect_periodic_val_metrics(
+                        PeriodicValMetricsContext(
+                            schedule=schedule,
+                            global_step=global_step,
+                            epoch=epoch,
+                            batch_idx=batch_idx,
+                            train_loader_len=len(train_loader),
+                            tokens_seen_train=tokens_seen_train,
+                            val_metrics=val_metrics,
+                        )
+                    )
                     logger.log(val_log_metrics, step=global_step)
 
                 if (
@@ -940,22 +730,15 @@ def train_loop(
             avg_train_loss = epoch_train_loss_sum / max(epoch_token_count, 1)
             val_metrics = evaluate(model, val_loader, loss_fn, device, use_bf16=use_bf16)
             model.train()
-
-            epoch_metrics: dict[str, float] = {
-                "epoch": float(epoch + 1),
-                "train_loss_epoch": float(avg_train_loss),
-            }
-            if (not wandb_enabled) or wandb_cfg.enable_val_loss_vs_tokens:
-                epoch_metrics["val_loss"] = float(val_metrics["val_loss"])
-            if (not wandb_enabled) or wandb_cfg.enable_perplexity:
-                epoch_metrics["val_perplexity"] = float(val_metrics["val_perplexity"])
-            if wandb_enabled and wandb_cfg.enable_train_loss_vs_tokens:
-                epoch_metrics["tokens_seen_train"] = float(tokens_seen_train)
-            if wandb_enabled and wandb_cfg.enable_perplexity:
-                bounded_epoch_loss = min(float(avg_train_loss), 60.0)
-                epoch_metrics["train_perplexity_epoch"] = float(math.exp(bounded_epoch_loss))
-                epoch_metrics.setdefault("tokens_seen_train", float(tokens_seen_train))
-
+            epoch_metrics = metrics_engine.collect_epoch_metrics(
+                EpochMetricsContext(
+                    global_step=global_step,
+                    epoch=epoch,
+                    avg_train_loss=float(avg_train_loss),
+                    tokens_seen_train=tokens_seen_train,
+                    val_metrics=val_metrics,
+                )
+            )
             logger.log(epoch_metrics, step=global_step)
 
             print(
@@ -968,8 +751,7 @@ def train_loop(
             last_avg_train_loss = float(avg_train_loss)
             last_val_metrics = val_metrics
     finally:
-        for handle in hook_handles:
-            handle.remove()
+        metrics_engine.on_train_end()
 
     last_checkpoint_artifact_ref = save_checkpoint(
         config.train.epochs,
@@ -1002,7 +784,12 @@ def train_loop(
     )
 
 
-def model_pipeline(config: ExperimentConfig) -> RunResult:
+def model_pipeline(
+    config: ExperimentConfig,
+    *,
+    extra_metric_plugins: Sequence[MetricPlugin] | None = None,
+    metrics_debug_timing: bool = False,
+) -> RunResult:
     validate_experiment_config(config)
     logger_adapter = get_logger_adapter(config.logging.provider)
     config = resolve_wandb_lineage(config, logger_adapter)
@@ -1100,6 +887,8 @@ def model_pipeline(config: ExperimentConfig) -> RunResult:
             device=device,
             use_bf16=use_bf16,
             run_paths=run_paths,
+            extra_metric_plugins=extra_metric_plugins,
+            metrics_debug_timing=metrics_debug_timing,
         )
     finally:
         logger.close()
