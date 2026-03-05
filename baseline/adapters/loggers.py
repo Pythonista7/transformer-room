@@ -30,11 +30,19 @@ _WANDB_METRIC_SECTION_BY_KEY = {
     "train_perplexity_epoch": "Perplexity",
     "val_perplexity": "Perplexity",
     "global_grad_norm": "Grad Norm",
+    "global_param_norm": "Param Norms",
+    "param_update_norm": "Update Dynamics",
+    "update_to_weight_ratio": "Update Dynamics",
+    "adam_m_norm": "Optimizer States",
+    "adam_v_norm": "Optimizer States",
+    "adam_elemwise_snr_norm": "Optimizer States",
 }
 
 _WANDB_METRIC_SECTION_BY_PREFIX = (
     ("ln_weight_grad_norm_", "LN Norms"),
     ("ln_bias_grad_norm_", "LN Norms"),
+    ("layer_param_norm_", "Param Norms"),
+    ("layer_estimated_variance_norm_", "Optimizer States"),
     ("activation_norm_", "Activation Norms"),
     ("attention_entropy_", "Attention Entropy"),
 )

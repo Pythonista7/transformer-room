@@ -178,6 +178,11 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_step_time=False,
                     enable_peak_memory=False,
                     enable_global_grad_norm=False,
+                    enable_global_param_norm=False,
+                    enable_layer_param_norms=False,
+                    enable_param_update_norm=False,
+                    enable_update_to_weight_ratio=False,
+                    enable_optimizer_state_norms=False,
                     enable_activation_norms=False,
                     enable_ln_grad_norms=False,
                     enable_attention_entropy=False,
@@ -203,6 +208,14 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertNotIn("train_perplexity", keys)
             self.assertNotIn("train_perplexity_epoch", keys)
             self.assertNotIn("global_grad_norm", keys)
+            self.assertNotIn("global_param_norm", keys)
+            self.assertNotIn("layer_param_norm_first", keys)
+            self.assertNotIn("param_update_norm", keys)
+            self.assertNotIn("update_to_weight_ratio", keys)
+            self.assertNotIn("adam_m_norm", keys)
+            self.assertNotIn("adam_v_norm", keys)
+            self.assertNotIn("adam_elemwise_snr_norm", keys)
+            self.assertNotIn("layer_estimated_variance_norm_first", keys)
             self.assertNotIn("activation_norm_first", keys)
             self.assertNotIn("ln_weight_grad_norm_first", keys)
             self.assertNotIn("attention_entropy_first", keys)
@@ -219,6 +232,11 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_step_time=True,
                     enable_peak_memory=True,
                     enable_global_grad_norm=True,
+                    enable_global_param_norm=True,
+                    enable_layer_param_norms=True,
+                    enable_param_update_norm=True,
+                    enable_update_to_weight_ratio=True,
+                    enable_optimizer_state_norms=True,
                     enable_activation_norms=True,
                     enable_ln_grad_norms=True,
                     enable_attention_entropy=True,
@@ -245,6 +263,14 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertIn("val_perplexity", keys)
             self.assertIn("step_time_ms", keys)
             self.assertIn("global_grad_norm", keys)
+            self.assertIn("global_param_norm", keys)
+            self.assertIn("layer_param_norm_first", keys)
+            self.assertIn("param_update_norm", keys)
+            self.assertIn("update_to_weight_ratio", keys)
+            self.assertIn("adam_m_norm", keys)
+            self.assertIn("adam_v_norm", keys)
+            self.assertIn("adam_elemwise_snr_norm", keys)
+            self.assertIn("layer_estimated_variance_norm_first", keys)
             self.assertIn("activation_norm_first", keys)
             self.assertIn("ln_weight_grad_norm_first", keys)
             self.assertIn("ln_bias_grad_norm_first", keys)
@@ -275,6 +301,11 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_step_time=False,
                     enable_peak_memory=False,
                     enable_global_grad_norm=True,
+                    enable_global_param_norm=True,
+                    enable_layer_param_norms=True,
+                    enable_param_update_norm=True,
+                    enable_update_to_weight_ratio=True,
+                    enable_optimizer_state_norms=True,
                     enable_activation_norms=True,
                     enable_ln_grad_norms=True,
                     enable_attention_entropy=True,
@@ -298,6 +329,14 @@ class WandbMetricGatingTests(unittest.TestCase):
                 "tokens_seen_train",
                 "train_perplexity",
                 "global_grad_norm",
+                "global_param_norm",
+                "layer_param_norm_first",
+                "param_update_norm",
+                "update_to_weight_ratio",
+                "adam_m_norm",
+                "adam_v_norm",
+                "adam_elemwise_snr_norm",
+                "layer_estimated_variance_norm_first",
                 "activation_norm_first",
                 "ln_weight_grad_norm_first",
                 "ln_bias_grad_norm_first",

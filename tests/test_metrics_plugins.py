@@ -12,6 +12,7 @@ from baseline.training.metrics.plugins.forward_hook_metrics import ForwardHookMe
 from baseline.training.metrics.plugins.global_grad_norm import GlobalGradNormPlugin
 from baseline.training.metrics.plugins.layernorm_grad_norm import LayerNormGradNormPlugin
 from baseline.training.metrics.plugins.loss_perplexity import LossPerplexityPlugin
+from baseline.training.metrics.plugins.parameter_optimizer_norms import ParameterOptimizerNormsPlugin
 from baseline.training.metrics.plugins.step_timing_memory import StepTimingAndMemoryPlugin
 
 
@@ -333,6 +334,121 @@ class ForwardHookMetricsPluginTests(unittest.TestCase):
                 plugin.on_train_end()
 
         self.assertEqual(_count_forward_hooks(model), 0)
+
+
+class ParameterOptimizerNormsPluginTests(unittest.TestCase):
+    def _run_single_optimization_step(
+        self,
+        *,
+        model: _FakeDecoderModel,
+        optimizer: torch.optim.Optimizer,
+        plugin: ParameterOptimizerNormsPlugin,
+        schedule: MetricSchedule,
+    ) -> dict[str, float]:
+        ctx = _step_ctx(schedule)
+        plugin.on_step_start(ctx)
+
+        optimizer.zero_grad()
+        loss = model(torch.randn(2, 4, 8)).pow(2).mean()
+        loss.backward()
+        optimizer.step()
+
+        plugin.after_optimizer_step(ctx)
+        return plugin.collect_step_metrics(ctx)
+
+    def test_emits_param_update_and_layer_norms_when_enabled(self) -> None:
+        model = _FakeDecoderModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        plugin = ParameterOptimizerNormsPlugin(
+            wandb_cfg=WandbMetricsConfig(
+                enable_global_param_norm=True,
+                enable_layer_param_norms=True,
+                enable_param_update_norm=True,
+                enable_update_to_weight_ratio=True,
+                enable_optimizer_state_norms=True,
+            ),
+            model=model,
+            optimizer=optimizer,
+            layer_labels=get_decoder_layer_labels(model),
+        )
+
+        metrics = self._run_single_optimization_step(
+            model=model,
+            optimizer=optimizer,
+            plugin=plugin,
+            schedule=_make_schedule(should_log_diagnostics=True),
+        )
+
+        self.assertIn("global_param_norm", metrics)
+        self.assertIn("layer_param_norm_first", metrics)
+        self.assertIn("layer_param_norm_middle", metrics)
+        self.assertIn("layer_param_norm_last", metrics)
+        self.assertIn("param_update_norm", metrics)
+        self.assertIn("update_to_weight_ratio", metrics)
+        self.assertIn("adam_m_norm", metrics)
+        self.assertIn("adam_v_norm", metrics)
+        self.assertIn("adam_elemwise_snr_norm", metrics)
+        self.assertIn("layer_estimated_variance_norm_first", metrics)
+        self.assertIn("layer_estimated_variance_norm_middle", metrics)
+        self.assertIn("layer_estimated_variance_norm_last", metrics)
+        self.assertGreater(metrics["param_update_norm"], 0.0)
+        self.assertGreater(metrics["update_to_weight_ratio"], 0.0)
+
+    def test_adam_and_adamw_emit_state_norms_but_sgd_does_not(self) -> None:
+        for optimizer_name, optimizer_factory, emits_state_metrics in (
+            ("adam", lambda params: torch.optim.Adam(params, lr=1e-3), True),
+            ("adamw", lambda params: torch.optim.AdamW(params, lr=1e-3), True),
+            ("sgd", lambda params: torch.optim.SGD(params, lr=1e-3), False),
+        ):
+            with self.subTest(optimizer=optimizer_name):
+                model = _FakeDecoderModel()
+                optimizer = optimizer_factory(model.parameters())
+                plugin = ParameterOptimizerNormsPlugin(
+                    wandb_cfg=WandbMetricsConfig(enable_optimizer_state_norms=True),
+                    model=model,
+                    optimizer=optimizer,
+                    layer_labels=get_decoder_layer_labels(model),
+                )
+                metrics = self._run_single_optimization_step(
+                    model=model,
+                    optimizer=optimizer,
+                    plugin=plugin,
+                    schedule=_make_schedule(should_log_diagnostics=True),
+                )
+                if emits_state_metrics:
+                    self.assertIn("adam_m_norm", metrics)
+                    self.assertIn("adam_v_norm", metrics)
+                    self.assertIn("adam_elemwise_snr_norm", metrics)
+                    self.assertIn("layer_estimated_variance_norm_first", metrics)
+                else:
+                    self.assertNotIn("adam_m_norm", metrics)
+                    self.assertNotIn("adam_v_norm", metrics)
+                    self.assertNotIn("adam_elemwise_snr_norm", metrics)
+                    self.assertNotIn("layer_estimated_variance_norm_first", metrics)
+
+    def test_emits_nothing_when_diagnostics_cadence_is_off(self) -> None:
+        model = _FakeDecoderModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        plugin = ParameterOptimizerNormsPlugin(
+            wandb_cfg=WandbMetricsConfig(
+                enable_global_param_norm=True,
+                enable_layer_param_norms=True,
+                enable_param_update_norm=True,
+                enable_update_to_weight_ratio=True,
+                enable_optimizer_state_norms=True,
+            ),
+            model=model,
+            optimizer=optimizer,
+            layer_labels=get_decoder_layer_labels(model),
+        )
+
+        metrics = self._run_single_optimization_step(
+            model=model,
+            optimizer=optimizer,
+            plugin=plugin,
+            schedule=_make_schedule(should_log_diagnostics=False),
+        )
+        self.assertEqual(metrics, {})
 
 
 if __name__ == "__main__":

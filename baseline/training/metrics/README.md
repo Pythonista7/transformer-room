@@ -24,6 +24,17 @@ This package keeps training metrics modular and logger-agnostic.
 - `MetricsEngine` raises an error on key collisions.
 - Backend grouping/formatting stays in logger adapters.
 
+## Built-In Diagnostics Metrics
+
+- `global_param_norm`
+- `layer_param_norm_first|middle|last`
+- `param_update_norm`
+- `update_to_weight_ratio`
+- `adam_m_norm`, `adam_v_norm`, `adam_elemwise_snr_norm`
+- `layer_estimated_variance_norm_first|middle|last`
+
+`param_update_norm` is computed from pre-step vs post-step parameter snapshots. It is not directly exposed by optimizer state dicts.
+
 ## Add a New Metric
 
 1. Create a plugin in `plugins/` (copy `plugins/template.py`).

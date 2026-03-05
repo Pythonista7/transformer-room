@@ -103,6 +103,11 @@ class WandbMetricsConfig:
     enable_step_time: bool = True
     enable_peak_memory: bool = True
     enable_global_grad_norm: bool = True
+    enable_global_param_norm: bool = False
+    enable_layer_param_norms: bool = False
+    enable_param_update_norm: bool = False
+    enable_update_to_weight_ratio: bool = False
+    enable_optimizer_state_norms: bool = False
     enable_activation_norms: bool = True
     enable_ln_grad_norms: bool = True
     enable_attention_entropy: bool = True

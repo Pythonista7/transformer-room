@@ -259,6 +259,14 @@ class WandbLoggerAdapterTests(unittest.TestCase):
                     "activation_norm_last": 5.0,
                     "attention_entropy_middle": 6.0,
                     "step_time_ms": 7.0,
+                    "global_param_norm": 8.0,
+                    "layer_param_norm_first": 9.0,
+                    "param_update_norm": 10.0,
+                    "update_to_weight_ratio": 11.0,
+                    "adam_m_norm": 12.0,
+                    "adam_v_norm": 13.0,
+                    "adam_elemwise_snr_norm": 14.0,
+                    "layer_estimated_variance_norm_first": 15.0,
                     "Perplexity/custom_metric": 8.0,
                 },
                 step=10,
@@ -280,6 +288,17 @@ class WandbLoggerAdapterTests(unittest.TestCase):
         self.assertIn("Activation Norms/activation_norm_last", logged_metrics)
         self.assertIn("Attention Entropy/attention_entropy_middle", logged_metrics)
         self.assertIn("Charts/step_time_ms", logged_metrics)
+        self.assertIn("Param Norms/global_param_norm", logged_metrics)
+        self.assertIn("Param Norms/layer_param_norm_first", logged_metrics)
+        self.assertIn("Update Dynamics/param_update_norm", logged_metrics)
+        self.assertIn("Update Dynamics/update_to_weight_ratio", logged_metrics)
+        self.assertIn("Optimizer States/adam_m_norm", logged_metrics)
+        self.assertIn("Optimizer States/adam_v_norm", logged_metrics)
+        self.assertIn("Optimizer States/adam_elemwise_snr_norm", logged_metrics)
+        self.assertIn(
+            "Optimizer States/layer_estimated_variance_norm_first",
+            logged_metrics,
+        )
         self.assertIn("Perplexity/custom_metric", logged_metrics)
 
     def test_checkpoint_save_prunes_older_versions(self) -> None:

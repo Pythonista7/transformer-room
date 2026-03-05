@@ -530,6 +530,7 @@ def train_loop(
         build_default_metric_plugins(
             config=config,
             checkpoint_model=checkpoint_model,
+            optimizer=optimizer,
             device=device,
             layer_labels=layer_labels,
             wandb_enabled=wandb_enabled,

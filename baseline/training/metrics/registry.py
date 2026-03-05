@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Sequence
 
 import torch
+from torch import optim
 
 from baseline.core.config import ExperimentConfig
 
@@ -12,6 +13,7 @@ from .plugins import (
     GlobalGradNormPlugin,
     LayerNormGradNormPlugin,
     LossPerplexityPlugin,
+    ParameterOptimizerNormsPlugin,
     StepTimingAndMemoryPlugin,
 )
 
@@ -20,6 +22,7 @@ def build_default_metric_plugins(
     *,
     config: ExperimentConfig,
     checkpoint_model: torch.nn.Module,
+    optimizer: optim.Optimizer,
     device: torch.device,
     layer_labels: dict[int, list[str]],
     wandb_enabled: bool,
@@ -42,6 +45,12 @@ def build_default_metric_plugins(
         LayerNormGradNormPlugin(
             wandb_cfg=wandb_cfg,
             model=checkpoint_model,
+            layer_labels=layer_labels,
+        ),
+        ParameterOptimizerNormsPlugin(
+            wandb_cfg=wandb_cfg,
+            model=checkpoint_model,
+            optimizer=optimizer,
             layer_labels=layer_labels,
         ),
         ForwardHookMetricsPlugin(
