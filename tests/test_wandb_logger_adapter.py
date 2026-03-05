@@ -132,12 +132,12 @@ class FakeRun:
         self.entity = "test-entity"
         self.project = "transformer-room-baseline"
         self._store = store
+        self.logged_metrics: list[tuple[int | None, dict[str, float]]] = []
         self.logged_artifacts: list[tuple[FakeArtifact, list[str], FakeLoggedArtifact]] = []
         self.finished = False
 
     def log(self, metrics, step=None) -> None:
-        _ = metrics
-        _ = step
+        self.logged_metrics.append((step, dict(metrics)))
 
     def log_artifact(self, artifact: FakeArtifact, aliases=None) -> FakeLoggedArtifact:
         logged_artifact = self._store.publish(artifact, list(aliases or []))
@@ -235,6 +235,52 @@ class WandbLoggerAdapterTests(unittest.TestCase):
             "test-entity/transformer-room-baseline/lr-run-checkpoint:latest",
         )
         self.assertTrue(fake_run.finished)
+
+    def test_log_groups_metrics_into_expected_sections(self) -> None:
+        fake_wandb, fake_run, _store, _init_calls = self._make_fake_wandb()
+        adapter = WandbLoggerAdapter()
+
+        original_module = sys.modules.get("wandb")
+        sys.modules["wandb"] = fake_wandb
+        try:
+            session = adapter.start(
+                cfg=LoggingConfig(provider="wandb"),
+                project_name="transformer-room-baseline",
+                run_name="lr-run",
+                group_name=None,
+                config_payload={},
+            )
+            session.log(
+                {
+                    "train_loss_step": 1.5,
+                    "train_perplexity": 2.0,
+                    "ln_weight_grad_norm_first": 3.0,
+                    "global_grad_norm": 4.0,
+                    "activation_norm_last": 5.0,
+                    "attention_entropy_middle": 6.0,
+                    "step_time_ms": 7.0,
+                    "Perplexity/custom_metric": 8.0,
+                },
+                step=10,
+            )
+            session.close()
+        finally:
+            if original_module is None:
+                sys.modules.pop("wandb", None)
+            else:
+                sys.modules["wandb"] = original_module
+
+        self.assertEqual(len(fake_run.logged_metrics), 1)
+        logged_step, logged_metrics = fake_run.logged_metrics[0]
+        self.assertEqual(logged_step, 10)
+        self.assertIn("Loss Curves/train_loss_step", logged_metrics)
+        self.assertIn("Perplexity/train_perplexity", logged_metrics)
+        self.assertIn("LN Norms/ln_weight_grad_norm_first", logged_metrics)
+        self.assertIn("Grad Norm/global_grad_norm", logged_metrics)
+        self.assertIn("Activation Norms/activation_norm_last", logged_metrics)
+        self.assertIn("Attention Entropy/attention_entropy_middle", logged_metrics)
+        self.assertIn("Charts/step_time_ms", logged_metrics)
+        self.assertIn("Perplexity/custom_metric", logged_metrics)
 
     def test_checkpoint_save_prunes_older_versions(self) -> None:
         fake_wandb, fake_run, store, _init_calls = self._make_fake_wandb()

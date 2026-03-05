@@ -19,6 +19,25 @@ if TYPE_CHECKING:
     from wandb.sdk.wandb_run import Run as WandbRun
 
 EPHEMERAL_ARTIFACT_TYPES = {"checkpoint", "model"}
+DEFAULT_WANDB_CHART_SECTION = "Charts"
+
+_WANDB_METRIC_SECTION_BY_KEY = {
+    "train_loss": "Loss Curves",
+    "train_loss_step": "Loss Curves",
+    "train_loss_epoch": "Loss Curves",
+    "val_loss": "Loss Curves",
+    "train_perplexity": "Perplexity",
+    "train_perplexity_epoch": "Perplexity",
+    "val_perplexity": "Perplexity",
+    "global_grad_norm": "Grad Norm",
+}
+
+_WANDB_METRIC_SECTION_BY_PREFIX = (
+    ("ln_weight_grad_norm_", "LN Norms"),
+    ("ln_bias_grad_norm_", "LN Norms"),
+    ("activation_norm_", "Activation Norms"),
+    ("attention_entropy_", "Attention Entropy"),
+)
 
 
 def sanitize_wandb_name(value: str) -> str:
@@ -35,6 +54,34 @@ def _wandb_artifact_not_found(exc: Exception) -> bool:
         or "404" in message
         or "not found" in class_name
     )
+
+
+def _wandb_metric_section(metric_key: str) -> str:
+    if "/" in metric_key:
+        section, _, remainder = metric_key.partition("/")
+        if section.strip() and remainder.strip():
+            return section
+
+    section = _WANDB_METRIC_SECTION_BY_KEY.get(metric_key)
+    if section is not None:
+        return section
+
+    for prefix, candidate_section in _WANDB_METRIC_SECTION_BY_PREFIX:
+        if metric_key.startswith(prefix):
+            return candidate_section
+    return DEFAULT_WANDB_CHART_SECTION
+
+
+def _with_wandb_metric_sections(metrics: Mapping[str, float]) -> dict[str, float]:
+    grouped: dict[str, float] = {}
+    for key, value in metrics.items():
+        if "/" in key:
+            section, _, remainder = key.partition("/")
+            if section.strip() and remainder.strip():
+                grouped[key] = value
+                continue
+        grouped[f"{_wandb_metric_section(key)}/{key}"] = value
+    return grouped
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +195,7 @@ class WandbLoggerSession:
             version.delete(delete_aliases=True)
 
     def log(self, metrics: Mapping[str, float], step: int | None = None) -> None:
-        self._run.log(dict(metrics), step=step)
+        self._run.log(_with_wandb_metric_sections(metrics), step=step)
 
     def save(
         self,
