@@ -171,30 +171,12 @@ Useful to validate command wiring when GPU is unavailable.
 
 File: `baseline/utils/run_and_shutdown.py`
 
-This wrapper runs any command, mirrors combined `stdout`/`stderr` to terminal and a timestamped log file, writes a JSON metadata sidecar, and then shuts the backing machine down either with a caller-provided command or via the Vast Python SDK.
-
-### Vast Bootstrap
-
-From repo root:
-
-```bash
-source ./vast-setup.sh
-```
-
-That script:
-
-- creates or reuses `.venv`
-- installs `requirements.txt` (including `vastai` and `vastai-sdk`)
-- prompts for `WANDB_API_KEY` and `VAST_API_KEY` when missing
-- writes a repo-local `.env.vast`
-- defaults `WANDB_DATA_DIR` to `$PWD/.wandb-data`
-- validates `vastai start instance "$CONTAINER_ID"` when a Vast container ID is available
+This wrapper runs any command, mirrors combined `stdout`/`stderr` to terminal and a timestamped log file, writes a JSON metadata sidecar, and then stops the current Vast instance via the Vast Python SDK.
 
 ### Canonical Example (`OptimAdamVsW.py`)
 
 ```bash
 .venv/bin/python baseline/utils/run_and_shutdown.py \
-  --shutdown-provider vast \
   --log-dir runs/logs \
   --run-name optim-adam-vs-adamw \
   -- .venv/bin/python baseline/experiments/OptimAdamVsW.py
@@ -202,11 +184,8 @@ That script:
 
 ### CLI Flags
 
-- `--shutdown-provider` (default: `auto`): `auto`, `command`, or `vast`
-- `--shutdown-cmd` (optional): shell command run after experiment exit when using `command`
 - `--log-dir` (default: `runs/logs`): output directory for `.log` + `.json`
 - `--run-name` (optional): slug used in output filenames
-- `--shutdown-timeout-sec` (default: `30`)
 - `--set-env KEY=VALUE` (optional, repeatable): extra env vars injected before launch
 - `--`: separator before the experiment command
 
@@ -218,21 +197,5 @@ Before launching the experiment command, the wrapper also ensures:
 
 - `PYTORCH_ALLOC_CONF=expandable_segments:True` if `PYTORCH_ALLOC_CONF` is not already set.
 - `WANDB_API_KEY` is set. If missing, it prompts interactively for input and injects it for the child process.
-- For Vast shutdowns, `CONTAINER_ID`/`VAST_CONTAINERLABEL` and `CONTAINER_API_KEY`/`VAST_API_KEY` are available. Missing Vast credentials trigger an interactive prompt for `VAST_API_KEY`.
-
-When `--shutdown-provider=auto`, the wrapper uses:
-
-- `command` when `--shutdown-cmd` is supplied
-- `vast` when no shutdown command is supplied and Vast container env vars are present
-
-### Cloud Shutdown Command Examples
-
-For non-Vast machines you can still use command shutdown mode. All three cloud providers commonly use the same in-VM shutdown action:
-
-- GCP VM: `sudo shutdown -h now`
-- AWS EC2: `sudo shutdown -h now`
-- Azure VM: `sudo shutdown -h now`
-
-Alternative equivalent command:
-
-- `sudo poweroff`
+- `CONTAINER_ID` or `VAST_CONTAINERLABEL` is set so the wrapper can resolve the instance ID.
+- `CONTAINER_API_KEY` or `VAST_API_KEY` is set. If both are missing, it prompts interactively for `VAST_API_KEY`.
