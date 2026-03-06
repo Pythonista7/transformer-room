@@ -22,15 +22,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from baseline.utils.vast import (
-    resolve_vast_api_key,
-    resolve_vast_instance_id,
-    stop_vast_instance,
-)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -41,6 +32,7 @@ from baseline.utils.vast import (
     resolve_vast_instance_id,
     stop_vast_instance,
 )
+
 
 DEFAULT_PYTORCH_ALLOC_CONF = "expandable_segments:True"
 
@@ -185,8 +177,6 @@ def _prepare_child_env(
     *,
     extra_env: list[tuple[str, str]],
     tee: _Tee,
-    requested_shutdown_provider: str,
-    shutdown_cmd: str | None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     env = dict(os.environ)
     extra_env_keys: set[str] = set()
@@ -227,12 +217,11 @@ def _prepare_child_env(
         env_summary["wandb_api_key_set"] = True
         env_summary["wandb_api_key_source"] = "prompted"
 
-    vast_instance_id: int | None = None
-    vast_instance_id_source: str | None = None
     try:
         vast_instance_id, vast_instance_id_source = resolve_vast_instance_id(env)
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
+
     env_summary["vast_instance_id"] = vast_instance_id
     env_summary["vast_instance_id_source"] = vast_instance_id_source
     if vast_instance_id is not None and "CONTAINER_ID" not in env:
@@ -287,15 +276,13 @@ def main(argv: list[str] | None = None) -> int:
         "received_signals": [],
         "env": {},
         "shutdown": {
-            "provider": "vast",
+            "provider": "vast_api",
             "attempted": False,
             "start_time_utc": None,
             "end_time_utc": None,
             "duration_sec": None,
             "return_code": None,
             "error": None,
-            "response": None,
-            "vast_instance_id": None,
             "response": None,
             "vast_instance_id": None,
         },
@@ -326,8 +313,6 @@ def main(argv: list[str] | None = None) -> int:
                 child_env, env_summary = _prepare_child_env(
                     extra_env=list(args.set_env),
                     tee=tee,
-                    requested_shutdown_provider=args.shutdown_provider,
-                    shutdown_cmd=args.shutdown_cmd,
                 )
                 metadata["env"] = env_summary
                 metadata["shutdown"]["vast_instance_id"] = env_summary["vast_instance_id"]
@@ -388,7 +373,6 @@ def main(argv: list[str] | None = None) -> int:
                 metadata["received_signals"] = [_signal_name(sig) for sig in observed_signals]
                 tee.write_message(f"[wrapper] child_return_code={child_return_code}")
 
-                # Persist run metadata before shutdown so child results survive a failed shutdown.
                 _write_metadata(metadata_path, metadata)
 
                 shutdown_meta = metadata["shutdown"]
@@ -413,12 +397,10 @@ def main(argv: list[str] | None = None) -> int:
                     shutdown_meta["response"] = response
                     tee.write_message("[wrapper] Vast stop_instance completed")
                     tee.write_message(
-                        "[shutdown][vast] "
-                        + json.dumps(response, sort_keys=True)
+                        "[shutdown][vast] " + json.dumps(response, sort_keys=True)
                     )
                 except Exception as exc:  # pragma: no cover - defensive path.
                     shutdown_meta["error"] = str(exc)
-                    tee.write_message(f"[wrapper] shutdown step raised: {exc}")
                     tee.write_message(f"[wrapper] shutdown step raised: {exc}")
                 finally:
                     shutdown_end = _utc_now()

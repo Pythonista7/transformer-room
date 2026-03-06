@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Mapping
 
 
 VAST_INSTANCE_ID_ENV_KEYS: tuple[str, ...] = ("CONTAINER_ID", "VAST_CONTAINERLABEL")
 VAST_API_KEY_ENV_KEYS: tuple[str, ...] = ("CONTAINER_API_KEY", "VAST_API_KEY")
+DEFAULT_VAST_API_BASE_URL = "https://console.vast.ai/api/v0"
+DEFAULT_VAST_API_TIMEOUT_SEC = 30.0
 
 
 def parse_vast_instance_id(value: str) -> int:
@@ -53,13 +56,38 @@ def _json_safe(value: Any) -> Any:
 
 def stop_vast_instance(*, instance_id: int, api_key: str) -> Any:
     try:
-        from vastai_sdk import VastAI
-    except ImportError as exc:  # pragma: no cover - exercised via wrapper integration.
+        import requests
+    except ImportError as exc:
         raise RuntimeError(
-            "Vast shutdown requires the `vastai-sdk` package. "
+            "Vast shutdown requires the `requests` package. "
             "Install dependencies with `pip install -r requirements.txt`."
         ) from exc
 
-    client = VastAI(api_key=api_key)
-    response = client.stop_instance(ID=instance_id)
-    return _json_safe(response)
+    base_url = os.environ.get("VAST_API_BASE_URL", DEFAULT_VAST_API_BASE_URL).rstrip("/")
+    url = f"{base_url}/instances/{instance_id}/"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.put(
+            url,
+            headers=headers,
+            json={"state": "stopped"},
+            timeout=DEFAULT_VAST_API_TIMEOUT_SEC,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Vast API request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        detail = response.text.strip()
+        raise RuntimeError(
+            f"Vast API stop_instance failed with HTTP {response.status_code}: {detail}"
+        )
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {"success": True, "text": response.text}
+    return _json_safe(payload)

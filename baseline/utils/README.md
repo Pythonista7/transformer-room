@@ -171,7 +171,7 @@ Useful to validate command wiring when GPU is unavailable.
 
 File: `baseline/utils/run_and_shutdown.py`
 
-This wrapper runs any command, mirrors combined `stdout`/`stderr` to terminal and a timestamped log file, writes a JSON metadata sidecar, and then stops the current Vast instance via the Vast Python SDK.
+This wrapper runs any command, mirrors combined `stdout`/`stderr` to terminal and a timestamped log file, writes a JSON metadata sidecar, and then stops the current Vast instance via Vast's HTTP API.
 
 ### Canonical Example (`OptimAdamVsW.py`)
 

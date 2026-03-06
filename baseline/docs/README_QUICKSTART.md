@@ -97,16 +97,6 @@ From inside `baseline/`:
 ../.venv/bin/python experiments/my_experiment.py
 ```
 
-### Vast bootstrap
-
-If you are running inside a Vast instance, bootstrap the repo first:
-
-```bash
-source ./vast-setup.sh
-```
-
-That installs the Python dependencies, writes `.env.vast`, and primes the Vast CLI/SDK shutdown flow for `baseline/utils/run_and_shutdown.py`.
-
 ## 3) Inspect outputs
 
 Run artifacts are written under `run.artifacts_root`, usually:
