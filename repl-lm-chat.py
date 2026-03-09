@@ -9,8 +9,8 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parent
 BASELINE_DIR = PROJECT_ROOT / "src"
 
-from src.model import BaselineModel
-from src.bpe_tokenizer import BPETokenizer
+from src.components.models.baseline_model import BaselineModel
+from src.components.tokenizers.bpe_tokenizer import BPETokenizer
 
 
 QUIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}

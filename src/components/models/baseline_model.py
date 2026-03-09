@@ -3,8 +3,9 @@ from typing import List
 import torch
 import torch.nn as nn
 
-from .layers import EmbeddingLayer, LinearLayer, SelfAttnDecoder
-from .positional_encoder import PositionalEncoder
+from primitive.layers import EmbeddingLayer, LinearLayer
+from positional.positional_encoder import SinusoidalPositionalEncoder as PositionalEncoder
+from src.components.blocks.self_attn_decoder_block import BasicSelfAttnDecoder
 
 
 class BaselineModel(nn.Module):
@@ -30,9 +31,9 @@ class BaselineModel(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.dropout = dropout
-        self.dec_layers: List[SelfAttnDecoder] = torch.nn.ModuleList(
+        self.dec_layers: List[BasicSelfAttnDecoder] = torch.nn.ModuleList(
             [
-                SelfAttnDecoder(d_model=d_model, n_heads=n_heads, dropout=dropout)
+                BasicSelfAttnDecoder(d_model=d_model, n_heads=n_heads, dropout=dropout)
                 for _ in range(self.layer_count)
             ]
         )

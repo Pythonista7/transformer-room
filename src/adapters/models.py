@@ -5,7 +5,7 @@ import torch
 from src.core.config import BaselineDecoderConfig
 from src.core.registry import register_model_adapter
 from src.core.types import SpecialTokenIds, VocabInfo
-from src.model import BaselineModel
+from src.components.models.baseline_model import BaselineModel
 
 
 class BaselineDecoderModelAdapter:

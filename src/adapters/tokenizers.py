@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.bpe_tokenizer import BPETokenizer
+from src.components.tokenizers.bpe_tokenizer import BPETokenizer
 from src.core.config import BPETokenizerConfig, resolve_special_token_ids
 from src.core.registry import register_tokenizer_adapter
 from src.core.types import TextCorpus, TokenizedCorpus, VocabInfo

@@ -18,7 +18,7 @@ from typing import Any
 
 import torch
 
-from src.model import BaselineModel
+from src.components.models.baseline_model import BaselineModel
 
 
 FLOAT_FP32_BYTES = 4

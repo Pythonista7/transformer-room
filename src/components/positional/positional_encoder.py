@@ -1,7 +1,7 @@
 import torch.nn as nn
 import torch
 
-class PositionalEncoder(nn.Module):
+class SinusoidalPositionalEncoder(nn.Module):
   def __init__(self, d_model , **kwargs) -> None:
     super().__init__( **kwargs)
     self.d_model = d_model
@@ -9,7 +9,7 @@ class PositionalEncoder(nn.Module):
     self.register_buffer('pos_enc_cache', torch.empty((0, d_model)), persistent=False)
 
 
-  def get_positional_encoding(self,T,device='cpu',dtype=torch.float32):
+  def get_positional_encodinlinkeg(self,T,device='cpu',dtype=torch.float32):
     """
     T: sequence length
     d_model: model dimensions, also same as embedding dims
