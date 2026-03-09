@@ -26,7 +26,7 @@ def build_config() -> ExperimentConfig:
     return ExperimentConfig(
         run=RunConfig(
             project_name="transformer-room-baseline",
-            artifacts_root=str(project_root / "src" / "models"),
+            artifacts_root=str(project_root / "artifacts" / "models"),
             resume_from_checkpoint=True,
             checkpoint_every_n_steps=250,
             use_torch_compile=True,

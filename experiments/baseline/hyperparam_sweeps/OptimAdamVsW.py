@@ -131,7 +131,7 @@ def build_config(
     return ExperimentConfig(
         run=RunConfig(
             project_name="transformer-room-baseline",
-            artifacts_root=str(project_root / "src" / "models"),
+            artifacts_root=str(project_root / "artifacts" / "models"),
             run_name=_build_run_name(optimizer_type, weight_decay),
             group_name=sweep_group,
             resume_from_checkpoint=False,

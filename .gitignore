@@ -224,4 +224,4 @@ wandb/
 
 .DS_Store
 
-baseline/models/*
+artifacts/*
