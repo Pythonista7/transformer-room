@@ -135,14 +135,25 @@ def _set_activation_memory_budget_if_configured(config: ExperimentConfig) -> Non
         return
 
     dynamo_module = getattr(torch, "_dynamo", None)
-    dynamo_config = getattr(dynamo_module, "config", None)
-    if dynamo_config is None or not hasattr(dynamo_config, "activation_memory_budget"):
+    if dynamo_module is None:
+        raise RuntimeError(
+            "run.activation_memory_budget is set, but torch._dynamo is unavailable "
+            "on this PyTorch build."
+        )
+    _ = dynamo_module
+
+    functorch_module = getattr(torch, "_functorch", None)
+    functorch_config = getattr(functorch_module, "config", None)
+    if functorch_config is None or not hasattr(
+        functorch_config,
+        "activation_memory_budget",
+    ):
         raise RuntimeError(
             "run.activation_memory_budget is set, but "
-            "torch._dynamo.config.activation_memory_budget is unavailable on this "
+            "torch._functorch.config.activation_memory_budget is unavailable on this "
             "PyTorch build."
         )
-    dynamo_config.activation_memory_budget = float(budget)
+    functorch_config.activation_memory_budget = float(budget)
 
 
 def maybe_compile_model(

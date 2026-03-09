@@ -24,10 +24,14 @@ class ActivationCheckpointingExperimentPreflightTests(unittest.TestCase):
             )
         ]
         fake_dynamo = types.SimpleNamespace(config=types.SimpleNamespace())
-        with patch.object(torch, "_dynamo", fake_dynamo, create=True):
+        fake_functorch = types.SimpleNamespace(config=types.SimpleNamespace())
+        with (
+            patch.object(torch, "_dynamo", fake_dynamo, create=True),
+            patch.object(torch, "_functorch", fake_functorch, create=True),
+        ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "torch._dynamo.config.activation_memory_budget is unavailable",
+                "torch._functorch.config.activation_memory_budget is unavailable",
             ):
                 preflight_dynamo_activation_memory_budget_api(variants)
 

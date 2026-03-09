@@ -197,11 +197,21 @@ def preflight_dynamo_activation_memory_budget_api(variants: list[VariantSpec]) -
         return
 
     dynamo_module = getattr(torch, "_dynamo", None)
-    dynamo_config = getattr(dynamo_module, "config", None)
-    if dynamo_config is None or not hasattr(dynamo_config, "activation_memory_budget"):
+    if dynamo_module is None:
+        raise RuntimeError(
+            "Budgeted compile variants were requested, but torch._dynamo is unavailable."
+        )
+    _ = dynamo_module
+
+    functorch_module = getattr(torch, "_functorch", None)
+    functorch_config = getattr(functorch_module, "config", None)
+    if functorch_config is None or not hasattr(
+        functorch_config,
+        "activation_memory_budget",
+    ):
         raise RuntimeError(
             "Budgeted compile variants were requested, but "
-            "torch._dynamo.config.activation_memory_budget is unavailable. "
+            "torch._functorch.config.activation_memory_budget is unavailable. "
             "This experiment is configured to fail early in this case."
         )
 
