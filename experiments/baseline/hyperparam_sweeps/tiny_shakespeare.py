@@ -44,7 +44,7 @@ def build_config() -> ExperimentConfig:
             vocab_path=str(
                 project_root
                 / "src"
-                / "tokenizers"
+                / "vocabs"
                 / "tiny_shakespeare_bpe_vocab.txt"
             ),
         ),

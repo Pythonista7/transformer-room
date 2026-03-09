@@ -97,7 +97,7 @@ def build_config() -> ExperimentConfig:
     vocab_path = (
         project_root
         / "src"
-        / "tokenizers"
+        / "vocabs"
         / "wikitext2_v1_hf_vocab_bpe.txt"
     )
     base_vocab_size = ensure_wikitext_vocab_file(

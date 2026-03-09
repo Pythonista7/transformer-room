@@ -76,7 +76,7 @@ The main idea is:
 - `src/adapters/` - pluggable implementations
 - `experiments/baseline/hyperparam_sweeps/` - experiment config modules
 - `src/models/<run_name>/` - run outputs
-- `src/tokenizers/` - persisted tokenizer vocab files
+- `src/vocabs/` - persisted tokenizer vocab files
 
 ---
 
@@ -146,7 +146,7 @@ def build_config() -> ExperimentConfig:
         tokenizer=BPETokenizerConfig(
             base_vocab_size=10_000,
             num_special_tokens=3,
-            vocab_path=str(PROJECT_ROOT / "src" / "tokenizers" / "my_vocab.txt"),
+            vocab_path=str(PROJECT_ROOT / "src" / "vocabs" / "my_vocab.txt"),
         ),
         model=BaselineDecoderConfig(
             d_model=128,
@@ -340,6 +340,6 @@ Run tests:
 ## Practical conventions for new experiments
 
 - Keep experiment files in `experiments/baseline/hyperparam_sweeps/`.
-- Keep vocab files under `src/tokenizers/`.
+- Keep vocab files under `src/vocabs/`.
 - Use `console` logging while iterating quickly; switch to `wandb` when needed.
 - Prefer changing config first; only add new adapters when config-only changes cannot express what you need.

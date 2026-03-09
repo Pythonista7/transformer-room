@@ -45,7 +45,7 @@ def build_config() -> ExperimentConfig:
         tokenizer=BPETokenizerConfig(
             base_vocab_size=10_000,
             num_special_tokens=3,
-            vocab_path=str(PROJECT_ROOT / "src" / "tokenizers" / "my_vocab.txt"),
+            vocab_path=str(PROJECT_ROOT / "src" / "vocabs" / "my_vocab.txt"),
         ),
         model=BaselineDecoderConfig(
             d_model=128,
