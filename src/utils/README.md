@@ -175,11 +175,22 @@ This wrapper runs any command, mirrors combined `stdout`/`stderr` to terminal an
 
 ### Canonical Example (`OptimAdamVsW.py`)
 
+Script path style:
+
 ```bash
 .venv/bin/python src/utils/run_and_shutdown.py \
   --log-dir runs/logs \
   --run-name optim-adam-vs-adamw \
-  -- .venv/bin/python src/experiments/baseline/hyperparam_sweeps/OptimAdamVsW.py
+  -- .venv/bin/python experiments/baseline/hyperparam_sweeps/OptimAdamVsW.py
+```
+
+Module style:
+
+```bash
+.venv/bin/python src/utils/run_and_shutdown.py \
+  --log-dir runs/logs \
+  --run-name optim-adam-vs-adamw \
+  -- .venv/bin/python -m experiments.baseline.hyperparam_sweeps.OptimAdamVsW
 ```
 
 ### CLI Flags
