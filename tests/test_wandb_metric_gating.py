@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from baseline.config import (
+from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
     ExperimentConfig,
@@ -17,8 +17,8 @@ from baseline.config import (
     TrainConfig,
     WandbMetricsConfig,
 )
-from baseline.core.registry import LOGGER_ADAPTERS
-from baseline.train import model_pipeline
+from src.core.registry import LOGGER_ADAPTERS
+from src.train import model_pipeline
 
 
 class RecordingLoggerSession:

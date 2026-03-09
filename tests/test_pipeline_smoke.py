@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from baseline.config import (
+from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
     ExperimentConfig,
@@ -15,7 +15,7 @@ from baseline.config import (
     RunConfig,
     TrainConfig,
 )
-from baseline.train import model_pipeline
+from src.train import model_pipeline
 
 
 class PipelineSmokeTests(unittest.TestCase):

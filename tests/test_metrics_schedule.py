@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from baseline.config import WandbMetricsConfig
-from baseline.training.metrics.schedule import build_metric_schedule
+from src.config import WandbMetricsConfig
+from src.training.metrics.schedule import build_metric_schedule
 
 
 class MetricScheduleTests(unittest.TestCase):

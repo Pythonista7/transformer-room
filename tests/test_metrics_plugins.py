@@ -5,15 +5,15 @@ import unittest
 
 import torch
 
-from baseline.config import WandbMetricsConfig
-from baseline.training.metrics import EpochMetricsContext, MetricSchedule, PeriodicValMetricsContext, StepMetricsContext
-from baseline.training.metrics.plugins import get_decoder_layer_labels
-from baseline.training.metrics.plugins.forward_hook_metrics import ForwardHookMetricsPlugin
-from baseline.training.metrics.plugins.global_grad_norm import GlobalGradNormPlugin
-from baseline.training.metrics.plugins.layernorm_grad_norm import LayerNormGradNormPlugin
-from baseline.training.metrics.plugins.loss_perplexity import LossPerplexityPlugin
-from baseline.training.metrics.plugins.parameter_optimizer_norms import ParameterOptimizerNormsPlugin
-from baseline.training.metrics.plugins.step_timing_memory import StepTimingAndMemoryPlugin
+from src.config import WandbMetricsConfig
+from src.training.metrics import EpochMetricsContext, MetricSchedule, PeriodicValMetricsContext, StepMetricsContext
+from src.training.metrics.plugins import get_decoder_layer_labels
+from src.training.metrics.plugins.forward_hook_metrics import ForwardHookMetricsPlugin
+from src.training.metrics.plugins.global_grad_norm import GlobalGradNormPlugin
+from src.training.metrics.plugins.layernorm_grad_norm import LayerNormGradNormPlugin
+from src.training.metrics.plugins.loss_perplexity import LossPerplexityPlugin
+from src.training.metrics.plugins.parameter_optimizer_norms import ParameterOptimizerNormsPlugin
+from src.training.metrics.plugins.step_timing_memory import StepTimingAndMemoryPlugin
 
 
 class _FakeLayerNorm(torch.nn.Module):

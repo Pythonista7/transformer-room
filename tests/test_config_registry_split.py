@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import baseline.adapters  # noqa: F401
-from baseline.config import (
+import src.adapters  # noqa: F401
+from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
     ExperimentConfig,
@@ -18,8 +18,8 @@ from baseline.config import (
     WandbMetricsConfig,
     validate_experiment_config,
 )
-from baseline.core.registry import get_dataset_adapter
-from baseline.experiments.LRvsBatchSizeEmpiricalSweep import build_config as build_lr_vs_batch_config
+from src.core.registry import get_dataset_adapter
+from src.experiments.LRvsBatchSizeEmpiricalSweep import build_config as build_lr_vs_batch_config
 
 
 class DummyDataset:
@@ -149,7 +149,7 @@ class RegistryAndSplitTests(unittest.TestCase):
         adapter = get_dataset_adapter("local_text")
         self.assertIsNotNone(adapter)
 
-        from baseline.core.registry import get_split_adapter
+        from src.core.registry import get_split_adapter
 
         split_adapter = get_split_adapter("holdout")
         cfg = HoldoutSplitConfig(train_fraction=0.6, seed=7, shuffle=True)

@@ -6,8 +6,8 @@ import types
 import unittest
 from pathlib import Path
 
-from baseline.adapters.loggers import WandbLoggerAdapter
-from baseline.config import LoggingConfig
+from src.adapters.loggers import WandbLoggerAdapter
+from src.config import LoggingConfig
 
 
 class FakeArtifact:
@@ -232,7 +232,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
         self.assertFalse(artifact_path.exists())
         self.assertEqual(
             artifact_ref,
-            "test-entity/transformer-room-baseline/lr-run-checkpoint:latest",
+            "test-entity/transformer-room-src/lr-run-checkpoint:latest",
         )
         self.assertTrue(fake_run.finished)
 

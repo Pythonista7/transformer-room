@@ -7,8 +7,8 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
-import baseline.adapters  # noqa: F401
-from baseline.config import (
+import src.adapters  # noqa: F401
+from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
     ExperimentConfig,
@@ -20,9 +20,9 @@ from baseline.config import (
     TrainConfig,
     WandbMetricsConfig,
 )
-from baseline.core.registry import LOGGER_ADAPTERS, get_model_adapter
-from baseline.core.types import SpecialTokenIds, VocabInfo
-from baseline.train import model_pipeline, resolve_wandb_lineage
+from src.core.registry import LOGGER_ADAPTERS, get_model_adapter
+from src.core.types import SpecialTokenIds, VocabInfo
+from src.train import model_pipeline, resolve_wandb_lineage
 
 
 class FakeRemoteLoggerSession:

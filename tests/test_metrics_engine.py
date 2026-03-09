@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from baseline.training.metrics import (
+from src.training.metrics import (
     BaseMetricPlugin,
     EpochMetricsContext,
     MetricSchedule,

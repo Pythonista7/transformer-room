@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from baseline.config import (
+from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
     ExperimentConfig,
@@ -15,8 +15,8 @@ from baseline.config import (
     RunConfig,
     TrainConfig,
 )
-from baseline.train import model_pipeline
-from baseline.training.metrics import BaseMetricPlugin, StepMetricsContext
+from src.train import model_pipeline
+from src.training.metrics import BaseMetricPlugin, StepMetricsContext
 
 
 class _FailingPlugin(BaseMetricPlugin):

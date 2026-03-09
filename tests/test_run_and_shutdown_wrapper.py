@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WRAPPER_PATH = REPO_ROOT / "baseline" / "utils" / "run_and_shutdown.py"
+WRAPPER_PATH = REPO_ROOT / "src" / "utils" / "run_and_shutdown.py"
 
 
 def _single_file(path: Path, pattern: str) -> Path:
