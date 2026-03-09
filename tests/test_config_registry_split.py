@@ -6,6 +6,7 @@ from pathlib import Path
 
 from src.adapters import register_builtin_adapters
 from src.config import (
+    ACEveryNDecoderConfig,
     BPETokenizerConfig,
     BaselineDecoderConfig,
     ExperimentConfig,
@@ -14,11 +15,12 @@ from src.config import (
     LoggingConfig,
     OptimizerConfig,
     RunConfig,
+    SACDecoderConfig,
     TrainConfig,
     WandbMetricsConfig,
     validate_experiment_config,
 )
-from src.core.registry import get_dataset_adapter
+from src.core.registry import get_dataset_adapter, get_model_adapter
 from experiments.baseline.hyperparam_sweeps.LRvsBatchSizeEmpiricalSweep import (
     build_config as build_lr_vs_batch_config,
 )
@@ -83,6 +85,21 @@ class ConfigValidationTests(unittest.TestCase):
             config.train.optimizer.name = optimizer_name
             validate_experiment_config(config)
 
+    def test_invalid_compile_warmup_steps_fails(self) -> None:
+        config = make_config()
+        config.run.compile_warmup_steps = -1
+        with self.assertRaisesRegex(ValueError, "compile_warmup_steps must be >= 0"):
+            validate_experiment_config(config)
+
+    def test_invalid_activation_memory_budget_fails(self) -> None:
+        config = make_config()
+        config.run.activation_memory_budget = 1.5
+        with self.assertRaisesRegex(
+            ValueError,
+            "activation_memory_budget must be in \\(0, 1\\] when set",
+        ):
+            validate_experiment_config(config)
+
     def test_invalid_optimizer_name_fails(self) -> None:
         config = make_config()
         config.train.optimizer.name = "rmsprop"  # type: ignore[assignment]
@@ -143,6 +160,35 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertEqual(config_a.run.run_name, config_b.run.run_name)
         self.assertNotEqual(config_a.run.group_name, config_b.run.group_name)
 
+    def test_ac_every_n_model_validation(self) -> None:
+        config = make_config()
+        config.model = ACEveryNDecoderConfig(
+            d_model=32,
+            n_heads=4,
+            layers=1,
+            checkpoint_every_n_layers=2,
+        )
+        validate_experiment_config(config)
+
+    def test_ac_every_n_invalid_checkpoint_interval_fails(self) -> None:
+        config = make_config()
+        config.model = ACEveryNDecoderConfig(
+            d_model=32,
+            n_heads=4,
+            layers=1,
+            checkpoint_every_n_layers=0,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "model.checkpoint_every_n_layers must be > 0",
+        ):
+            validate_experiment_config(config)
+
+    def test_sac_model_validation(self) -> None:
+        config = make_config()
+        config.model = SACDecoderConfig(d_model=32, n_heads=4, layers=1)
+        validate_experiment_config(config)
+
 
 class RegistryAndSplitTests(unittest.TestCase):
     def test_missing_registry_key_is_actionable(self) -> None:
@@ -164,6 +210,10 @@ class RegistryAndSplitTests(unittest.TestCase):
 
         self.assertEqual(train_a.indices, train_b.indices)
         self.assertEqual(val_a.indices, val_b.indices)
+
+    def test_new_model_adapters_are_registered(self) -> None:
+        self.assertIsNotNone(get_model_adapter("ac_every_n_decoder"))
+        self.assertIsNotNone(get_model_adapter("sac_decoder"))
 
 
 class LocalDatasetAdapterTests(unittest.TestCase):

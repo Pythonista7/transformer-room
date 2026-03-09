@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import sys
+import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
@@ -128,6 +129,22 @@ def get_uncompiled_model(model: torch.nn.Module) -> torch.nn.Module:
     return model._orig_mod if hasattr(model, "_orig_mod") else model
 
 
+def _set_activation_memory_budget_if_configured(config: ExperimentConfig) -> None:
+    budget = config.run.activation_memory_budget
+    if budget is None:
+        return
+
+    dynamo_module = getattr(torch, "_dynamo", None)
+    dynamo_config = getattr(dynamo_module, "config", None)
+    if dynamo_config is None or not hasattr(dynamo_config, "activation_memory_budget"):
+        raise RuntimeError(
+            "run.activation_memory_budget is set, but "
+            "torch._dynamo.config.activation_memory_budget is unavailable on this "
+            "PyTorch build."
+        )
+    dynamo_config.activation_memory_budget = float(budget)
+
+
 def maybe_compile_model(
     model: torch.nn.Module, device: torch.device, config: ExperimentConfig
 ) -> tuple[torch.nn.Module, bool, str]:
@@ -137,6 +154,8 @@ def maybe_compile_model(
         return model, False, "torch.compile unavailable"
     if device.type != "cuda":
         return model, False, f"skipped on {device.type}"
+
+    _set_activation_memory_budget_if_configured(config)
 
     try:
         compiled_model = torch.compile(
@@ -157,6 +176,11 @@ def should_enable_bf16_autocast(device: torch.device) -> bool:
     if not callable(checker):
         return False
     return bool(checker())
+
+
+def synchronize_if_cuda(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
 def get_autocast_context(device: torch.device, use_bf16: bool):
@@ -514,6 +538,7 @@ def train_loop(
     logger,
     device: torch.device,
     use_bf16: bool,
+    compile_enabled: bool,
     run_paths: dict[str, Path],
     *,
     extra_metric_plugins: Sequence[MetricPlugin] | None = None,
@@ -623,6 +648,7 @@ def train_loop(
     try:
         metrics_engine.on_train_start()
         for epoch in tqdm(range(start_epoch, config.train.epochs), desc="Epochs"):
+            epoch_wall_start = time.perf_counter()
             epoch_train_loss_sum = 0.0
             epoch_token_count = 0
 
@@ -637,6 +663,10 @@ def train_loop(
                     wandb_cfg=wandb_cfg,
                     layer_labels_available=bool(layer_labels),
                 )
+                include_in_perf_aggregates = not (
+                    compile_enabled
+                    and next_global_step <= config.run.compile_warmup_steps
+                )
                 step_ctx = StepMetricsContext(
                     schedule=schedule,
                     global_step=global_step,
@@ -646,6 +676,7 @@ def train_loop(
                     train_loader_len=len(train_loader),
                     tokens_seen_train=tokens_seen_train,
                     step_loss=None,
+                    include_in_perf_aggregates=include_in_perf_aggregates,
                 )
                 metrics_engine.on_step_start(step_ctx)
 
@@ -654,28 +685,66 @@ def train_loop(
                 key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
 
                 optimizer.zero_grad()
+                synchronize_if_cuda(device)
+                step_start = time.perf_counter()
+
+                synchronize_if_cuda(device)
+                forward_start = time.perf_counter()
                 with get_autocast_context(device=device, use_bf16=use_bf16):
                     output = model(input_seq, key_padding_mask=key_padding_mask)
                     loss_sum = loss_fn(
                         output.reshape(-1, output.size(-1)),
                         target_seq.reshape(-1),
                     )
+                synchronize_if_cuda(device)
+                forward_pass_time_ms = (time.perf_counter() - forward_start) * 1000.0
+
                 valid_tokens = int((target_seq != pad_id).sum().item())
                 if valid_tokens == 0:
                     continue
 
                 loss = loss_sum / valid_tokens
+                synchronize_if_cuda(device)
+                backward_start = time.perf_counter()
                 loss.backward()
-                step_ctx = replace(step_ctx, step_loss=float(loss.item()))
+                synchronize_if_cuda(device)
+                backward_pass_time_ms = (time.perf_counter() - backward_start) * 1000.0
+
+                step_ctx = replace(
+                    step_ctx,
+                    step_loss=float(loss.item()),
+                    forward_pass_time_ms=float(forward_pass_time_ms),
+                    backward_pass_time_ms=float(backward_pass_time_ms),
+                )
                 metrics_engine.after_backward(step_ctx)
 
+                synchronize_if_cuda(device)
+                optim_start = time.perf_counter()
                 optimizer.step()
+                synchronize_if_cuda(device)
+                optim_step_time_ms = (time.perf_counter() - optim_start) * 1000.0
+                step_time_ms = (time.perf_counter() - step_start) * 1000.0
+
+                peak_memory_gib: float | None = None
+                peak_reserved_memory_gib: float | None = None
+                if device.type == "cuda":
+                    peak_memory_gib = float(
+                        torch.cuda.max_memory_allocated(device) / (1024**3)
+                    )
+                    peak_reserved_memory_gib = float(
+                        torch.cuda.max_memory_reserved(device) / (1024**3)
+                    )
+
                 global_step = next_global_step
                 tokens_seen_train += valid_tokens
                 step_ctx = replace(
                     step_ctx,
                     global_step=global_step,
                     tokens_seen_train=tokens_seen_train,
+                    optim_step_time_ms=float(optim_step_time_ms),
+                    step_time_ms=float(step_time_ms),
+                    peak_memory_gib=peak_memory_gib,
+                    peak_reserved_memory_gib=peak_reserved_memory_gib,
                 )
                 metrics_engine.after_optimizer_step(step_ctx)
 
@@ -729,6 +798,7 @@ def train_loop(
             avg_train_loss = epoch_train_loss_sum / max(epoch_token_count, 1)
             val_metrics = evaluate(model, val_loader, loss_fn, device, use_bf16=use_bf16)
             model.train()
+            epoch_time_s = time.perf_counter() - epoch_wall_start
             epoch_metrics = metrics_engine.collect_epoch_metrics(
                 EpochMetricsContext(
                     global_step=global_step,
@@ -736,6 +806,7 @@ def train_loop(
                     avg_train_loss=float(avg_train_loss),
                     tokens_seen_train=tokens_seen_train,
                     val_metrics=val_metrics,
+                    epoch_time_s=float(epoch_time_s),
                 )
             )
             logger.log(epoch_metrics, step=global_step)
@@ -886,6 +957,7 @@ def model_pipeline(
             logger=logger,
             device=device,
             use_bf16=use_bf16,
+            compile_enabled=compile_enabled,
             run_paths=run_paths,
             extra_metric_plugins=extra_metric_plugins,
             metrics_debug_timing=metrics_debug_timing,

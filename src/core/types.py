@@ -8,12 +8,14 @@ from torch.utils.data import Dataset
 
 if TYPE_CHECKING:
     from .config import (
+        ACEveryNDecoderConfig,
         BaselineDecoderConfig,
         BPETokenizerConfig,
         HFTextDatasetConfig,
         HoldoutSplitConfig,
         LocalTextDatasetConfig,
         LoggingConfig,
+        SACDecoderConfig,
     )
 
 
@@ -88,7 +90,7 @@ class TokenizerAdapter(Protocol):
 class ModelAdapter(Protocol):
     def build(
         self,
-        cfg: BaselineDecoderConfig,
+        cfg: BaselineDecoderConfig | ACEveryNDecoderConfig | SACDecoderConfig,
         vocab: VocabInfo,
         special: SpecialTokenIds,
     ) -> torch.nn.Module:

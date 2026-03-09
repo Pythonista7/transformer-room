@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 import unittest
 
 import torch
@@ -85,7 +84,18 @@ def _make_schedule(
     )
 
 
-def _step_ctx(schedule: MetricSchedule, *, step_loss: float | None = 1.25) -> StepMetricsContext:
+def _step_ctx(
+    schedule: MetricSchedule,
+    *,
+    step_loss: float | None = 1.25,
+    step_time_ms: float | None = None,
+    forward_pass_time_ms: float | None = None,
+    backward_pass_time_ms: float | None = None,
+    optim_step_time_ms: float | None = None,
+    peak_memory_gib: float | None = None,
+    peak_reserved_memory_gib: float | None = None,
+    include_in_perf_aggregates: bool = True,
+) -> StepMetricsContext:
     return StepMetricsContext(
         schedule=schedule,
         global_step=1,
@@ -95,6 +105,13 @@ def _step_ctx(schedule: MetricSchedule, *, step_loss: float | None = 1.25) -> St
         train_loader_len=10,
         tokens_seen_train=32,
         step_loss=step_loss,
+        step_time_ms=step_time_ms,
+        forward_pass_time_ms=forward_pass_time_ms,
+        backward_pass_time_ms=backward_pass_time_ms,
+        optim_step_time_ms=optim_step_time_ms,
+        peak_memory_gib=peak_memory_gib,
+        peak_reserved_memory_gib=peak_reserved_memory_gib,
+        include_in_perf_aggregates=include_in_perf_aggregates,
     )
 
 
@@ -181,7 +198,7 @@ class LossPerplexityPluginTests(unittest.TestCase):
 
 
 class StepTimingAndMemoryPluginTests(unittest.TestCase):
-    def test_step_time_emitted_on_cpu(self) -> None:
+    def test_timing_metrics_emitted_when_present_in_context(self) -> None:
         plugin = StepTimingAndMemoryPlugin(
             wandb_cfg=WandbMetricsConfig(enable_step_time=True, enable_peak_memory=False),
             device=torch.device("cpu"),
@@ -190,15 +207,39 @@ class StepTimingAndMemoryPluginTests(unittest.TestCase):
             _make_schedule(
                 should_log_step_metrics=True,
                 should_log_this_step=True,
-            )
+            ),
+            step_time_ms=12.5,
+            forward_pass_time_ms=6.0,
+            backward_pass_time_ms=3.5,
+            optim_step_time_ms=2.5,
         )
 
-        plugin.on_step_start(ctx)
-        time.sleep(0.001)
+        plugin.on_train_start()
         metrics = plugin.collect_step_metrics(ctx)
 
         self.assertIn("step_time_ms", metrics)
-        self.assertGreaterEqual(metrics["step_time_ms"], 0.0)
+        self.assertEqual(metrics["step_time_ms"], 12.5)
+        self.assertEqual(metrics["forward_pass_time_ms"], 6.0)
+        self.assertEqual(metrics["backward_pass_time_ms"], 3.5)
+        self.assertEqual(metrics["optim_step_time_ms"], 2.5)
+
+    def test_reserved_memory_metric_emitted_when_available(self) -> None:
+        plugin = StepTimingAndMemoryPlugin(
+            wandb_cfg=WandbMetricsConfig(enable_step_time=False, enable_peak_memory=True),
+            device=torch.device("cuda"),
+        )
+        ctx = _step_ctx(
+            _make_schedule(
+                should_log_step_metrics=True,
+                should_log_this_step=True,
+            ),
+            peak_memory_gib=1.25,
+            peak_reserved_memory_gib=2.5,
+        )
+
+        metrics = plugin.collect_step_metrics(ctx)
+        self.assertEqual(metrics["peak_memory_gib"], 1.25)
+        self.assertEqual(metrics["peak_reserved_memory_gib"], 2.5)
 
     def test_no_metrics_when_step_cadence_disabled(self) -> None:
         plugin = StepTimingAndMemoryPlugin(
@@ -212,9 +253,50 @@ class StepTimingAndMemoryPluginTests(unittest.TestCase):
             )
         )
 
-        plugin.on_step_start(ctx)
         metrics = plugin.collect_step_metrics(ctx)
         self.assertEqual(metrics, {})
+
+    def test_epoch_timing_aggregates_skip_compile_warmup_steps(self) -> None:
+        plugin = StepTimingAndMemoryPlugin(
+            wandb_cfg=WandbMetricsConfig(enable_step_time=True, enable_peak_memory=False),
+            device=torch.device("cpu"),
+        )
+        plugin.on_train_start()
+
+        warmup_ctx = _step_ctx(
+            _make_schedule(),
+            step_time_ms=30.0,
+            forward_pass_time_ms=12.0,
+            backward_pass_time_ms=10.0,
+            optim_step_time_ms=8.0,
+            include_in_perf_aggregates=False,
+        )
+        measured_ctx = _step_ctx(
+            _make_schedule(),
+            step_time_ms=20.0,
+            forward_pass_time_ms=9.0,
+            backward_pass_time_ms=7.0,
+            optim_step_time_ms=4.0,
+            include_in_perf_aggregates=True,
+        )
+        plugin.after_optimizer_step(warmup_ctx)
+        plugin.after_optimizer_step(measured_ctx)
+
+        epoch_metrics = plugin.collect_epoch_metrics(
+            EpochMetricsContext(
+                global_step=2,
+                epoch=0,
+                avg_train_loss=1.0,
+                tokens_seen_train=32,
+                val_metrics={"val_loss": 1.0, "val_perplexity": 2.0},
+                epoch_time_s=1.5,
+            )
+        )
+        self.assertEqual(epoch_metrics["epoch_time_s"], 1.5)
+        self.assertEqual(epoch_metrics["avg_step_time_ms_epoch"], 20.0)
+        self.assertEqual(epoch_metrics["avg_forward_pass_time_ms_epoch"], 9.0)
+        self.assertEqual(epoch_metrics["avg_backward_pass_time_ms_epoch"], 7.0)
+        self.assertEqual(epoch_metrics["avg_optim_step_time_ms_epoch"], 4.0)
 
 
 class GradNormPluginTests(unittest.TestCase):

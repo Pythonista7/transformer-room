@@ -1,6 +1,7 @@
 """Public config exports for the modular training pipeline."""
 
 from .core.config import (
+    ACEveryNDecoderConfig,
     BPETokenizerConfig,
     BaselineDecoderConfig,
     DatasetConfig,
@@ -12,6 +13,7 @@ from .core.config import (
     ModelConfig,
     OptimizerConfig,
     RunConfig,
+    SACDecoderConfig,
     SplitConfig,
     TokenizerConfig,
     TrainConfig,
@@ -21,6 +23,7 @@ from .core.config import (
 )
 
 __all__ = [
+    "ACEveryNDecoderConfig",
     "BPETokenizerConfig",
     "BaselineDecoderConfig",
     "DatasetConfig",
@@ -32,6 +35,7 @@ __all__ = [
     "ModelConfig",
     "OptimizerConfig",
     "RunConfig",
+    "SACDecoderConfig",
     "SplitConfig",
     "TokenizerConfig",
     "TrainConfig",

@@ -16,6 +16,13 @@ class StepMetricsContext:
     train_loader_len: int
     tokens_seen_train: int
     step_loss: float | None
+    step_time_ms: float | None = None
+    forward_pass_time_ms: float | None = None
+    backward_pass_time_ms: float | None = None
+    optim_step_time_ms: float | None = None
+    peak_memory_gib: float | None = None
+    peak_reserved_memory_gib: float | None = None
+    include_in_perf_aggregates: bool = True
 
     @property
     def epoch_progress(self) -> float:
@@ -44,6 +51,7 @@ class EpochMetricsContext:
     avg_train_loss: float
     tokens_seen_train: int
     val_metrics: Mapping[str, float]
+    epoch_time_s: float | None = None
 
 
 class MetricPlugin(Protocol):

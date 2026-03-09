@@ -232,7 +232,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
         self.assertFalse(artifact_path.exists())
         self.assertEqual(
             artifact_ref,
-            "test-entity/transformer-room-src/lr-run-checkpoint:latest",
+            "test-entity/transformer-room-baseline/lr-run-checkpoint:latest",
         )
         self.assertTrue(fake_run.finished)
 
@@ -287,7 +287,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
         self.assertIn("Grad Norm/global_grad_norm", logged_metrics)
         self.assertIn("Activation Norms/activation_norm_last", logged_metrics)
         self.assertIn("Attention Entropy/attention_entropy_middle", logged_metrics)
-        self.assertIn("Charts/step_time_ms", logged_metrics)
+        self.assertIn("Timing/step_time_ms", logged_metrics)
         self.assertIn("Param Norms/global_param_norm", logged_metrics)
         self.assertIn("Param Norms/layer_param_norm_first", logged_metrics)
         self.assertIn("Update Dynamics/param_update_norm", logged_metrics)

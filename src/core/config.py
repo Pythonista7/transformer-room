@@ -20,6 +20,8 @@ class RunConfig:
     torch_compile_mode: str = "default"
     torch_compile_fullgraph: bool = False
     torch_compile_dynamic: bool = False
+    activation_memory_budget: float | None = None
+    compile_warmup_steps: int = 0
     seed: int = 42
 
 
@@ -64,7 +66,26 @@ class BaselineDecoderConfig:
     dropout: float = 0.1
 
 
-ModelConfig = BaselineDecoderConfig
+@dataclass(slots=True)
+class ACEveryNDecoderConfig:
+    name: Literal["ac_every_n_decoder"] = "ac_every_n_decoder"
+    d_model: int = 128
+    n_heads: int = 8
+    layers: int = 2
+    dropout: float = 0.1
+    checkpoint_every_n_layers: int = 1
+
+
+@dataclass(slots=True)
+class SACDecoderConfig:
+    name: Literal["sac_decoder"] = "sac_decoder"
+    d_model: int = 128
+    n_heads: int = 8
+    layers: int = 2
+    dropout: float = 0.1
+
+
+ModelConfig = BaselineDecoderConfig | ACEveryNDecoderConfig | SACDecoderConfig
 
 
 @dataclass(slots=True)
@@ -177,6 +198,12 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("run.artifacts_root must be non-empty.")
     if config.run.checkpoint_every_n_steps < 0:
         raise ValueError("run.checkpoint_every_n_steps must be >= 0.")
+    if config.run.compile_warmup_steps < 0:
+        raise ValueError("run.compile_warmup_steps must be >= 0.")
+    if config.run.activation_memory_budget is not None and not (
+        0.0 < config.run.activation_memory_budget <= 1.0
+    ):
+        raise ValueError("run.activation_memory_budget must be in (0, 1] when set.")
     if not config.run.checkpoint_filename.strip():
         raise ValueError("run.checkpoint_filename must be non-empty.")
     if not config.run.final_model_filename.strip():
@@ -206,9 +233,14 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("tokenizer.vocab_path must be non-empty.")
     resolve_special_token_ids(config.tokenizer)
 
-    if config.model.name != "baseline_decoder":
+    if config.model.name not in {
+        "baseline_decoder",
+        "ac_every_n_decoder",
+        "sac_decoder",
+    }:
         raise ValueError(
-            f"Unsupported model.name '{config.model.name}'. Expected: baseline_decoder."
+            f"Unsupported model.name '{config.model.name}'. "
+            "Expected one of: baseline_decoder, ac_every_n_decoder, sac_decoder."
         )
     if config.model.d_model <= 0:
         raise ValueError("model.d_model must be > 0.")
@@ -223,6 +255,11 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             "model.d_model must be divisible by model.n_heads "
             f"(got d_model={config.model.d_model}, n_heads={config.model.n_heads})."
         )
+    if (
+        config.model.name == "ac_every_n_decoder"
+        and config.model.checkpoint_every_n_layers <= 0
+    ):
+        raise ValueError("model.checkpoint_every_n_layers must be > 0.")
 
     if config.train.epochs <= 0:
         raise ValueError("train.epochs must be > 0.")

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from src.config import (
+    ACEveryNDecoderConfig,
     BPETokenizerConfig,
     BaselineDecoderConfig,
     ExperimentConfig,
@@ -13,13 +14,17 @@ from src.config import (
     LoggingConfig,
     OptimizerConfig,
     RunConfig,
+    SACDecoderConfig,
     TrainConfig,
 )
 from src.train import model_pipeline
 
 
 class PipelineSmokeTests(unittest.TestCase):
-    def test_cpu_smoke_train_and_artifacts(self) -> None:
+    def _run_smoke_with_model(
+        self,
+        model_cfg: BaselineDecoderConfig | ACEveryNDecoderConfig | SACDecoderConfig,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             dataset_path = tmp_path / "tiny.txt"
@@ -48,7 +53,7 @@ class PipelineSmokeTests(unittest.TestCase):
                     num_special_tokens=3,
                     vocab_path=str(vocab_path),
                 ),
-                model=BaselineDecoderConfig(d_model=32, n_heads=4, layers=1),
+                model=model_cfg,
                 train=TrainConfig(
                     epochs=1,
                     optimizer=OptimizerConfig(
@@ -74,6 +79,22 @@ class PipelineSmokeTests(unittest.TestCase):
             self.assertTrue(Path(result.checkpoint_path).exists())
             self.assertTrue(Path(result.final_model_path).exists())
             self.assertGreater(result.global_step, 0)
+
+    def test_cpu_smoke_train_and_artifacts_baseline(self) -> None:
+        self._run_smoke_with_model(BaselineDecoderConfig(d_model=32, n_heads=4, layers=1))
+
+    def test_cpu_smoke_train_and_artifacts_ac_every_n(self) -> None:
+        self._run_smoke_with_model(
+            ACEveryNDecoderConfig(
+                d_model=32,
+                n_heads=4,
+                layers=1,
+                checkpoint_every_n_layers=1,
+            )
+        )
+
+    def test_cpu_smoke_train_and_artifacts_sac(self) -> None:
+        self._run_smoke_with_model(SACDecoderConfig(d_model=32, n_heads=4, layers=1))
 
 
 if __name__ == "__main__":
