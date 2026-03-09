@@ -19,7 +19,9 @@ from src.config import (
     validate_experiment_config,
 )
 from src.core.registry import get_dataset_adapter
-from src.experiments.LRvsBatchSizeEmpiricalSweep import build_config as build_lr_vs_batch_config
+from src.experiments.baseline.hyperparam_sweeps.LRvsBatchSizeEmpiricalSweep import (
+    build_config as build_lr_vs_batch_config,
+)
 
 
 class DummyDataset:

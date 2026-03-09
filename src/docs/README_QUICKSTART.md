@@ -4,14 +4,14 @@ Fast path to create and run a new experiment with the modular baseline pipeline.
 
 ## 1) Create an experiment file
 
-Create `src/experiments/my_experiment.py`:
+Create `src/experiments/baseline/hyperparam_sweeps/my_experiment.py`:
 
 ```python
 from __future__ import annotations
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -88,13 +88,13 @@ if __name__ == "__main__":
 From repo root:
 
 ```bash
-.venv/bin/python src/experiments/my_experiment.py
+.venv/bin/python src/experiments/baseline/hyperparam_sweeps/my_experiment.py
 ```
 
 From inside `src/`:
 
 ```bash
-../.venv/bin/python experiments/my_experiment.py
+../.venv/bin/python experiments/baseline/hyperparam_sweeps/my_experiment.py
 ```
 
 ## 3) Inspect outputs

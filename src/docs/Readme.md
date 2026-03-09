@@ -74,7 +74,7 @@ The main idea is:
 - `src/train.py` - orchestrator
 - `src/core/` - config/types/registry
 - `src/adapters/` - pluggable implementations
-- `src/experiments/` - experiment config modules
+- `src/experiments/baseline/hyperparam_sweeps/` - experiment config modules
 - `src/models/<run_name>/` - run outputs
 - `src/tokenizers/` - persisted tokenizer vocab files
 
@@ -85,13 +85,13 @@ The main idea is:
 From repo root:
 
 ```bash
-.venv/bin/python src/experiments/tiny_shakespeare.py
+.venv/bin/python src/experiments/baseline/hyperparam_sweeps/tiny_shakespeare.py
 ```
 
 From inside `src/`:
 
 ```bash
-../.venv/bin/python experiments/tiny_shakespeare.py
+../.venv/bin/python experiments/baseline/hyperparam_sweeps/tiny_shakespeare.py
 ```
 
 `tiny_shakespeare.py` already bootstraps `sys.path` so package imports work from either location.
@@ -100,7 +100,7 @@ From inside `src/`:
 
 ## Creating a new experiment
 
-1. Add a new file in `src/experiments/`, for example `my_experiment.py`.
+1. Add a new file in `src/experiments/baseline/hyperparam_sweeps/`, for example `my_experiment.py`.
 2. Build and return an `ExperimentConfig`.
 3. Call `model_pipeline(config)` in `main()`.
 
@@ -111,7 +111,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -339,7 +339,7 @@ Run tests:
 
 ## Practical conventions for new experiments
 
-- Keep experiment files in `src/experiments/`.
+- Keep experiment files in `src/experiments/baseline/hyperparam_sweeps/`.
 - Keep vocab files under `src/tokenizers/`.
 - Use `console` logging while iterating quickly; switch to `wandb` when needed.
 - Prefer changing config first; only add new adapters when config-only changes cannot express what you need.

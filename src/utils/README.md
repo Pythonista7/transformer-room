@@ -179,7 +179,7 @@ This wrapper runs any command, mirrors combined `stdout`/`stderr` to terminal an
 .venv/bin/python src/utils/run_and_shutdown.py \
   --log-dir runs/logs \
   --run-name optim-adam-vs-adamw \
-  -- .venv/bin/python src/experiments/OptimAdamVsW.py
+  -- .venv/bin/python src/experiments/baseline/hyperparam_sweeps/OptimAdamVsW.py
 ```
 
 ### CLI Flags

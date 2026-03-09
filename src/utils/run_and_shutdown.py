@@ -3,7 +3,7 @@ Example:
   .venv/bin/python src/utils/run_and_shutdown.py \
     --log-dir runs/logs \
     --run-name optim-adam-vs-adamw \
-    -- python src/experiments/OptimAdamVsW.py
+    -- python src/experiments/baseline/hyperparam_sweeps/OptimAdamVsW.py
 """
 
 from __future__ import annotations
