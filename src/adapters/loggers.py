@@ -366,5 +366,6 @@ class WandbLoggerAdapter:
         )
 
 
-register_logger_adapter("console", ConsoleLoggerAdapter())
-register_logger_adapter("wandb", WandbLoggerAdapter())
+def register_logger_adapters() -> None:
+    register_logger_adapter("console", ConsoleLoggerAdapter())
+    register_logger_adapter("wandb", WandbLoggerAdapter())

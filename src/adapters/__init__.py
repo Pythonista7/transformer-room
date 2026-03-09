@@ -1,10 +1,19 @@
-"""Built-in adapter registrations.
+"""Built-in adapter registration utilities."""
 
-Importing this package registers all built-in dataset/tokenizer/model/split/logger adapters.
-"""
 
-from . import datasets  # noqa: F401
-from . import tokenizers  # noqa: F401
-from . import models  # noqa: F401
-from . import splits  # noqa: F401
-from . import loggers  # noqa: F401
+def register_builtin_adapters() -> None:
+    """Register all built-in adapters with the runtime registry."""
+    from .datasets import register_dataset_adapters
+    from .loggers import register_logger_adapters
+    from .models import register_model_adapters
+    from .splits import register_split_adapters
+    from .tokenizers import register_tokenizer_adapters
+
+    register_dataset_adapters()
+    register_tokenizer_adapters()
+    register_model_adapters()
+    register_split_adapters()
+    register_logger_adapters()
+
+
+__all__ = ["register_builtin_adapters"]

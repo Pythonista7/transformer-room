@@ -151,5 +151,6 @@ class HFTextDatasetAdapter:
         )
 
 
-register_dataset_adapter("local_text", LocalTextDatasetAdapter())
-register_dataset_adapter("hf_text", HFTextDatasetAdapter())
+def register_dataset_adapters() -> None:
+    register_dataset_adapter("local_text", LocalTextDatasetAdapter())
+    register_dataset_adapter("hf_text", HFTextDatasetAdapter())

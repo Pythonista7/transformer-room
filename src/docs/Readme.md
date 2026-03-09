@@ -244,7 +244,7 @@ Use the same pattern:
 1. Implement the matching protocol from `src/core/types.py`
 2. Register in `src/core/registry.py` via helper
 3. Ensure config has a selector name and validation path
-4. Make sure `src/adapters/__init__.py` imports the module so registration runs
+4. Call `register_builtin_adapters()` during startup so registration runs
 
 ---
 

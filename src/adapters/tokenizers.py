@@ -93,4 +93,5 @@ class BPETokenizerAdapter:
         )
 
 
-register_tokenizer_adapter("bpe", BPETokenizerAdapter())
+def register_tokenizer_adapters() -> None:
+    register_tokenizer_adapter("bpe", BPETokenizerAdapter())

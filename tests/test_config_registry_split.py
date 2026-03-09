@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import src.adapters  # noqa: F401
+from src.adapters import register_builtin_adapters
 from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
@@ -22,6 +22,8 @@ from src.core.registry import get_dataset_adapter
 from experiments.baseline.hyperparam_sweeps.LRvsBatchSizeEmpiricalSweep import (
     build_config as build_lr_vs_batch_config,
 )
+
+register_builtin_adapters()
 
 
 class DummyDataset:

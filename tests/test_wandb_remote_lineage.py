@@ -7,7 +7,7 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
-import src.adapters  # noqa: F401
+from src.adapters import register_builtin_adapters
 from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
@@ -23,6 +23,8 @@ from src.config import (
 from src.core.registry import LOGGER_ADAPTERS, get_model_adapter
 from src.core.types import SpecialTokenIds, VocabInfo
 from src.train import model_pipeline, resolve_wandb_lineage
+
+register_builtin_adapters()
 
 
 class FakeRemoteLoggerSession:

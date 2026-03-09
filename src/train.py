@@ -16,9 +16,7 @@ from torch.nn import CrossEntropyLoss
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-# Import side effect: registers all built-in adapters.
-import src.adapters  # noqa: F401
-
+from .adapters import register_builtin_adapters
 from .adapters.loggers import sanitize_wandb_name
 from .core.config import ExperimentConfig, validate_experiment_config
 from .core.registry import (
@@ -791,6 +789,7 @@ def model_pipeline(
     extra_metric_plugins: Sequence[MetricPlugin] | None = None,
     metrics_debug_timing: bool = False,
 ) -> RunResult:
+    register_builtin_adapters()
     validate_experiment_config(config)
     logger_adapter = get_logger_adapter(config.logging.provider)
     config = resolve_wandb_lineage(config, logger_adapter)

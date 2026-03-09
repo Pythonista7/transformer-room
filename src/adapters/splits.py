@@ -29,4 +29,5 @@ class HoldoutSplitAdapter:
         return Subset(dataset, train_indices), Subset(dataset, val_indices)
 
 
-register_split_adapter("holdout", HoldoutSplitAdapter())
+def register_split_adapters() -> None:
+    register_split_adapter("holdout", HoldoutSplitAdapter())

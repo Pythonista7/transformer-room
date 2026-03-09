@@ -25,4 +25,5 @@ class BaselineDecoderModelAdapter:
         )
 
 
-register_model_adapter("baseline_decoder", BaselineDecoderModelAdapter())
+def register_model_adapters() -> None:
+    register_model_adapter("baseline_decoder", BaselineDecoderModelAdapter())
