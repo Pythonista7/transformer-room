@@ -1,4 +1,11 @@
-from layers import LinearLayer, DropoutLayer, ReluActivation, LayerNorm,EmbeddingLayer, SoftmaxActivation
+from .layers import (
+    DropoutLayer,
+    EmbeddingLayer,
+    LayerNorm,
+    LinearLayer,
+    ReluActivation,
+    SoftmaxActivation,
+)
 
 __all__ = [
     "LinearLayer",

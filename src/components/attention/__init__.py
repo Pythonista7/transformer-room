@@ -1,5 +1,5 @@
-from basic_mh_self_attn import BasicMHSelfAttn
+from .basic_mh_self_attn import BasicMultiHeadSelfAttention
 
 __all__ = [
-    "BasicMHSelfAttn",
+    "BasicMultiHeadSelfAttention",
 ]

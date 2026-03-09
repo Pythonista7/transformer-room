@@ -1,4 +1,4 @@
-from baseline_model import BaselineModel
+from .baseline_model import BaselineModel
 
 __all__ = [
     "BaselineModel",

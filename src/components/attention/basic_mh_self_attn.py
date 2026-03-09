@@ -1,8 +1,8 @@
-
+import math
 from torch import nn
 import torch
 
-from primitive.layers import LinearLayer, SoftmaxActivation
+from ..primitive.layers import LinearLayer, SoftmaxActivation
 
 
 class BasicMultiHeadSelfAttention(nn.Module):

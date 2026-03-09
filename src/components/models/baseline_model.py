@@ -3,9 +3,9 @@ from typing import List
 import torch
 import torch.nn as nn
 
-from primitive.layers import EmbeddingLayer, LinearLayer
-from positional.positional_encoder import SinusoidalPositionalEncoder as PositionalEncoder
-from src.components.blocks.self_attn_decoder_block import BasicSelfAttnDecoder
+from ..blocks.self_attn_decoder_block import BasicSelfAttnDecoder
+from ..positional.positional_encoder import SinusoidalPositionalEncoder as PositionalEncoder
+from ..primitive.layers import EmbeddingLayer, LinearLayer
 
 
 class BaselineModel(nn.Module):

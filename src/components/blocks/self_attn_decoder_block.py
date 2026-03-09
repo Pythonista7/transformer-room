@@ -6,8 +6,8 @@
 import torch
 from torch import nn
 
-from attention.basic_mh_self_attn import BasicMultiHeadSelfAttention
-from primitive.layers import DropoutLayer,LinearLayer,LayerNorm,ReluActivation
+from ..attention.basic_mh_self_attn import BasicMultiHeadSelfAttention
+from ..primitive.layers import DropoutLayer, LinearLayer, LayerNorm, ReluActivation
 
 
 class BasicSelfAttnDecoder(nn.Module):

@@ -1,3 +1,3 @@
-from positional_encoder import SinusoidalPositionalEncoder
+from .positional_encoder import SinusoidalPositionalEncoder
 
 __all__ = ["SinusoidalPositionalEncoder"]
