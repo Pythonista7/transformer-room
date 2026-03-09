@@ -1,5 +1,5 @@
 """
-python -m src.utils.util \
+python -m src.utils.mem_estimator \
   --run-config src/models/wikitext2_gpt2_v1/run_config.json \
   --top-k 20 \
   --plot-dir src/models/wikitext2_gpt2_v1/memviz \

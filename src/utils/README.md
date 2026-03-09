@@ -210,3 +210,35 @@ Before launching the experiment command, the wrapper also ensures:
 - `WANDB_API_KEY` is set. If missing, it prompts interactively for input and injects it for the child process.
 - `CONTAINER_ID` or `VAST_CONTAINERLABEL` is set so the wrapper can resolve the instance ID.
 - `CONTAINER_API_KEY` or `VAST_API_KEY` is set. If both are missing, it prompts interactively for `VAST_API_KEY`.
+
+---
+
+## Export Ops Report Utility
+
+File: `src/utils/export_ops_report.py`
+
+This utility exports a model with `torch.export.export(...)`, runs
+`run_decompositions()`, then prints:
+
+- the unique operator list
+- operator frequency summary
+- namespace breakdown (for example `aten` vs python builtins)
+
+### Programmatic Usage
+
+```python
+import torch
+from src.components.models.baseline_model import BaselineModel
+from src.utils.export_ops_report import extract_and_print_model_ops
+
+model = BaselineModel(vocab_size=100, layers=2, d_model=64, n_heads=8, pad_id=98)
+tokens = torch.randint(0, 97, (2, 16), dtype=torch.long)
+mask = torch.ones((2, 16), dtype=torch.bool)
+
+extract_and_print_model_ops(
+    model,
+    example_args=(tokens,),
+    example_kwargs={"key_padding_mask": mask},
+    top_k=20,
+)
+```
