@@ -108,49 +108,49 @@ def ensure_wikitext_vocab_file(
 
 def build_variant_specs() -> list[VariantSpec]:
     return [
-        VariantSpec(
-            key="baseline_no_compile",
-            model_cfg=BaselineDecoderConfig(d_model=768, n_heads=8, layers=12, dropout=0.1),
-            use_torch_compile=False,
-        ),
-        VariantSpec(
-            key="ac_every_5_no_compile",
-            model_cfg=ACEveryNDecoderConfig(
-                d_model=768,
-                n_heads=8,
-                layers=12,
-                dropout=0.1,
-                checkpoint_every_n_layers=5,
-            ),
-            use_torch_compile=False,
-        ),
-        VariantSpec(
-            key="ac_every_2_no_compile",
-            model_cfg=ACEveryNDecoderConfig(
-                d_model=768,
-                n_heads=8,
-                layers=12,
-                dropout=0.1,
-                checkpoint_every_n_layers=2,
-            ),
-            use_torch_compile=False,
-        ),
-        VariantSpec(
-            key="ac_every_1_no_compile",
-            model_cfg=ACEveryNDecoderConfig(
-                d_model=768,
-                n_heads=8,
-                layers=12,
-                dropout=0.1,
-                checkpoint_every_n_layers=1,
-            ),
-            use_torch_compile=False,
-        ),
-        VariantSpec(
-            key="sac_no_compile",
-            model_cfg=SACDecoderConfig(d_model=768, n_heads=8, layers=12, dropout=0.1),
-            use_torch_compile=False,
-        ),
+        # VariantSpec(
+        #     key="baseline_no_compile",
+        #     model_cfg=BaselineDecoderConfig(d_model=768, n_heads=8, layers=12, dropout=0.1),
+        #     use_torch_compile=False,
+        # ),
+        # VariantSpec(
+        #     key="ac_every_5_no_compile",
+        #     model_cfg=ACEveryNDecoderConfig(
+        #         d_model=768,
+        #         n_heads=8,
+        #         layers=12,
+        #         dropout=0.1,
+        #         checkpoint_every_n_layers=5,
+        #     ),
+        #     use_torch_compile=False,
+        # ),
+        # VariantSpec(
+        #     key="ac_every_2_no_compile",
+        #     model_cfg=ACEveryNDecoderConfig(
+        #         d_model=768,
+        #         n_heads=8,
+        #         layers=12,
+        #         dropout=0.1,
+        #         checkpoint_every_n_layers=2,
+        #     ),
+        #     use_torch_compile=False,
+        # ),
+        # VariantSpec(
+        #     key="ac_every_1_no_compile",
+        #     model_cfg=ACEveryNDecoderConfig(
+        #         d_model=768,
+        #         n_heads=8,
+        #         layers=12,
+        #         dropout=0.1,
+        #         checkpoint_every_n_layers=1,
+        #     ),
+        #     use_torch_compile=False,
+        # ),
+        # VariantSpec(
+        #     key="sac_no_compile",
+        #     model_cfg=SACDecoderConfig(d_model=768, n_heads=8, layers=12, dropout=0.1),
+        #     use_torch_compile=False,
+        # ),
         VariantSpec(
             key="baseline_compile",
             model_cfg=BaselineDecoderConfig(d_model=768, n_heads=8, layers=12, dropout=0.1),
@@ -309,7 +309,7 @@ def build_config(
 
 def _build_sweep_group() -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    return f"ac-memory-exp-wikitext2-{timestamp}"
+    return f"torch-memory-budget-exp-wikitext2-{timestamp}"
 
 
 def main() -> int:
@@ -345,6 +345,9 @@ def main() -> int:
             sweep_group=sweep_group,
             base_vocab_size=base_vocab_size,
         )
+        # Important! We need to reset the torch compiler state between runs to ensure that memory budgets are properly applied and that we don't reuse compiled graphs across runs in a way that would invalidate the experiment. This is especially important for the variants that use torch.compile with different activation memory budgets, as we want to make sure each run is compiled with the correct budget and that there is no cross-run contamination of compiled graphs.
+        torch.compiler.reset()
+        
         run_result = model_pipeline(cfg)
         results.append(
             {
