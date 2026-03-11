@@ -19,7 +19,12 @@ from tqdm import tqdm
 
 from .adapters import register_builtin_adapters
 from .adapters.loggers import sanitize_wandb_name
-from .core.config import ExperimentConfig, validate_experiment_config
+from .core.config import (
+    ExperimentConfig,
+    ResolvedTrainBatchingConfig,
+    resolve_train_batching,
+    validate_experiment_config,
+)
 from .core.registry import (
     get_dataset_adapter,
     get_logger_adapter,
@@ -189,6 +194,7 @@ def should_enable_bf16_autocast(device: torch.device) -> bool:
     return bool(checker())
 
 
+# TODO: @Ash remove this if possible or atleast make it optional only when specific timing metrics are essential.
 def synchronize_if_cuda(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -448,6 +454,7 @@ def build_data_loaders(
     tokenized: TokenizedCorpus,
     pin_memory: bool,
 ) -> tuple[DataLoader, DataLoader]:
+    batching = resolve_train_batching(config.train)
     special = tokenized.vocab.special
 
     token_stream = truncate_stream_by_fraction_at_eos(
@@ -483,13 +490,13 @@ def build_data_loaders(
 
     train_loader = DataLoader(
         train_set,
-        batch_size=config.train.batch_size,
+        batch_size=batching.loader_batch_size,
         shuffle=True,
         pin_memory=pin_memory,
     )
     val_loader = DataLoader(
         val_set,
-        batch_size=config.train.batch_size,
+        batch_size=batching.loader_batch_size,
         shuffle=False,
         pin_memory=pin_memory,
     )
@@ -537,6 +544,20 @@ def evaluate(
         "val_loss": avg_loss,
         "val_perplexity": perplexity,
     }
+
+
+def scale_gradients_by_token_count(
+    model: torch.nn.Module,
+    token_count: int,
+) -> None:
+    if token_count <= 0:
+        raise ValueError(f"token_count must be > 0, got {token_count}")
+
+    scale = 1.0 / float(token_count)
+    with torch.no_grad():
+        for param in model.parameters():
+            if param.grad is not None:
+                param.grad.mul_(scale)
 
 
 def train_loop(
@@ -650,6 +671,9 @@ def train_loop(
 
     model.train()
     non_blocking = device.type == "cuda"
+    batching: ResolvedTrainBatchingConfig = resolve_train_batching(config.train)
+    accumulation_steps = int(batching.accumulation_steps)
+    train_loader_len = len(train_loader)
 
     start_epoch, start_batch_idx, global_step, tokens_seen_train = load_checkpoint_if_available()
 
@@ -663,41 +687,59 @@ def train_loop(
             epoch_train_loss_sum = 0.0
             epoch_token_count = 0
 
+            micro_batches_in_step = 0
+            step_ctx: StepMetricsContext | None = None
+            step_start = 0.0
+            step_forward_pass_time_ms = 0.0
+            step_backward_pass_time_ms = 0.0
+            step_loss_sum = 0.0
+            step_token_count = 0
+            step_last_batch_idx = 0
+
             for batch_idx, (input_seq, target_seq, key_padding_mask) in enumerate(train_loader):
                 if epoch == start_epoch and batch_idx < start_batch_idx:
                     continue
 
-                next_global_step = global_step + 1
-                schedule = build_metric_schedule(
-                    next_global_step=next_global_step,
-                    wandb_enabled=wandb_enabled,
-                    wandb_cfg=wandb_cfg,
-                    layer_labels_available=bool(layer_labels),
-                )
-                include_in_perf_aggregates = not (
-                    compile_enabled
-                    and next_global_step <= config.run.compile_warmup_steps
-                )
-                step_ctx = StepMetricsContext(
-                    schedule=schedule,
-                    global_step=global_step,
-                    next_global_step=next_global_step,
-                    epoch=epoch,
-                    batch_idx=batch_idx,
-                    train_loader_len=len(train_loader),
-                    tokens_seen_train=tokens_seen_train,
-                    step_loss=None,
-                    include_in_perf_aggregates=include_in_perf_aggregates,
-                )
-                metrics_engine.on_step_start(step_ctx)
+                if micro_batches_in_step == 0:
+                    next_global_step = global_step + 1
+                    schedule = build_metric_schedule(
+                        next_global_step=next_global_step,
+                        wandb_enabled=wandb_enabled,
+                        wandb_cfg=wandb_cfg,
+                        layer_labels_available=bool(layer_labels),
+                    )
+                    include_in_perf_aggregates = not (
+                        compile_enabled
+                        and next_global_step <= config.run.compile_warmup_steps
+                    )
+                    step_ctx = StepMetricsContext(
+                        schedule=schedule,
+                        global_step=global_step,
+                        next_global_step=next_global_step,
+                        epoch=epoch,
+                        batch_idx=batch_idx,
+                        train_loader_len=train_loader_len,
+                        tokens_seen_train=tokens_seen_train,
+                        step_loss=None,
+                        include_in_perf_aggregates=include_in_perf_aggregates,
+                    )
+                    metrics_engine.on_step_start(step_ctx)
 
+                    optimizer.zero_grad()
+                    synchronize_if_cuda(device)
+                    step_start = time.perf_counter()
+                    step_forward_pass_time_ms = 0.0
+                    step_backward_pass_time_ms = 0.0
+                    step_loss_sum = 0.0
+                    step_token_count = 0
+
+                if step_ctx is None:
+                    raise RuntimeError("Step metrics context was not initialized.")
+
+                step_last_batch_idx = batch_idx
                 input_seq = input_seq.to(device, non_blocking=non_blocking)
                 target_seq = target_seq.to(device, non_blocking=non_blocking)
                 key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
-
-                optimizer.zero_grad()
-                synchronize_if_cuda(device)
-                step_start = time.perf_counter()
 
                 synchronize_if_cuda(device)
                 forward_start = time.perf_counter()
@@ -708,24 +750,43 @@ def train_loop(
                         target_seq.reshape(-1),
                     )
                 synchronize_if_cuda(device)
-                forward_pass_time_ms = (time.perf_counter() - forward_start) * 1000.0
+                step_forward_pass_time_ms += (time.perf_counter() - forward_start) * 1000.0
 
                 valid_tokens = int((target_seq != pad_id).sum().item())
-                if valid_tokens == 0:
+                if valid_tokens > 0:
+                    step_token_count += valid_tokens
+                    step_loss_sum += loss_sum.item()
+                    epoch_token_count += valid_tokens
+                    epoch_train_loss_sum += loss_sum.item()
+
+                    synchronize_if_cuda(device)
+                    backward_start = time.perf_counter()
+                    loss_sum.backward()
+                    synchronize_if_cuda(device)
+                    step_backward_pass_time_ms += (
+                        (time.perf_counter() - backward_start) * 1000.0
+                    )
+
+                micro_batches_in_step += 1
+                is_last_batch_in_epoch = batch_idx + 1 >= train_loader_len
+                if (
+                    micro_batches_in_step < accumulation_steps
+                    and not is_last_batch_in_epoch
+                ):
                     continue
 
-                loss = loss_sum / valid_tokens
-                synchronize_if_cuda(device)
-                backward_start = time.perf_counter()
-                loss.backward()
-                synchronize_if_cuda(device)
-                backward_pass_time_ms = (time.perf_counter() - backward_start) * 1000.0
+                if step_token_count <= 0:
+                    micro_batches_in_step = 0
+                    continue
 
+                scale_gradients_by_token_count(checkpoint_model, step_token_count)
+                step_loss = step_loss_sum / step_token_count
                 step_ctx = replace(
                     step_ctx,
-                    step_loss=float(loss.item()),
-                    forward_pass_time_ms=float(forward_pass_time_ms),
-                    backward_pass_time_ms=float(backward_pass_time_ms),
+                    batch_idx=step_last_batch_idx,
+                    step_loss=float(step_loss),
+                    forward_pass_time_ms=float(step_forward_pass_time_ms),
+                    backward_pass_time_ms=float(step_backward_pass_time_ms),
                 )
                 metrics_engine.after_backward(step_ctx)
 
@@ -746,10 +807,11 @@ def train_loop(
                         torch.cuda.max_memory_reserved(device) / (1024**3)
                     )
 
-                global_step = next_global_step
-                tokens_seen_train += valid_tokens
+                global_step = int(step_ctx.next_global_step)
+                tokens_seen_train += step_token_count
                 step_ctx = replace(
                     step_ctx,
+                    batch_idx=step_last_batch_idx,
                     global_step=global_step,
                     tokens_seen_train=tokens_seen_train,
                     optim_step_time_ms=float(optim_step_time_ms),
@@ -759,14 +821,11 @@ def train_loop(
                 )
                 metrics_engine.after_optimizer_step(step_ctx)
 
-                epoch_token_count += valid_tokens
-                epoch_train_loss_sum += loss_sum.item()
-
-                if schedule.should_log_this_step:
+                if step_ctx.schedule.should_log_this_step:
                     step_metrics = metrics_engine.collect_step_metrics(step_ctx)
                     logger.log(step_metrics, step=global_step)
 
-                if schedule.periodic_val_due:
+                if step_ctx.schedule.periodic_val_due:
                     val_metrics = evaluate(
                         model,
                         val_loader,
@@ -778,11 +837,11 @@ def train_loop(
                     last_val_metrics = val_metrics
                     val_log_metrics = metrics_engine.collect_periodic_val_metrics(
                         PeriodicValMetricsContext(
-                            schedule=schedule,
+                            schedule=step_ctx.schedule,
                             global_step=global_step,
                             epoch=epoch,
-                            batch_idx=batch_idx,
-                            train_loader_len=len(train_loader),
+                            batch_idx=step_last_batch_idx,
+                            train_loader_len=train_loader_len,
                             tokens_seen_train=tokens_seen_train,
                             val_metrics=val_metrics,
                         )
@@ -794,8 +853,8 @@ def train_loop(
                     and global_step % config.run.checkpoint_every_n_steps == 0
                 ):
                     next_epoch = epoch
-                    next_batch_idx = batch_idx + 1
-                    if next_batch_idx >= len(train_loader):
+                    next_batch_idx = step_last_batch_idx + 1
+                    if next_batch_idx >= train_loader_len:
                         next_epoch += 1
                         next_batch_idx = 0
 
@@ -805,6 +864,8 @@ def train_loop(
                         global_step,
                         aliases=("latest",),
                     )
+
+                micro_batches_in_step = 0
 
             avg_train_loss = epoch_train_loss_sum / max(epoch_token_count, 1)
             val_metrics = evaluate(model, val_loader, loss_fn, device, use_bf16=use_bf16)
@@ -882,6 +943,13 @@ def model_pipeline(
     print(f"Using device: {device}")
     use_bf16 = should_enable_bf16_autocast(device)
     print(f"bf16 autocast: {'enabled' if use_bf16 else 'disabled'}")
+    batching = resolve_train_batching(config.train)
+    print(
+        "Batching config: "
+        f"effective_batch_size={batching.effective_batch_size} | "
+        f"micro_batch_size={batching.micro_batch_size} | "
+        f"accumulation_steps={batching.accumulation_steps}"
+    )
 
     run_paths = prepare_run_artifact_paths(config)
 

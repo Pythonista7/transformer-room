@@ -166,7 +166,7 @@ def build_config(
                 weight_decay=weight_decay,
                 name=optimizer_type,
             ),
-            batch_size=20,
+            effective_batch_size=20,
             seq_len=1024,
             stride=1024,
             data_fraction=1.0,

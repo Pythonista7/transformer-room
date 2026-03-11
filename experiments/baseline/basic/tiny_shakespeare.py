@@ -56,7 +56,7 @@ def build_config() -> ExperimentConfig:
         train=TrainConfig(
             epochs=3,
             optimizer=OptimizerConfig(learning_rate=0.001, weight_decay=0.0),
-            batch_size=256,
+            effective_batch_size=256,
             seq_len=128,
             stride=128,
             data_fraction=1.0,

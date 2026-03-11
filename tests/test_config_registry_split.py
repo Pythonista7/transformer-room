@@ -48,7 +48,7 @@ def make_config() -> ExperimentConfig:
         train=TrainConfig(
             epochs=1,
             optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
-            batch_size=4,
+            effective_batch_size=4,
             seq_len=16,
             stride=16,
         ),
@@ -58,6 +58,54 @@ def make_config() -> ExperimentConfig:
 
 
 class ConfigValidationTests(unittest.TestCase):
+    def test_train_batching_defaults_to_non_accumulation(self) -> None:
+        train_cfg = TrainConfig(effective_batch_size=8)
+        self.assertEqual(train_cfg.micro_batch_size, 8)
+        self.assertEqual(train_cfg.accumulation_steps, 1)
+
+    def test_train_batching_explicit_accumulation_passes(self) -> None:
+        train_cfg = TrainConfig(
+            effective_batch_size=8,
+            micro_batch_size=4,
+            accumulation_steps=2,
+        )
+        self.assertEqual(train_cfg.effective_batch_size, 8)
+        self.assertEqual(train_cfg.micro_batch_size, 4)
+        self.assertEqual(train_cfg.accumulation_steps, 2)
+
+    def test_train_batching_equation_mismatch_fails(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "effective_batch_size must equal",
+        ):
+            TrainConfig(
+                effective_batch_size=8,
+                micro_batch_size=3,
+                accumulation_steps=2,
+            )
+
+    def test_train_batching_non_positive_values_fail(self) -> None:
+        with self.assertRaisesRegex(ValueError, "effective_batch_size must be > 0"):
+            TrainConfig(effective_batch_size=0)
+        with self.assertRaisesRegex(ValueError, "micro_batch_size must be > 0"):
+            TrainConfig(effective_batch_size=8, micro_batch_size=0)
+        with self.assertRaisesRegex(ValueError, "accumulation_steps must be > 0"):
+            TrainConfig(effective_batch_size=8, accumulation_steps=0)
+
+    def test_train_config_rejects_legacy_batch_size_keyword(self) -> None:
+        with self.assertRaises(TypeError):
+            TrainConfig(batch_size=8)  # type: ignore[call-arg]
+
+    def test_validate_experiment_config_rechecks_mutated_batching(self) -> None:
+        config = make_config()
+        config.train.micro_batch_size = 3
+        config.train.accumulation_steps = 1
+        with self.assertRaisesRegex(
+            ValueError,
+            "effective_batch_size must equal",
+        ):
+            validate_experiment_config(config)
+
     def test_invalid_dataset_name_fails(self) -> None:
         config = make_config()
         config.dataset.name = "not_real"  # type: ignore[assignment]
@@ -150,8 +198,8 @@ class ConfigValidationTests(unittest.TestCase):
             validate_experiment_config(config)
 
     def test_sweep_run_name_is_deterministic_and_group_name_can_vary(self) -> None:
-        config_a = build_lr_vs_batch_config(learning_rate=1e-4, batch_size=20, sweep_group="group-a")
-        config_b = build_lr_vs_batch_config(learning_rate=1e-4, batch_size=20, sweep_group="group-b")
+        config_a = build_lr_vs_batch_config(learning_rate=1e-4, effective_batch_size=20, sweep_group="group-a")
+        config_b = build_lr_vs_batch_config(learning_rate=1e-4, effective_batch_size=20, sweep_group="group-b")
 
         self.assertEqual(
             config_a.run.run_name,

@@ -61,7 +61,7 @@ class PipelineSmokeTests(unittest.TestCase):
                         learning_rate=1e-3,
                         weight_decay=1e-2,
                     ),
-                    batch_size=8,
+                    effective_batch_size=8,
                     seq_len=16,
                     stride=16,
                     data_fraction=1.0,

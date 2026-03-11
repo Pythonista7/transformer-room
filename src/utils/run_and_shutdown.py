@@ -2,12 +2,12 @@
 Example:
   .venv/bin/python src/utils/run_and_shutdown.py \
     --log-dir runs/logs \
-    --run-name ac-mem-exp \
+    --run-name mem-bud-api-exp \
     -- python experiments/baseline/hyperparam_sweeps/OptimAdamVsW.py
 
   .venv/bin/python src/utils/run_and_shutdown.py \
     --log-dir runs/logs \
-    --run-name optim-adam-vs-adamw \
+    --run-name mem-bud-api-exp \
     -- python -m experiments.baseline.hyperparam_sweeps.OptimAdamVsW
 """
 

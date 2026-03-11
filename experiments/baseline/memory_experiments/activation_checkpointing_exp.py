@@ -267,7 +267,7 @@ def build_config(
                 learning_rate=3e-5,
                 weight_decay=0.0,
             ),
-            batch_size=20,
+            effective_batch_size=20,
             seq_len=1024,
             stride=1024,
             data_fraction=1.0,

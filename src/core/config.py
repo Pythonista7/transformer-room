@@ -97,12 +97,31 @@ class OptimizerConfig:
 
 @dataclass(slots=True)
 class TrainConfig:
+    effective_batch_size: int
     epochs: int = 3
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
-    batch_size: int = 256
+    micro_batch_size: int | None = None
+    accumulation_steps: int | None = None
     seq_len: int = 128
     stride: int = 128
     data_fraction: float = 1.0
+
+    def __post_init__(self) -> None:
+        resolved = resolve_train_batching(self)
+        self.effective_batch_size = resolved.effective_batch_size
+        self.micro_batch_size = resolved.micro_batch_size
+        self.accumulation_steps = resolved.accumulation_steps
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedTrainBatchingConfig:
+    effective_batch_size: int
+    micro_batch_size: int
+    accumulation_steps: int
+
+    @property
+    def loader_batch_size(self) -> int:
+        return int(self.micro_batch_size)
 
 
 @dataclass(slots=True)
@@ -160,6 +179,40 @@ class ExperimentConfig:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def resolve_train_batching(train_cfg: TrainConfig) -> ResolvedTrainBatchingConfig:
+    effective_batch_size = int(train_cfg.effective_batch_size)
+    if effective_batch_size <= 0:
+        raise ValueError("train.effective_batch_size must be > 0.")
+
+    micro_batch_size = (
+        effective_batch_size
+        if train_cfg.micro_batch_size is None
+        else int(train_cfg.micro_batch_size)
+    )
+    if micro_batch_size <= 0:
+        raise ValueError("train.micro_batch_size must be > 0 when provided.")
+
+    accumulation_steps = (
+        1
+        if train_cfg.accumulation_steps is None
+        else int(train_cfg.accumulation_steps)
+    )
+    if accumulation_steps <= 0:
+        raise ValueError("train.accumulation_steps must be > 0 when provided.")
+
+    if effective_batch_size != micro_batch_size * accumulation_steps:
+        raise ValueError(
+            "train.effective_batch_size must equal "
+            "train.micro_batch_size * train.accumulation_steps."
+        )
+
+    return ResolvedTrainBatchingConfig(
+        effective_batch_size=effective_batch_size,
+        micro_batch_size=micro_batch_size,
+        accumulation_steps=accumulation_steps,
+    )
 
 
 def resolve_special_token_ids(tokenizer_cfg: BPETokenizerConfig) -> SpecialTokenIds:
@@ -273,8 +326,7 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("train.optimizer.learning_rate must be > 0.")
     if config.train.optimizer.weight_decay < 0:
         raise ValueError("train.optimizer.weight_decay must be >= 0.")
-    if config.train.batch_size <= 0:
-        raise ValueError("train.batch_size must be > 0.")
+    resolve_train_batching(config.train)
     if config.train.seq_len <= 0:
         raise ValueError("train.seq_len must be > 0.")
     if config.train.stride <= 0:

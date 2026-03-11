@@ -160,7 +160,7 @@ def build_config() -> ExperimentConfig:
                 learning_rate=1e-3,
                 weight_decay=1e-2,
             ),
-            batch_size=256,
+            effective_batch_size=256,
             seq_len=128,
             stride=128,
             data_fraction=1.0,
@@ -203,6 +203,47 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 ```
+
+---
+
+## Batching semantics
+
+Training batch semantics are explicit and validated in config construction:
+
+- `effective_batch_size`: logical optimizer-step batch size.
+- `micro_batch_size`: physical DataLoader batch size.
+- `accumulation_steps`: micro-batches accumulated before `optimizer.step()`.
+
+Exact rule:
+
+`effective_batch_size = micro_batch_size * accumulation_steps`
+
+Defaults preserve non-accumulation:
+
+- `micro_batch_size` defaults to `effective_batch_size`.
+- `accumulation_steps` defaults to `1`.
+
+Examples:
+
+```python
+# Non-accumulation
+TrainConfig(
+    effective_batch_size=64,
+    micro_batch_size=64,
+    accumulation_steps=1,
+    ...
+)
+
+# Gradient accumulation
+TrainConfig(
+    effective_batch_size=64,
+    micro_batch_size=16,
+    accumulation_steps=4,
+    ...
+)
+```
+
+Legacy `train.batch_size` is removed and intentionally unsupported.
 
 ---
 

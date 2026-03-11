@@ -104,13 +104,13 @@ def _build_sweep_group() -> str:
     return f"p0-group-LRvsBSz-wikitext2_gpt2-sweep-{timestamp}"
 
 
-def _build_run_name(learning_rate: float, batch_size: int) -> str:
-    return f"p0-group-LRvsBSz-wikitext2-gpt2-lr{_format_lr_slug(learning_rate)}-bs{batch_size}"
+def _build_run_name(learning_rate: float, effective_batch_size: int) -> str:
+    return f"p0-group-LRvsBSz-wikitext2-gpt2-lr{_format_lr_slug(learning_rate)}-bs{effective_batch_size}"
 
 
 def build_config(
     learning_rate: float,
-    batch_size: int,
+    effective_batch_size: int,
     *,
     sweep_group: str | None = None,
 ) -> ExperimentConfig:
@@ -133,7 +133,7 @@ def build_config(
         run=RunConfig(
             project_name="transformer-room-baseline",
             artifacts_root=str(project_root / "artifacts" / "models"),
-            run_name=_build_run_name(learning_rate, batch_size),
+            run_name=_build_run_name(learning_rate, effective_batch_size),
             group_name=sweep_group,
             resume_from_checkpoint=False,
             checkpoint_every_n_steps=10000, # steps per run is 200 so we can just expect the final model here, no need chkpt for smaller runs.
@@ -166,7 +166,7 @@ def build_config(
                 learning_rate=learning_rate,
                 weight_decay=0.0,
             ),
-            batch_size=batch_size,
+            effective_batch_size=effective_batch_size,
             seq_len=1024,
             stride=1024,
             data_fraction=1.0,
@@ -202,22 +202,22 @@ def build_config(
 
 def main() -> int:
     learning_rates = (1e-5, 3e-5, 1e-4, 3e-4, 1e-3)
-    batch_sizes = (12, 20) # TODO: revisit once we have grad-acc in place.
+    effective_batch_sizes = (12, 20)
     sweep_group = _build_sweep_group()
 
     print(f"Starting sweep group: {sweep_group}")
 
     results = []
     for learning_rate in learning_rates:
-        for batch_size in batch_sizes:
+        for effective_batch_size in effective_batch_sizes:
             print(
                 "Starting run | "
                 f"learning_rate={learning_rate} | "
-                f"batch_size={batch_size}"
+                f"effective_batch_size={effective_batch_size}"
             )
             config = build_config(
                 learning_rate=learning_rate,
-                batch_size=batch_size,
+                effective_batch_size=effective_batch_size,
                 sweep_group=sweep_group,
             )
             result = model_pipeline(config)
@@ -225,7 +225,7 @@ def main() -> int:
                 {
                     "sweep_group": sweep_group,
                     "learning_rate": learning_rate,
-                    "batch_size": batch_size,
+                    "effective_batch_size": effective_batch_size,
                     "run_dir": result.run_artifact_dir,
                     "checkpoint": result.checkpoint_path,
                     "final_model": result.final_model_path,
@@ -239,7 +239,7 @@ def main() -> int:
             print(
                 "Training complete | "
                 f"learning_rate={learning_rate} | "
-                f"batch_size={batch_size} | "
+                f"effective_batch_size={effective_batch_size} | "
                 f"run_dir={result.run_artifact_dir} | "
                 f"checkpoint={result.checkpoint_path} | "
                 f"final_model={result.final_model_path} | "
@@ -261,7 +261,7 @@ def main() -> int:
         print(
             f"group={summary['sweep_group']} | "
             f"lr={summary['learning_rate']} | "
-            f"batch_size={summary['batch_size']} | "
+            f"effective_batch_size={summary['effective_batch_size']} | "
             f"val_loss={summary['val_loss']:.6f} | "
             f"val_ppl={summary['val_ppl']:.6f} | "
             f"run_dir={summary['run_dir']}"

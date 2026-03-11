@@ -148,7 +148,7 @@ def _make_config(
         train=TrainConfig(
             epochs=1,
             optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
-            batch_size=4,
+            effective_batch_size=4,
             seq_len=16,
             stride=16,
             data_fraction=1.0,

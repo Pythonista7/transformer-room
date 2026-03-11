@@ -104,6 +104,18 @@ def _unwrap_value(payload: dict[str, Any] | None) -> dict[str, Any]:
     return payload
 
 
+def _resolve_shape_batch_size_from_train_cfg(train_cfg: dict[str, Any]) -> int:
+    micro_batch_size = train_cfg.get("micro_batch_size")
+    if micro_batch_size is not None:
+        return int(micro_batch_size)
+
+    effective_batch_size = train_cfg.get("effective_batch_size")
+    if effective_batch_size is not None:
+        return int(effective_batch_size)
+
+    return 64
+
+
 def load_shape_config_from_run_config(path: Path) -> ShapeConfig:
     payload = json.loads(path.read_text(encoding="utf-8"))
     model_cfg = _unwrap_value(payload.get("model"))
@@ -111,7 +123,7 @@ def load_shape_config_from_run_config(path: Path) -> ShapeConfig:
     tok_cfg = _unwrap_value(payload.get("tokenizer"))
 
     return ShapeConfig(
-        batch_size=int(train_cfg.get("batch_size", 64)),
+        batch_size=_resolve_shape_batch_size_from_train_cfg(train_cfg),
         seq_len=int(train_cfg.get("seq_len", 1024)),
         d_model=int(model_cfg.get("d_model", 768)),
         n_heads=int(model_cfg.get("n_heads", 8)),

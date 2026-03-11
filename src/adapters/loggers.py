@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 import torch
 
 from src.core.config import LoggingConfig
-from src.core.registry import register_logger_adapter
+from src.core.registry import LOGGER_ADAPTERS, register_logger_adapter
 from src.core.types import LoggerSession
 
 if TYPE_CHECKING:
@@ -378,5 +378,7 @@ class WandbLoggerAdapter:
 
 
 def register_logger_adapters() -> None:
-    register_logger_adapter("console", ConsoleLoggerAdapter())
-    register_logger_adapter("wandb", WandbLoggerAdapter())
+    if "console" not in LOGGER_ADAPTERS:
+        register_logger_adapter("console", ConsoleLoggerAdapter())
+    if "wandb" not in LOGGER_ADAPTERS:
+        register_logger_adapter("wandb", WandbLoggerAdapter())
