@@ -412,7 +412,7 @@ def preflight_activation_memory_budget_api(budgets: tuple[float | None, ...]) ->
 
 def _build_sweep_group() -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    return f"memory-frontier-step1-compile-budget-{timestamp}"
+    return f"2-memory-frontier-step1-compile-budget-{timestamp}"
 
 
 def run_trial(
