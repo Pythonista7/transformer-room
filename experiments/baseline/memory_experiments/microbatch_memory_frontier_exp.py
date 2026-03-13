@@ -173,6 +173,12 @@ def clear_runtime_state() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        reset_peak_memory_stats = getattr(torch.cuda, "reset_peak_memory_stats", None)
+        if callable(reset_peak_memory_stats):
+            try:
+                reset_peak_memory_stats()
+            except Exception:
+                pass
     reset_compiler = getattr(getattr(torch, "compiler", None), "reset", None)
     if callable(reset_compiler):
         reset_compiler()
@@ -269,6 +275,8 @@ class MemoryFrontierSummaryPlugin(BaseMetricPlugin):
         self.logged_entries: list[tuple[int | None, dict[str, float]]] = []
 
     def after_optimizer_step(self, ctx: StepMetricsContext) -> None:
+        if not ctx.include_in_perf_aggregates:
+            return
         payload: MetricPayload = {}
         payload["tokens_seen_train"] = float(ctx.tokens_seen_train)
         if ctx.step_time_ms is not None:
@@ -312,7 +320,7 @@ def build_config(
             torch_compile_fullgraph=False,
             torch_compile_dynamic=False,
             activation_memory_budget=activation_memory_budget,
-            compile_warmup_steps=0,
+            compile_warmup_steps=10,
             seed=SEED,
         ),
         dataset=HFTextDatasetConfig(
@@ -433,10 +441,20 @@ def run_trial(
         error_message = None
         global_step = int(run_result.global_step)
         run_artifact_dir = run_result.run_artifact_dir
-        if global_step <= 0:
+        completed_epochs = int(run_result.completed_epochs)
+        epoch_end_validation_ran = bool(run_result.epoch_end_validation_ran)
+        if (
+            completed_epochs < int(config.train.epochs)
+            or not epoch_end_validation_ran
+        ):
             status = "error"
-            error_type = "NoOptimizerSteps"
-            error_message = "Run completed without any optimizer steps."
+            error_type = "IncompleteEpochOrValidation"
+            error_message = (
+                "Run did not complete all epochs and epoch-end validation. "
+                f"completed_epochs={completed_epochs}, "
+                f"required_epochs={int(config.train.epochs)}, "
+                f"epoch_end_validation_ran={epoch_end_validation_ran}"
+            )
     except Exception as exc:
         status = "oom" if classify_oom_exception(exc) else "error"
         error_type = exc.__class__.__name__
@@ -510,6 +528,7 @@ def adaptive_find_frontier(
 
     while probe <= max_micro_batch:
         trial = run_once(probe)
+        # Frontier classification is strictly status-based; memory metrics are diagnostic.
         if trial.status == "success":
             low = probe
             probe *= 2
@@ -553,9 +572,7 @@ def adaptive_find_frontier(
     return low, list(attempts_by_mb.values())
 
 
-def _to_row_value(value: float | int | str | None) -> float | int | str:
-    if value is None:
-        return "NA"
+def _to_row_value(value: float | int | str | None) -> float | int | str | None:
     return value
 
 
@@ -659,6 +676,7 @@ def _print_frontier_summary(
         "Budget summary | "
         f"budget={budget_spec.label} | "
         f"frontier_micro_batch={frontier} | "
+        "frontier_rule=status_only | "
         f"trials={len(trials)} | "
         f"best_peak_reserved_memory_gib={None if best_success is None else best_success.max_peak_reserved_memory_gib} | "
         f"best_avg_tokens_per_sec={None if best_success is None else best_success.avg_tokens_per_sec}"

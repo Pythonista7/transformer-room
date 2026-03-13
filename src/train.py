@@ -54,6 +54,8 @@ class TrainLoopResult:
     final_val_metrics: dict[str, float]
     checkpoint_artifact_ref: str | None
     final_model_artifact_ref: str | None
+    completed_epochs: int
+    epoch_end_validation_ran: bool
 
 
 class LMWindowDataset(Dataset):
@@ -693,6 +695,8 @@ def train_loop(
 
     last_avg_train_loss = 0.0
     last_val_metrics = {"val_loss": 0.0, "val_perplexity": 0.0}
+    completed_epochs = int(start_epoch)
+    epoch_end_validation_ran = False
 
     try:
         metrics_engine.on_train_start()
@@ -884,6 +888,8 @@ def train_loop(
             avg_train_loss = epoch_train_loss_sum / max(epoch_token_count, 1)
             val_metrics = evaluate(model, val_loader, loss_fn, device, use_bf16=use_bf16)
             model.train()
+            completed_epochs = int(epoch + 1)
+            epoch_end_validation_ran = True
             epoch_time_s = time.perf_counter() - epoch_wall_start
             epoch_metrics = metrics_engine.collect_epoch_metrics(
                 EpochMetricsContext(
@@ -939,6 +945,8 @@ def train_loop(
         final_val_metrics=last_val_metrics,
         checkpoint_artifact_ref=last_checkpoint_artifact_ref,
         final_model_artifact_ref=final_model_artifact_ref,
+        completed_epochs=completed_epochs,
+        epoch_end_validation_ran=epoch_end_validation_ran,
     )
 
 
@@ -1072,4 +1080,6 @@ def model_pipeline(
         final_train_loss=train_result.final_train_loss,
         final_val_loss=float(train_result.final_val_metrics["val_loss"]),
         final_val_perplexity=float(train_result.final_val_metrics["val_perplexity"]),
+        completed_epochs=train_result.completed_epochs,
+        epoch_end_validation_ran=train_result.epoch_end_validation_ran,
     )

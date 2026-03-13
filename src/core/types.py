@@ -72,6 +72,8 @@ class RunResult:
     final_train_loss: float
     final_val_loss: float
     final_val_perplexity: float
+    completed_epochs: int
+    epoch_end_validation_ran: bool
 
 
 @runtime_checkable
