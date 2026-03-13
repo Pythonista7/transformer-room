@@ -5,12 +5,13 @@ import unittest
 import torch
 
 from experiments.baseline.memory_experiments.microbatch_memory_frontier_exp import (
-    NoArtifactCaptureWandbSession,
+    MemoryFrontierSummaryPlugin,
     TrialResult,
     adaptive_find_frontier,
     classify_oom_exception,
     compute_avg_tokens_per_sec,
 )
+from src.training.metrics import MetricSchedule, StepMetricsContext
 
 
 def _trial(
@@ -95,53 +96,70 @@ class ThroughputDerivationTests(unittest.TestCase):
         self.assertAlmostEqual(observed or 0.0, expected, places=6)
 
 
-class NoArtifactSessionTests(unittest.TestCase):
-    def test_save_is_suppressed_but_log_and_close_forward(self) -> None:
-        class _BaseSession:
-            def __init__(self) -> None:
-                self.logged: list[tuple[int | None, dict[str, float]]] = []
-                self.save_calls = 0
-                self.closed = False
+class MemoryFrontierSummaryPluginTests(unittest.TestCase):
+    def test_summary_aggregates_peak_memory_timing_and_tokens_per_sec(self) -> None:
+        schedule = MetricSchedule(
+            should_log_step_metrics=True,
+            should_log_diagnostics=False,
+            should_log_parameter_optimizer_norms=False,
+            should_log_attention_entropy=False,
+            capture_activation_norms=False,
+            capture_attention_entropy=False,
+            should_log_this_step=True,
+            periodic_val_due=False,
+        )
 
-            def log(
-                self,
-                metrics: dict[str, float],
-                step: int | None = None,
-            ) -> None:
-                self.logged.append((step, dict(metrics)))
+        plugin = MemoryFrontierSummaryPlugin()
+        step_contexts = [
+            StepMetricsContext(
+                schedule=schedule,
+                global_step=1,
+                next_global_step=1,
+                epoch=0,
+                batch_idx=0,
+                train_loader_len=3,
+                tokens_seen_train=512,
+                step_loss=1.0,
+                step_time_ms=200.0,
+                peak_memory_gib=10.0,
+                peak_reserved_memory_gib=12.0,
+            ),
+            StepMetricsContext(
+                schedule=schedule,
+                global_step=2,
+                next_global_step=2,
+                epoch=0,
+                batch_idx=1,
+                train_loader_len=3,
+                tokens_seen_train=1024,
+                step_loss=1.0,
+                step_time_ms=100.0,
+                peak_memory_gib=11.0,
+                peak_reserved_memory_gib=15.0,
+            ),
+            StepMetricsContext(
+                schedule=schedule,
+                global_step=3,
+                next_global_step=3,
+                epoch=0,
+                batch_idx=2,
+                train_loader_len=3,
+                tokens_seen_train=1536,
+                step_loss=1.0,
+                step_time_ms=100.0,
+                peak_memory_gib=9.0,
+                peak_reserved_memory_gib=14.0,
+            ),
+        ]
+        for ctx in step_contexts:
+            plugin.after_optimizer_step(ctx)
 
-            def save(self, *args, **kwargs):
-                self.save_calls += 1
-                _ = args
-                _ = kwargs
-                return "artifact-ref"
-
-            def restore(self, *args, **kwargs) -> bool:
-                _ = args
-                _ = kwargs
-                return True
-
-            def watch(self, model, loss_fn) -> None:
-                _ = model
-                _ = loss_fn
-
-            def close(self) -> None:
-                self.closed = True
-
-        base = _BaseSession()
-        wrapped = NoArtifactCaptureWandbSession(base_session=base)
-
-        wrapped.log({"step_time_ms": 12.0}, step=1)
-        saved = wrapped.save("dummy.pt", artifact_name="x", artifact_type="model")
-        restored = wrapped.restore("dummy.pt", artifact_name="x")
-        wrapped.close()
-
-        self.assertEqual(saved, None)
-        self.assertFalse(restored)
-        self.assertEqual(base.save_calls, 0)
-        self.assertEqual(len(base.logged), 1)
-        self.assertEqual(len(wrapped.logged_entries), 1)
-        self.assertTrue(base.closed)
+        summary = plugin.summary
+        self.assertEqual(summary.max_peak_memory_gib, 11.0)
+        self.assertEqual(summary.max_peak_reserved_memory_gib, 15.0)
+        self.assertAlmostEqual(summary.avg_step_time_ms or 0.0, 133.33333333333334, places=6)
+        expected_tokens_per_sec = (2560.0 + 5120.0 + 5120.0) / 3.0
+        self.assertAlmostEqual(summary.avg_tokens_per_sec or 0.0, expected_tokens_per_sec, places=6)
 
 
 if __name__ == "__main__":

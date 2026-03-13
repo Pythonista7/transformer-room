@@ -103,6 +103,7 @@ class FakeRemoteLoggerAdapter:
     ) -> None:
         self.remote_checkpoint_payload = remote_checkpoint_payload
         self.existing_run_names = set(existing_run_names or set())
+        self.has_remote_artifact_calls: list[dict[str, str]] = []
         self.sessions: list[FakeRemoteLoggerSession] = []
 
     def has_remote_artifact(
@@ -112,6 +113,13 @@ class FakeRemoteLoggerAdapter:
         artifact_name: str,
         alias: str = "latest",
     ) -> bool:
+        self.has_remote_artifact_calls.append(
+            {
+                "project_name": project_name,
+                "artifact_name": artifact_name,
+                "alias": alias,
+            }
+        )
         _ = project_name
         _ = alias
         return artifact_name.removesuffix("-checkpoint") in self.existing_run_names
@@ -280,6 +288,22 @@ class WandbRemoteLineageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Remote checkpoint already exists"):
                 resolve_wandb_lineage(config, adapter, interactive=False)
 
+    def test_resolve_wandb_lineage_skips_remote_lookup_when_artifact_io_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_wandb_config(
+                Path(tmpdir),
+                run_name="deterministic-run",
+                resume_from_checkpoint=False,
+            )
+            config.logging.enable_artifact_io = False
+            adapter = FakeRemoteLoggerAdapter(existing_run_names={"deterministic-run"})
+
+            resolved = resolve_wandb_lineage(config, adapter, interactive=False)
+
+        self.assertEqual(resolved.run.run_name, "deterministic-run")
+        self.assertFalse(resolved.run.resume_from_checkpoint)
+        self.assertEqual(adapter.has_remote_artifact_calls, [])
+
     def test_model_pipeline_restores_remote_checkpoint_when_local_file_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -316,6 +340,28 @@ class WandbRemoteLineageTests(unittest.TestCase):
                 result.final_model_artifact_ref,
                 "wandb://remote-resume-run-model:latest",
             )
+
+    def test_model_pipeline_skips_restore_when_artifact_io_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config = make_wandb_config(
+                tmp_path,
+                run_name="remote-resume-run",
+                resume_from_checkpoint=True,
+            )
+            config.logging.enable_artifact_io = False
+
+            adapter = FakeRemoteLoggerAdapter(
+                remote_checkpoint_payload=build_checkpoint_payload(config),
+                existing_run_names={"remote-resume-run"},
+            )
+            LOGGER_ADAPTERS["wandb"] = adapter
+
+            result = model_pipeline(config)
+
+            session = adapter.sessions[-1]
+            self.assertEqual(session.restore_calls, [])
+            self.assertGreater(result.global_step, 0)
 
 
 if __name__ == "__main__":

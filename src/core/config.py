@@ -12,6 +12,7 @@ class RunConfig:
     run_name: str | None = None
     group_name: str | None = None
     artifacts_root: str = "src/models"
+    persist_local_artifacts: bool = True
     resume_from_checkpoint: bool = True
     checkpoint_every_n_steps: int = 250
     checkpoint_filename: str = "baseline_checkpoint.pt"
@@ -164,6 +165,7 @@ class WandbMetricsConfig:
 @dataclass(slots=True)
 class LoggingConfig:
     provider: Literal["console", "wandb"] = "console"
+    enable_artifact_io: bool = True
     wandb: WandbMetricsConfig = field(default_factory=WandbMetricsConfig)
 
 
@@ -249,6 +251,8 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("run.seed must be >= 0.")
     if not config.run.artifacts_root.strip():
         raise ValueError("run.artifacts_root must be non-empty.")
+    if not isinstance(config.run.persist_local_artifacts, bool):
+        raise ValueError("run.persist_local_artifacts must be a bool.")
     if config.run.checkpoint_every_n_steps < 0:
         raise ValueError("run.checkpoint_every_n_steps must be >= 0.")
     if config.run.compile_warmup_steps < 0:
@@ -346,6 +350,8 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             f"Unsupported logging.provider '{config.logging.provider}'. "
             "Expected one of: console, wandb."
         )
+    if not isinstance(config.logging.enable_artifact_io, bool):
+        raise ValueError("logging.enable_artifact_io must be a bool.")
     if config.logging.provider == "wandb" and (
         config.run.run_name is None or not config.run.run_name.strip()
     ):

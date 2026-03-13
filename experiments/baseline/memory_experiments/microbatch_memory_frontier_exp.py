@@ -3,12 +3,11 @@ from __future__ import annotations
 import gc
 import importlib
 import sys
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Any, Callable, Iterable, Mapping
+from typing import Callable, Iterable
 
 import torch
 
@@ -16,7 +15,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.adapters import register_builtin_adapters
 from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
@@ -29,8 +27,8 @@ from src.config import (
     TrainConfig,
     WandbMetricsConfig,
 )
-from src.core.registry import LOGGER_ADAPTERS
 from src.train import model_pipeline
+from src.training.metrics import BaseMetricPlugin, MetricPayload, StepMetricsContext
 
 PROJECT_NAME = "transformer-room-baseline"
 DATASET_NAME = "Salesforce/wikitext"
@@ -264,103 +262,26 @@ def summarize_logged_steps(
     )
 
 
-class NoArtifactCaptureWandbSession:
-    def __init__(self, base_session: Any) -> None:
-        self._base_session = base_session
+class MemoryFrontierSummaryPlugin(BaseMetricPlugin):
+    name = "memory_frontier_summary"
+
+    def __init__(self) -> None:
         self.logged_entries: list[tuple[int | None, dict[str, float]]] = []
 
-    def log(self, metrics: Mapping[str, float], step: int | None = None) -> None:
-        self.logged_entries.append((step, dict(metrics)))
-        self._base_session.log(metrics, step=step)
+    def after_optimizer_step(self, ctx: StepMetricsContext) -> None:
+        payload: MetricPayload = {}
+        payload["tokens_seen_train"] = float(ctx.tokens_seen_train)
+        if ctx.step_time_ms is not None:
+            payload["step_time_ms"] = float(ctx.step_time_ms)
+        if ctx.peak_memory_gib is not None:
+            payload["peak_memory_gib"] = float(ctx.peak_memory_gib)
+        if ctx.peak_reserved_memory_gib is not None:
+            payload["peak_reserved_memory_gib"] = float(ctx.peak_reserved_memory_gib)
+        self.logged_entries.append((ctx.global_step, payload))
 
-    def save(
-        self,
-        path: str,
-        *,
-        artifact_name: str | None = None,
-        artifact_type: str | None = None,
-        aliases: tuple[str, ...] | list[str] | None = None,
-        metadata: Mapping[str, Any] | None = None,
-    ) -> str | None:
-        _ = path
-        _ = artifact_name
-        _ = artifact_type
-        _ = aliases
-        _ = metadata
-        return None
-
-    def restore(
-        self,
-        path: str,
-        *,
-        artifact_name: str,
-        artifact_type: str | None = None,
-        alias: str = "latest",
-    ) -> bool:
-        _ = path
-        _ = artifact_name
-        _ = artifact_type
-        _ = alias
-        return False
-
-    def watch(self, model: torch.nn.Module, loss_fn: torch.nn.Module) -> None:
-        self._base_session.watch(model, loss_fn)
-
-    def close(self) -> None:
-        self._base_session.close()
-
-
-class NoArtifactCaptureWandbAdapter:
-    def __init__(self, base_adapter: Any) -> None:
-        self._base_adapter = base_adapter
-        self.sessions_by_run_name: dict[str, NoArtifactCaptureWandbSession] = {}
-
-    def has_remote_artifact(
-        self,
-        *,
-        project_name: str,
-        artifact_name: str,
-        alias: str = "latest",
-    ) -> bool:
-        _ = project_name
-        _ = artifact_name
-        _ = alias
-        return False
-
-    def start(
-        self,
-        cfg: LoggingConfig,
-        project_name: str,
-        run_name: str | None,
-        group_name: str | None,
-        config_payload: dict[str, Any],
-    ) -> NoArtifactCaptureWandbSession:
-        base_session = self._base_adapter.start(
-            cfg=cfg,
-            project_name=project_name,
-            run_name=run_name,
-            group_name=group_name,
-            config_payload=config_payload,
-        )
-        wrapped_session = NoArtifactCaptureWandbSession(base_session=base_session)
-        if run_name is not None:
-            self.sessions_by_run_name[run_name] = wrapped_session
-        return wrapped_session
-
-
-@contextmanager
-def install_metrics_only_wandb_adapter():
-    register_builtin_adapters()
-    base_wandb_adapter = LOGGER_ADAPTERS.get("wandb")
-    if base_wandb_adapter is None:
-        raise RuntimeError("W&B logger adapter is not registered.")
-
-    wrapped_adapter = NoArtifactCaptureWandbAdapter(base_wandb_adapter)
-    LOGGER_ADAPTERS["wandb"] = wrapped_adapter
-    try:
-        yield wrapped_adapter
-    finally:
-        LOGGER_ADAPTERS["wandb"] = base_wandb_adapter
+    @property
+    def summary(self) -> LoggedStepSummary:
+        return summarize_logged_steps(self.logged_entries)
 
 
 def build_config(
@@ -383,6 +304,7 @@ def build_config(
             run_name=run_name,
             group_name=sweep_group,
             artifacts_root=str(PROJECT_ROOT / "artifacts" / "models"),
+            persist_local_artifacts=False,
             resume_from_checkpoint=False,
             checkpoint_every_n_steps=0,
             use_torch_compile=True,
@@ -431,6 +353,7 @@ def build_config(
         ),
         logging=LoggingConfig(
             provider="wandb",
+            enable_artifact_io=False,
             wandb=WandbMetricsConfig(
                 enable_train_loss_vs_tokens=True,
                 enable_val_loss_vs_tokens=False,
@@ -490,7 +413,6 @@ def run_trial(
     budget_spec: BudgetSpec,
     micro_batch_size: int,
     base_vocab_size: int,
-    logger_adapter: NoArtifactCaptureWandbAdapter,
 ) -> TrialResult:
     run_name = (
         f"{sweep_group}-budget_{budget_spec.slug}-mb_{micro_batch_size}"
@@ -502,9 +424,10 @@ def run_trial(
         micro_batch_size=micro_batch_size,
         activation_memory_budget=budget_spec.activation_memory_budget,
     )
+    summary_plugin = MemoryFrontierSummaryPlugin()
 
     try:
-        run_result = model_pipeline(config)
+        run_result = model_pipeline(config, extra_metric_plugins=[summary_plugin])
         status = "success"
         error_type = None
         error_message = None
@@ -521,13 +444,7 @@ def run_trial(
         global_step = None
         run_artifact_dir = None
     finally:
-        session = logger_adapter.sessions_by_run_name.get(run_name)
-        logged_summary = summarize_logged_steps(session.logged_entries) if session else LoggedStepSummary(
-            max_peak_memory_gib=None,
-            max_peak_reserved_memory_gib=None,
-            avg_step_time_ms=None,
-            avg_tokens_per_sec=None,
-        )
+        logged_summary = summary_plugin.summary
         clear_runtime_state()
 
     result = TrialResult(
@@ -774,35 +691,33 @@ def main() -> int:
     all_trial_results: list[TrialResult] = []
     frontiers: dict[str, int | None] = {}
 
-    with install_metrics_only_wandb_adapter() as logger_adapter:
-        for budget_value in BUDGETS:
-            budget_spec = BudgetSpec(activation_memory_budget=budget_value)
-            print(
-                "Starting budget sweep | "
-                f"budget={budget_spec.label} | "
-                f"min_micro_batch={MIN_MICRO_BATCH} | "
-                f"max_micro_batch={MAX_MICRO_BATCH}"
-            )
+    for budget_value in BUDGETS:
+        budget_spec = BudgetSpec(activation_memory_budget=budget_value)
+        print(
+            "Starting budget sweep | "
+            f"budget={budget_spec.label} | "
+            f"min_micro_batch={MIN_MICRO_BATCH} | "
+            f"max_micro_batch={MAX_MICRO_BATCH}"
+        )
 
-            frontier, trials = adaptive_find_frontier(
-                min_micro_batch=MIN_MICRO_BATCH,
-                max_micro_batch=MAX_MICRO_BATCH,
-                trial_runner=lambda micro_batch_size: run_trial(
-                    sweep_group=sweep_group,
-                    budget_spec=budget_spec,
-                    micro_batch_size=micro_batch_size,
-                    base_vocab_size=base_vocab_size,
-                    logger_adapter=logger_adapter,
-                ),
-            )
-
-            all_trial_results.extend(trials)
-            frontiers[budget_spec.label] = frontier
-            _print_frontier_summary(
+        frontier, trials = adaptive_find_frontier(
+            min_micro_batch=MIN_MICRO_BATCH,
+            max_micro_batch=MAX_MICRO_BATCH,
+            trial_runner=lambda micro_batch_size: run_trial(
+                sweep_group=sweep_group,
                 budget_spec=budget_spec,
-                frontier=frontier,
-                trials=trials,
-            )
+                micro_batch_size=micro_batch_size,
+                base_vocab_size=base_vocab_size,
+            ),
+        )
+
+        all_trial_results.extend(trials)
+        frontiers[budget_spec.label] = frontier
+        _print_frontier_summary(
+            budget_spec=budget_spec,
+            frontier=frontier,
+            trials=trials,
+        )
 
     log_wandb_summary_tables(
         sweep_group=sweep_group,

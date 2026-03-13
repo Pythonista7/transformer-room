@@ -345,6 +345,8 @@ def resolve_wandb_lineage(
 ) -> ExperimentConfig:
     if config.logging.provider != "wandb":
         return config
+    if not config.logging.enable_artifact_io:
+        return config
 
     has_remote_artifact = getattr(logger_adapter, "has_remote_artifact", None)
     if not callable(has_remote_artifact):
@@ -580,6 +582,8 @@ def train_loop(
     pad_id = int(loss_fn.ignore_index)
     wandb_cfg = config.logging.wandb
     wandb_enabled = config.logging.provider == "wandb"
+    persist_local_artifacts = bool(config.run.persist_local_artifacts)
+    artifact_io_enabled = bool(config.logging.enable_artifact_io)
     layer_labels = get_decoder_layer_labels(checkpoint_model)
     metrics_engine = MetricsEngine(
         build_default_metric_plugins(
@@ -607,6 +611,9 @@ def train_loop(
         *,
         aliases: tuple[str, ...] = ("latest",),
     ) -> str | None:
+        if not persist_local_artifacts:
+            return None
+
         checkpoint = {
             "epoch": epoch,
             "batch_idx": next_batch_idx,
@@ -617,6 +624,8 @@ def train_loop(
             "config": asdict(config),
         }
         torch.save(checkpoint, run_paths["checkpoint_path"])
+        if not artifact_io_enabled:
+            return None
         return logger.save(
             str(run_paths["checkpoint_path"]),
             artifact_name=checkpoint_artifact_name,
@@ -639,12 +648,17 @@ def train_loop(
         checkpoint_path = run_paths["checkpoint_path"]
         restored_from_remote = False
         if not checkpoint_path.exists():
-            restored_from_remote = logger.restore(
-                str(checkpoint_path),
-                artifact_name=checkpoint_artifact_name,
-                artifact_type="checkpoint",
-                alias="latest",
-            )
+            if artifact_io_enabled:
+                restored_from_remote = logger.restore(
+                    str(checkpoint_path),
+                    artifact_name=checkpoint_artifact_name,
+                    artifact_type="checkpoint",
+                    alias="latest",
+                )
+            else:
+                print(
+                    "Artifact I/O is disabled; skipping remote checkpoint restore."
+                )
             if not restored_from_remote:
                 print(f"No checkpoint found at {checkpoint_path}, starting fresh.")
                 return 0, 0, 0, 0
@@ -902,21 +916,23 @@ def train_loop(
         aliases=("latest", "final"),
     )
 
-    torch.save(checkpoint_model.state_dict(), run_paths["final_model_path"])
-    final_model_artifact_ref = logger.save(
-        str(run_paths["final_model_path"]),
-        artifact_name=final_model_artifact_name,
-        artifact_type="model",
-        aliases=("latest", "final"),
-        metadata={
-            "global_step": int(global_step),
-            "final_train_loss": float(last_avg_train_loss),
-            "final_val_loss": float(last_val_metrics["val_loss"]),
-            "final_val_perplexity": float(last_val_metrics["val_perplexity"]),
-            "run_name": run_label,
-            "group_name": config.run.group_name,
-        },
-    )
+    if persist_local_artifacts:
+        torch.save(checkpoint_model.state_dict(), run_paths["final_model_path"])
+    if artifact_io_enabled and persist_local_artifacts:
+        final_model_artifact_ref = logger.save(
+            str(run_paths["final_model_path"]),
+            artifact_name=final_model_artifact_name,
+            artifact_type="model",
+            aliases=("latest", "final"),
+            metadata={
+                "global_step": int(global_step),
+                "final_train_loss": float(last_avg_train_loss),
+                "final_val_loss": float(last_val_metrics["val_loss"]),
+                "final_val_perplexity": float(last_val_metrics["val_perplexity"]),
+                "run_name": run_label,
+                "group_name": config.run.group_name,
+            },
+        )
     return TrainLoopResult(
         global_step=global_step,
         final_train_loss=last_avg_train_loss,

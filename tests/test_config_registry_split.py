@@ -148,6 +148,15 @@ class ConfigValidationTests(unittest.TestCase):
         ):
             validate_experiment_config(config)
 
+    def test_artifact_controls_default_to_enabled_and_serialize(self) -> None:
+        config = make_config()
+        self.assertTrue(config.run.persist_local_artifacts)
+        self.assertTrue(config.logging.enable_artifact_io)
+
+        payload = config.to_dict()
+        self.assertTrue(payload["run"]["persist_local_artifacts"])
+        self.assertTrue(payload["logging"]["enable_artifact_io"])
+
     def test_invalid_optimizer_name_fails(self) -> None:
         config = make_config()
         config.train.optimizer.name = "rmsprop"  # type: ignore[assignment]

@@ -25,6 +25,7 @@ class RecordingLoggerSession:
     def __init__(self) -> None:
         self.logged: list[tuple[int | None, dict[str, float]]] = []
         self.saved: list[dict[str, Any]] = []
+        self.restore_calls: list[dict[str, Any]] = []
 
     def log(self, metrics: Mapping[str, float], step: int | None = None) -> None:
         self.logged.append((step, dict(metrics)))
@@ -57,10 +58,14 @@ class RecordingLoggerSession:
         artifact_type: str | None = None,
         alias: str = "latest",
     ) -> bool:
-        _ = path
-        _ = artifact_name
-        _ = artifact_type
-        _ = alias
+        self.restore_calls.append(
+            {
+                "path": path,
+                "artifact_name": artifact_name,
+                "artifact_type": artifact_type,
+                "alias": alias,
+            }
+        )
         return False
 
     def watch(self, model, loss_fn) -> None:
@@ -109,6 +114,9 @@ def _make_config(
     effective_batch_size: int,
     micro_batch_size: int | None = None,
     accumulation_steps: int | None = None,
+    persist_local_artifacts: bool = True,
+    enable_artifact_io: bool = True,
+    resume_from_checkpoint: bool = False,
     checkpoint_every_n_steps: int = 0,
     wandb_cfg: WandbMetricsConfig | None = None,
 ) -> ExperimentConfig:
@@ -118,7 +126,8 @@ def _make_config(
             project_name="batching-semantics-test",
             run_name=run_name,
             artifacts_root=str(artifacts_root),
-            resume_from_checkpoint=False,
+            persist_local_artifacts=persist_local_artifacts,
+            resume_from_checkpoint=resume_from_checkpoint,
             checkpoint_every_n_steps=checkpoint_every_n_steps,
             use_torch_compile=False,
         ),
@@ -141,7 +150,9 @@ def _make_config(
         ),
         split=HoldoutSplitConfig(train_fraction=0.8, seed=1, shuffle=False),
         logging=LoggingConfig(
-            provider=provider, wandb=wandb_cfg or WandbMetricsConfig()
+            provider=provider,
+            enable_artifact_io=enable_artifact_io,
+            wandb=wandb_cfg or WandbMetricsConfig(),
         ),
     )
 
@@ -218,6 +229,40 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
             self.assertTrue(
                 set(range(1, result.global_step + 1)).issubset(set(checkpoint_steps))
             )
+
+    def test_artifact_writes_and_uploads_can_be_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name="artifact-gating-run",
+                provider="wandb",
+                effective_batch_size=4,
+                micro_batch_size=2,
+                accumulation_steps=2,
+                checkpoint_every_n_steps=1,
+                persist_local_artifacts=False,
+                enable_artifact_io=False,
+                wandb_cfg=WandbMetricsConfig(
+                    log_every_n_steps=1,
+                    diagnostics_every_n_steps=1,
+                    val_every_n_steps=1,
+                    attention_entropy_every_n_steps=1,
+                    attention_entropy_head_cap=1,
+                    attention_entropy_token_cap=8,
+                ),
+            )
+
+            result = model_pipeline(cfg)
+            session = self.recording_adapter.sessions[-1]
+
+            self.assertEqual(session.saved, [])
+            self.assertEqual(session.restore_calls, [])
+            self.assertIsNone(result.checkpoint_artifact_ref)
+            self.assertIsNone(result.final_model_artifact_ref)
+
+            run_dir = Path(result.run_artifact_dir)
+            self.assertFalse((run_dir / cfg.run.checkpoint_filename).exists())
+            self.assertFalse((run_dir / cfg.run.final_model_filename).exists())
 
 
 if __name__ == "__main__":
