@@ -25,8 +25,8 @@ def _trial(
     status: str,
 ) -> TrialResult:
     return TrialResult(
-        budget_label="none",
-        activation_memory_budget=None,
+        budget_label="0",
+        activation_memory_budget=0.0,
         micro_batch_size=micro_batch_size,
         run_name=f"run-mb-{micro_batch_size}",
         status=status,
@@ -81,8 +81,8 @@ class AdaptiveFrontierSearchTests(unittest.TestCase):
             if micro_batch_size <= 16:
                 return _trial(micro_batch_size=micro_batch_size, status="success")
             return TrialResult(
-                budget_label="none",
-                activation_memory_budget=None,
+                budget_label="0",
+                activation_memory_budget=0.0,
                 micro_batch_size=micro_batch_size,
                 run_name=f"run-mb-{micro_batch_size}",
                 status="error",

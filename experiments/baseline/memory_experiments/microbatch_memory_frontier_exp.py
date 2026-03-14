@@ -35,22 +35,20 @@ DATASET_NAME = "Salesforce/wikitext"
 DATASET_CONFIG = "wikitext-2-v1"
 SEQ_LEN = 1024
 STRIDE = 1024
-BUDGETS: tuple[float | None, ...] = (None, 0.4, 0.8, 1.0)
+BUDGETS: tuple[float, ...] = (0.0, 0.4, 0.8, 1.0)
 MIN_MICRO_BATCH = 16
 MAX_MICRO_BATCH = 256
 EPOCHS = 1
-DATA_FRACTION = 0.1
+DATA_FRACTION = 0.5
 SEED = 42
 
 
 @dataclass(frozen=True, slots=True)
 class BudgetSpec:
-    activation_memory_budget: float | None
+    activation_memory_budget: float
 
     @property
     def slug(self) -> str:
-        if self.activation_memory_budget is None:
-            return "none"
         text = f"{self.activation_memory_budget:.3f}".rstrip("0").rstrip(".")
         if "." not in text:
             text = f"{text}.0"
@@ -58,8 +56,6 @@ class BudgetSpec:
 
     @property
     def label(self) -> str:
-        if self.activation_memory_budget is None:
-            return "none"
         return f"{self.activation_memory_budget:g}"
 
 
@@ -74,7 +70,7 @@ class LoggedStepSummary:
 @dataclass(frozen=True, slots=True)
 class TrialResult:
     budget_label: str
-    activation_memory_budget: float | None
+    activation_memory_budget: float
     micro_batch_size: int
     run_name: str
     status: str
@@ -298,7 +294,7 @@ def build_config(
     sweep_group: str,
     base_vocab_size: int,
     micro_batch_size: int,
-    activation_memory_budget: float | None,
+    activation_memory_budget: float,
 ) -> ExperimentConfig:
     vocab_path = (
         PROJECT_ROOT
@@ -320,7 +316,7 @@ def build_config(
             torch_compile_fullgraph=False,
             torch_compile_dynamic=False,
             activation_memory_budget=activation_memory_budget,
-            compile_warmup_steps=10,
+            compile_warmup_steps=3,
             seed=SEED,
         ),
         dataset=HFTextDatasetConfig(
@@ -390,10 +386,7 @@ def build_config(
     )
 
 
-def preflight_activation_memory_budget_api(budgets: tuple[float | None, ...]) -> None:
-    if all(budget is None for budget in budgets):
-        return
-
+def preflight_activation_memory_budget_api(budgets: tuple[float, ...]) -> None:
     dynamo_module = getattr(torch, "_dynamo", None)
     if dynamo_module is None:
         raise RuntimeError(
@@ -412,7 +405,7 @@ def preflight_activation_memory_budget_api(budgets: tuple[float | None, ...]) ->
 
 def _build_sweep_group() -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    return f"2-memory-frontier-step1-compile-budget-{timestamp}"
+    return f"3-memory-frontier-step1-compile-budget-{timestamp}"
 
 
 def run_trial(
