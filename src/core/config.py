@@ -258,9 +258,9 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
     if config.run.compile_warmup_steps < 0:
         raise ValueError("run.compile_warmup_steps must be >= 0.")
     if config.run.activation_memory_budget is not None and not (
-        0.0 < config.run.activation_memory_budget <= 1.0
+        0.0 <= config.run.activation_memory_budget <= 1.0
     ):
-        raise ValueError("run.activation_memory_budget must be in (0, 1] when set.")
+        raise ValueError("run.activation_memory_budget must be in [0, 1] when set.")
     if not config.run.checkpoint_filename.strip():
         raise ValueError("run.checkpoint_filename must be non-empty.")
     if not config.run.final_model_filename.strip():
