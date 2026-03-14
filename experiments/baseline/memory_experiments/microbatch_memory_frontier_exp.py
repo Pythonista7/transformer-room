@@ -35,7 +35,16 @@ DATASET_NAME = "Salesforce/wikitext"
 DATASET_CONFIG = "wikitext-2-v1"
 SEQ_LEN = 1024
 STRIDE = 1024
-BUDGETS: tuple[float, ...] = (0.0, 0.4, 0.8, 1.0)
+MIN_ACTIVATION_MEMORY_BUDGET = 0.0
+MAX_ACTIVATION_MEMORY_BUDGET = 1.0
+
+# Smallest budget interval the adaptive search will still split. If two tested budgets are within 0.1 (for example 0.4 and 0.48), it stops refining between them.
+BUDGET_SEARCH_MIN_DELTA = 0.1
+# Hard cap on how many distinct budget values are evaluated total (including endpoints 0.0 and 1.0).This bounds run cost.
+BUDGET_SEARCH_MAX_EVALS = 10
+#Every sampled budget is rounded to 3 decimals before caching/comparison (for example 0.333333 -> 0.333).
+BUDGET_ROUND_DECIMALS = 2
+
 MIN_MICRO_BATCH = 16
 MAX_MICRO_BATCH = 256
 EPOCHS = 1
@@ -68,6 +77,13 @@ class LoggedStepSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class BudgetSweepResult:
+    budget_spec: BudgetSpec
+    frontier: int | None
+    trials: list[TrialResult]
+
+
+@dataclass(frozen=True, slots=True)
 class TrialResult:
     budget_label: str
     activation_memory_budget: float
@@ -84,6 +100,10 @@ class TrialResult:
     avg_tokens_per_sec: float | None = None
     error_type: str | None = None
     error_message: str | None = None
+
+
+def _normalize_budget(budget: float) -> float:
+    return round(float(budget), BUDGET_ROUND_DECIMALS)
 
 
 def _resolve_hf_load_dataset():
@@ -388,7 +408,7 @@ def build_config(
     )
 
 
-def preflight_activation_memory_budget_api(budgets: tuple[float, ...]) -> None:
+def preflight_activation_memory_budget_api() -> None:
     dynamo_module = getattr(torch, "_dynamo", None)
     if dynamo_module is None:
         raise RuntimeError(
@@ -573,6 +593,82 @@ def adaptive_find_frontier(
     return low, list(attempts_by_mb.values())
 
 
+def adaptive_find_budget_frontiers(
+    *,
+    min_budget: float,
+    max_budget: float,
+    min_budget_delta: float,
+    max_budget_evals: int,
+    budget_runner: Callable[[BudgetSpec], tuple[int | None, list[TrialResult]]],
+) -> list[BudgetSweepResult]:
+    if min_budget < 0.0 or max_budget > 1.0:
+        raise ValueError("Budget bounds must be within [0.0, 1.0].")
+    if min_budget > max_budget:
+        raise ValueError("min_budget must be <= max_budget.")
+    if min_budget_delta <= 0.0:
+        raise ValueError("min_budget_delta must be > 0.")
+    if max_budget_evals < 2:
+        raise ValueError("max_budget_evals must be >= 2.")
+
+    evaluated: dict[float, BudgetSweepResult] = {}
+
+    def evaluate_budget(raw_budget: float) -> BudgetSweepResult:
+        budget_value = _normalize_budget(raw_budget)
+        existing = evaluated.get(budget_value)
+        if existing is not None:
+            return existing
+        budget_spec = BudgetSpec(activation_memory_budget=budget_value)
+        frontier, trials = budget_runner(budget_spec)
+        result = BudgetSweepResult(
+            budget_spec=budget_spec,
+            frontier=frontier,
+            trials=trials,
+        )
+        evaluated[budget_value] = result
+        return result
+
+    left = evaluate_budget(min_budget)
+    right = evaluate_budget(max_budget)
+    pending_intervals: list[tuple[float, float]] = [
+        (left.budget_spec.activation_memory_budget, right.budget_spec.activation_memory_budget)
+    ]
+
+    while pending_intervals and len(evaluated) < max_budget_evals:
+        low_budget, high_budget = pending_intervals.pop(0)
+        if high_budget - low_budget <= min_budget_delta:
+            continue
+
+        low_result = evaluated[_normalize_budget(low_budget)]
+        high_result = evaluated[_normalize_budget(high_budget)]
+        if low_result.frontier == high_result.frontier:
+            continue
+        if (
+            low_result.frontier is not None
+            and high_result.frontier is not None
+            and abs(low_result.frontier - high_result.frontier) <= 1
+        ):
+            continue
+
+        mid_budget = _normalize_budget((low_budget + high_budget) / 2.0)
+        if mid_budget <= low_budget or mid_budget >= high_budget:
+            continue
+        mid_result = evaluate_budget(mid_budget)
+
+        if len(evaluated) >= max_budget_evals:
+            break
+
+        if mid_result.frontier != low_result.frontier:
+            pending_intervals.append((low_budget, mid_budget))
+        if mid_result.frontier != high_result.frontier:
+            pending_intervals.append((mid_budget, high_budget))
+        pending_intervals.sort(key=lambda pair: pair[1] - pair[0], reverse=True)
+
+    return sorted(
+        evaluated.values(),
+        key=lambda item: item.budget_spec.activation_memory_budget,
+    )
+
+
 def _to_row_value(value: float | int | str | None) -> float | int | str | None:
     return value
 
@@ -580,6 +676,7 @@ def _to_row_value(value: float | int | str | None) -> float | int | str | None:
 def log_wandb_summary_tables(
     *,
     sweep_group: str,
+    budget_labels: list[str],
     trial_results: list[TrialResult],
     frontiers: dict[str, int | None],
 ) -> None:
@@ -596,7 +693,11 @@ def log_wandb_summary_tables(
         name=summary_run_name,
         group=sweep_group,
         config={
-            "budgets": [spec.label for spec in (BudgetSpec(b) for b in BUDGETS)],
+            "budgets": budget_labels,
+            "budget_search_min": MIN_ACTIVATION_MEMORY_BUDGET,
+            "budget_search_max": MAX_ACTIVATION_MEMORY_BUDGET,
+            "budget_search_min_delta": BUDGET_SEARCH_MIN_DELTA,
+            "budget_search_max_evals": BUDGET_SEARCH_MAX_EVALS,
             "min_micro_batch": MIN_MICRO_BATCH,
             "max_micro_batch": MAX_MICRO_BATCH,
             "epochs": EPOCHS,
@@ -695,7 +796,7 @@ def main() -> int:
             "(peak_memory_gib / peak_reserved_memory_gib) are CUDA-only."
         )
 
-    preflight_activation_memory_budget_api(BUDGETS)
+    preflight_activation_memory_budget_api()
 
     vocab_path = (
         PROJECT_ROOT
@@ -710,20 +811,23 @@ def main() -> int:
     )
     sweep_group = _build_sweep_group()
     print(f"Starting memory-frontier sweep group: {sweep_group}")
+    print(
+        "Budget search config | "
+        f"min_budget={MIN_ACTIVATION_MEMORY_BUDGET} | "
+        f"max_budget={MAX_ACTIVATION_MEMORY_BUDGET} | "
+        f"min_budget_delta={BUDGET_SEARCH_MIN_DELTA} | "
+        f"max_budget_evals={BUDGET_SEARCH_MAX_EVALS}"
+    )
 
     all_trial_results: list[TrialResult] = []
     frontiers: dict[str, int | None] = {}
 
-    for budget_value in BUDGETS:
-        budget_spec = BudgetSpec(activation_memory_budget=budget_value)
-        print(
-            "Starting budget sweep | "
-            f"budget={budget_spec.label} | "
-            f"min_micro_batch={MIN_MICRO_BATCH} | "
-            f"max_micro_batch={MAX_MICRO_BATCH}"
-        )
-
-        frontier, trials = adaptive_find_frontier(
+    budget_sweep_results = adaptive_find_budget_frontiers(
+        min_budget=MIN_ACTIVATION_MEMORY_BUDGET,
+        max_budget=MAX_ACTIVATION_MEMORY_BUDGET,
+        min_budget_delta=BUDGET_SEARCH_MIN_DELTA,
+        max_budget_evals=BUDGET_SEARCH_MAX_EVALS,
+        budget_runner=lambda budget_spec: adaptive_find_frontier(
             min_micro_batch=MIN_MICRO_BATCH,
             max_micro_batch=MAX_MICRO_BATCH,
             trial_runner=lambda micro_batch_size: run_trial(
@@ -732,7 +836,19 @@ def main() -> int:
                 micro_batch_size=micro_batch_size,
                 base_vocab_size=base_vocab_size,
             ),
+        ),
+    )
+
+    for sweep_result in budget_sweep_results:
+        budget_spec = sweep_result.budget_spec
+        print(
+            "Budget sweep result | "
+            f"budget={budget_spec.label} | "
+            f"min_micro_batch={MIN_MICRO_BATCH} | "
+            f"max_micro_batch={MAX_MICRO_BATCH}"
         )
+        frontier = sweep_result.frontier
+        trials = sweep_result.trials
 
         all_trial_results.extend(trials)
         frontiers[budget_spec.label] = frontier
@@ -744,6 +860,7 @@ def main() -> int:
 
     log_wandb_summary_tables(
         sweep_group=sweep_group,
+        budget_labels=[result.budget_spec.label for result in budget_sweep_results],
         trial_results=all_trial_results,
         frontiers=frontiers,
     )

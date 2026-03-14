@@ -11,6 +11,7 @@ from experiments.baseline.memory_experiments.microbatch_memory_frontier_exp impo
     MemoryFrontierSummaryPlugin,
     TrialResult,
     _to_row_value,
+    adaptive_find_budget_frontiers,
     adaptive_find_frontier,
     classify_oom_exception,
     compute_avg_tokens_per_sec,
@@ -97,6 +98,59 @@ class AdaptiveFrontierSearchTests(unittest.TestCase):
                 trial_runner=runner,
             )
         self.assertEqual(attempts, [16, 32])
+
+
+class AdaptiveBudgetSearchTests(unittest.TestCase):
+    def _budget_trial(self, budget: float) -> TrialResult:
+        return TrialResult(
+            budget_label=f"{budget:g}",
+            activation_memory_budget=budget,
+            micro_batch_size=16,
+            run_name=f"run-budget-{budget:g}",
+            status="success",
+        )
+
+    def test_adaptive_budget_search_adds_midpoint_when_frontier_changes(self) -> None:
+        attempts: list[float] = []
+
+        def budget_runner(spec: BudgetSpec) -> tuple[int | None, list[TrialResult]]:
+            attempts.append(spec.activation_memory_budget)
+            frontier = 40 if spec.activation_memory_budget < 0.5 else 20
+            return frontier, [self._budget_trial(spec.activation_memory_budget)]
+
+        results = adaptive_find_budget_frontiers(
+            min_budget=0.0,
+            max_budget=1.0,
+            min_budget_delta=0.25,
+            max_budget_evals=5,
+            budget_runner=budget_runner,
+        )
+
+        searched = [result.budget_spec.activation_memory_budget for result in results]
+        self.assertIn(0.0, searched)
+        self.assertIn(1.0, searched)
+        self.assertIn(0.5, searched)
+        self.assertLessEqual(len(searched), 5)
+        self.assertEqual(len(set(attempts)), len(attempts))
+
+    def test_adaptive_budget_search_stops_when_endpoint_frontiers_match(self) -> None:
+        attempts: list[float] = []
+
+        def budget_runner(spec: BudgetSpec) -> tuple[int | None, list[TrialResult]]:
+            attempts.append(spec.activation_memory_budget)
+            return 24, [self._budget_trial(spec.activation_memory_budget)]
+
+        results = adaptive_find_budget_frontiers(
+            min_budget=0.0,
+            max_budget=1.0,
+            min_budget_delta=0.1,
+            max_budget_evals=8,
+            budget_runner=budget_runner,
+        )
+
+        searched = [result.budget_spec.activation_memory_budget for result in results]
+        self.assertEqual(searched, [0.0, 1.0])
+        self.assertEqual(len(attempts), 2)
 
 
 class OOMClassifierTests(unittest.TestCase):
