@@ -271,6 +271,8 @@ class RunTrialValidityTests(unittest.TestCase):
         mocked_run_result = SimpleNamespace(
             global_step=7,
             run_artifact_dir="/tmp/fake-run",
+            final_train_loss=1.23,
+            final_val_loss=1.56,
             completed_epochs=1,
             epoch_end_validation_ran=True,
         )
@@ -288,11 +290,15 @@ class RunTrialValidityTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
         self.assertIsNone(result.error_type)
         self.assertEqual(result.global_step, 7)
+        self.assertAlmostEqual(result.final_train_loss or 0.0, 1.23, places=6)
+        self.assertAlmostEqual(result.final_val_loss or 0.0, 1.56, places=6)
 
     def test_run_trial_marks_error_when_epoch_or_validation_incomplete(self) -> None:
         mocked_run_result = SimpleNamespace(
             global_step=7,
             run_artifact_dir="/tmp/fake-run",
+            final_train_loss=2.34,
+            final_val_loss=3.45,
             completed_epochs=0,
             epoch_end_validation_ran=False,
         )
@@ -310,6 +316,8 @@ class RunTrialValidityTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.error_type, "IncompleteEpochOrValidation")
         self.assertIn("completed_epochs=0", result.error_message or "")
+        self.assertAlmostEqual(result.final_train_loss or 0.0, 2.34, places=6)
+        self.assertAlmostEqual(result.final_val_loss or 0.0, 3.45, places=6)
 
 
 if __name__ == "__main__":

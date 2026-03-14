@@ -76,6 +76,8 @@ class TrialResult:
     status: str
     global_step: int | None = None
     run_artifact_dir: str | None = None
+    final_train_loss: float | None = None
+    final_val_loss: float | None = None
     max_peak_memory_gib: float | None = None
     max_peak_reserved_memory_gib: float | None = None
     avg_step_time_ms: float | None = None
@@ -360,7 +362,7 @@ def build_config(
             enable_artifact_io=False,
             wandb=WandbMetricsConfig(
                 enable_train_loss_vs_tokens=True,
-                enable_val_loss_vs_tokens=False,
+                enable_val_loss_vs_tokens=True,
                 enable_perplexity=False,
                 enable_step_time=True,
                 enable_peak_memory=True,
@@ -434,6 +436,8 @@ def run_trial(
         error_message = None
         global_step = int(run_result.global_step)
         run_artifact_dir = run_result.run_artifact_dir
+        final_train_loss = float(run_result.final_train_loss)
+        final_val_loss = float(run_result.final_val_loss)
         completed_epochs = int(run_result.completed_epochs)
         epoch_end_validation_ran = bool(run_result.epoch_end_validation_ran)
         if (
@@ -454,6 +458,8 @@ def run_trial(
         error_message = str(exc)
         global_step = None
         run_artifact_dir = None
+        final_train_loss = None
+        final_val_loss = None
     finally:
         logged_summary = summary_plugin.summary
         clear_runtime_state()
@@ -466,6 +472,8 @@ def run_trial(
         status=status,
         global_step=global_step,
         run_artifact_dir=run_artifact_dir,
+        final_train_loss=final_train_loss,
+        final_val_loss=final_val_loss,
         max_peak_memory_gib=logged_summary.max_peak_memory_gib,
         max_peak_reserved_memory_gib=logged_summary.max_peak_reserved_memory_gib,
         avg_step_time_ms=logged_summary.avg_step_time_ms,
@@ -602,6 +610,8 @@ def log_wandb_summary_tables(
             "micro_batch_size",
             "status",
             "global_step",
+            "final_train_loss",
+            "final_val_loss",
             "max_peak_memory_gib",
             "max_peak_reserved_memory_gib",
             "avg_step_time_ms",
@@ -616,6 +626,8 @@ def log_wandb_summary_tables(
                 trial.micro_batch_size,
                 trial.status,
                 _to_row_value(trial.global_step),
+                _to_row_value(trial.final_train_loss),
+                _to_row_value(trial.final_val_loss),
                 _to_row_value(trial.max_peak_memory_gib),
                 _to_row_value(trial.max_peak_reserved_memory_gib),
                 _to_row_value(trial.avg_step_time_ms),
