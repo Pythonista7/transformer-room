@@ -35,37 +35,13 @@ DATASET_NAME = "Salesforce/wikitext"
 DATASET_CONFIG = "wikitext-2-v1"
 SEQ_LEN = 1024
 STRIDE = 1024
-MIN_ACTIVATION_MEMORY_BUDGET = 0.0
-MAX_ACTIVATION_MEMORY_BUDGET = 1.0
-
-# Smallest budget interval the adaptive search will still split. If two tested budgets are within 0.1 (for example 0.4 and 0.48), it stops refining between them.
-BUDGET_SEARCH_MIN_DELTA = 0.1
-# Hard cap on how many distinct budget values are evaluated total (including endpoints 0.0 and 1.0).This bounds run cost.
-BUDGET_SEARCH_MAX_EVALS = 10
-#Every sampled budget is rounded to 3 decimals before caching/comparison (for example 0.333333 -> 0.333).
-BUDGET_ROUND_DECIMALS = 2
 
 MIN_MICRO_BATCH = 16
-MAX_MICRO_BATCH = 256
+INITIAL_MAX_MICRO_BATCH = 128
+MEASURE_TRAINING_ONLY = True
 EPOCHS = 1
 DATA_FRACTION = 0.5
 SEED = 42
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetSpec:
-    activation_memory_budget: float
-
-    @property
-    def slug(self) -> str:
-        text = f"{self.activation_memory_budget:.3f}".rstrip("0").rstrip(".")
-        if "." not in text:
-            text = f"{text}.0"
-        return text.replace(".", "p")
-
-    @property
-    def label(self) -> str:
-        return f"{self.activation_memory_budget:g}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,16 +53,7 @@ class LoggedStepSummary:
 
 
 @dataclass(frozen=True, slots=True)
-class BudgetSweepResult:
-    budget_spec: BudgetSpec
-    frontier: int | None
-    trials: list[TrialResult]
-
-
-@dataclass(frozen=True, slots=True)
 class TrialResult:
-    budget_label: str
-    activation_memory_budget: float
     micro_batch_size: int
     run_name: str
     status: str
@@ -100,10 +67,6 @@ class TrialResult:
     avg_tokens_per_sec: float | None = None
     error_type: str | None = None
     error_message: str | None = None
-
-
-def _normalize_budget(budget: float) -> float:
-    return round(float(budget), BUDGET_ROUND_DECIMALS)
 
 
 def _resolve_hf_load_dataset():
@@ -316,7 +279,6 @@ def build_config(
     sweep_group: str,
     base_vocab_size: int,
     micro_batch_size: int,
-    activation_memory_budget: float,
 ) -> ExperimentConfig:
     vocab_path = (
         PROJECT_ROOT
@@ -337,7 +299,6 @@ def build_config(
             torch_compile_mode="default",
             torch_compile_fullgraph=False,
             torch_compile_dynamic=False,
-            activation_memory_budget=activation_memory_budget,
             compile_warmup_steps=3,
             seed=SEED,
         ),
@@ -371,6 +332,7 @@ def build_config(
             seq_len=SEQ_LEN,
             stride=STRIDE,
             data_fraction=DATA_FRACTION,
+            run_validation=not MEASURE_TRAINING_ONLY,
         ),
         split=HoldoutSplitConfig(
             train_fraction=0.9,
@@ -382,7 +344,7 @@ def build_config(
             enable_artifact_io=False,
             wandb=WandbMetricsConfig(
                 enable_train_loss_vs_tokens=True,
-                enable_val_loss_vs_tokens=True,
+                enable_val_loss_vs_tokens=not MEASURE_TRAINING_ONLY,
                 enable_perplexity=False,
                 enable_step_time=True,
                 enable_peak_memory=True,
@@ -408,46 +370,26 @@ def build_config(
     )
 
 
-def preflight_activation_memory_budget_api() -> None:
-    dynamo_module = getattr(torch, "_dynamo", None)
-    if dynamo_module is None:
-        raise RuntimeError(
-            "Budgeted variants were requested, but torch._dynamo is unavailable."
-        )
-    _ = dynamo_module
-
-    functorch_module = getattr(torch, "_functorch", None)
-    functorch_config = getattr(functorch_module, "config", None)
-    if functorch_config is None or not hasattr(functorch_config, "activation_memory_budget"):
-        raise RuntimeError(
-            "Budgeted variants were requested, but "
-            "torch._functorch.config.activation_memory_budget is unavailable."
-        )
-
-
 def _build_sweep_group() -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    return f"3-memory-frontier-step1-compile-budget-{timestamp}"
+    return f"4-memory-frontier-step1-compile-{timestamp}"
 
 
 def run_trial(
     *,
     sweep_group: str,
-    budget_spec: BudgetSpec,
     micro_batch_size: int,
     base_vocab_size: int,
 ) -> TrialResult:
-    run_name = (
-        f"{sweep_group}-budget_{budget_spec.slug}-mb_{micro_batch_size}"
-    )
+    run_name = f"{sweep_group}-mb_{micro_batch_size}"
     config = build_config(
         run_name=run_name,
         sweep_group=sweep_group,
         base_vocab_size=base_vocab_size,
         micro_batch_size=micro_batch_size,
-        activation_memory_budget=budget_spec.activation_memory_budget,
     )
     summary_plugin = MemoryFrontierSummaryPlugin()
+    requires_validation = bool(config.train.run_validation)
 
     try:
         run_result = model_pipeline(config, extra_metric_plugins=[summary_plugin])
@@ -457,19 +399,21 @@ def run_trial(
         global_step = int(run_result.global_step)
         run_artifact_dir = run_result.run_artifact_dir
         final_train_loss = float(run_result.final_train_loss)
-        final_val_loss = float(run_result.final_val_loss)
+        final_val_loss = (
+            float(run_result.final_val_loss) if requires_validation else None
+        )
         completed_epochs = int(run_result.completed_epochs)
         epoch_end_validation_ran = bool(run_result.epoch_end_validation_ran)
-        if (
-            completed_epochs < int(config.train.epochs)
-            or not epoch_end_validation_ran
+        if completed_epochs < int(config.train.epochs) or (
+            requires_validation and not epoch_end_validation_ran
         ):
             status = "error"
             error_type = "IncompleteEpochOrValidation"
             error_message = (
-                "Run did not complete all epochs and epoch-end validation. "
+                "Run did not complete the required workload. "
                 f"completed_epochs={completed_epochs}, "
                 f"required_epochs={int(config.train.epochs)}, "
+                f"requires_validation={requires_validation}, "
                 f"epoch_end_validation_ran={epoch_end_validation_ran}"
             )
     except Exception as exc:
@@ -485,8 +429,6 @@ def run_trial(
         clear_runtime_state()
 
     result = TrialResult(
-        budget_label=budget_spec.label,
-        activation_memory_budget=budget_spec.activation_memory_budget,
         micro_batch_size=micro_batch_size,
         run_name=run_name,
         status=status,
@@ -504,7 +446,6 @@ def run_trial(
 
     print(
         "Trial complete | "
-        f"budget={result.budget_label} | "
         f"micro_batch_size={result.micro_batch_size} | "
         f"status={result.status} | "
         f"max_peak_reserved_memory_gib={result.max_peak_reserved_memory_gib} | "
@@ -516,157 +457,117 @@ def run_trial(
 def adaptive_find_frontier(
     *,
     min_micro_batch: int,
-    max_micro_batch: int,
+    initial_max_micro_batch: int,
     trial_runner: Callable[[int], TrialResult],
+    progress_callback: Callable[[list[TrialResult], int | None], None] | None = None,
 ) -> tuple[int | None, list[TrialResult]]:
     if min_micro_batch <= 0:
         raise ValueError("min_micro_batch must be > 0.")
-    if max_micro_batch < min_micro_batch:
-        raise ValueError("max_micro_batch must be >= min_micro_batch.")
+    if initial_max_micro_batch < min_micro_batch:
+        raise ValueError("initial_max_micro_batch must be >= min_micro_batch.")
 
     attempts_by_mb: dict[int, TrialResult] = {}
 
-    def run_once(micro_batch_size: int) -> TrialResult:
+    def run_once(micro_batch_size: int) -> tuple[TrialResult, bool]:
         cached = attempts_by_mb.get(micro_batch_size)
         if cached is not None:
-            return cached
+            return cached, False
         result = trial_runner(micro_batch_size)
         attempts_by_mb[micro_batch_size] = result
-        return result
+        return result, True
 
-    first = run_once(min_micro_batch)
+    def maybe_report_progress(*, is_new: bool, best_known_frontier: int | None) -> None:
+        if not is_new or progress_callback is None:
+            return
+        progress_callback(list(attempts_by_mb.values()), best_known_frontier)
+
+    first, first_is_new = run_once(min_micro_batch)
     if first.status == "oom":
+        maybe_report_progress(is_new=first_is_new, best_known_frontier=None)
         return None, list(attempts_by_mb.values())
     if first.status != "success":
+        maybe_report_progress(is_new=first_is_new, best_known_frontier=None)
         raise RuntimeError(
             "Search aborted because minimum micro-batch trial failed with "
             f"status={first.status}: {first.error_type}: {first.error_message}"
         )
 
     low = min_micro_batch
+    maybe_report_progress(is_new=first_is_new, best_known_frontier=low)
     high: int | None = None
     probe = min_micro_batch * 2
 
-    while probe <= max_micro_batch:
-        trial = run_once(probe)
+    while probe <= initial_max_micro_batch:
+        trial, is_new = run_once(probe)
         # Frontier classification is strictly status-based; memory metrics are diagnostic.
         if trial.status == "success":
             low = probe
+            maybe_report_progress(is_new=is_new, best_known_frontier=low)
             probe *= 2
             continue
         if trial.status == "oom":
             high = probe
+            maybe_report_progress(is_new=is_new, best_known_frontier=low)
             break
+        maybe_report_progress(is_new=is_new, best_known_frontier=low)
         raise RuntimeError(
             "Search aborted because trial failed with "
             f"status={trial.status}: {trial.error_type}: {trial.error_message}"
         )
 
     if high is None:
-        if low == max_micro_batch:
-            return low, list(attempts_by_mb.values())
-        max_trial = run_once(max_micro_batch)
+        max_trial, is_new = run_once(initial_max_micro_batch)
         if max_trial.status == "success":
-            return max_micro_batch, list(attempts_by_mb.values())
-        if max_trial.status == "oom":
-            high = max_micro_batch
+            low = max(low, initial_max_micro_batch)
+            maybe_report_progress(is_new=is_new, best_known_frontier=low)
+        elif max_trial.status == "oom":
+            high = initial_max_micro_batch
+            maybe_report_progress(is_new=is_new, best_known_frontier=low)
         else:
+            maybe_report_progress(is_new=is_new, best_known_frontier=low)
             raise RuntimeError(
                 "Search aborted because max-boundary trial failed with "
                 f"status={max_trial.status}: {max_trial.error_type}: {max_trial.error_message}"
             )
 
+    if high is None:
+        # Keep doubling until we bracket the first OOM above the best known success.
+        probe = max(low * 2, low + 1)
+        while True:
+            trial, is_new = run_once(probe)
+            if trial.status == "success":
+                low = probe
+                maybe_report_progress(is_new=is_new, best_known_frontier=low)
+                probe *= 2
+                continue
+            if trial.status == "oom":
+                high = probe
+                maybe_report_progress(is_new=is_new, best_known_frontier=low)
+                break
+            maybe_report_progress(is_new=is_new, best_known_frontier=low)
+            raise RuntimeError(
+                "Search aborted during upper-bound expansion because trial failed with "
+                f"status={trial.status}: {trial.error_type}: {trial.error_message}"
+            )
+
     while high is not None and low + 1 < high:
         mid = (low + high) // 2
-        trial = run_once(mid)
+        trial, is_new = run_once(mid)
         if trial.status == "success":
             low = mid
+            maybe_report_progress(is_new=is_new, best_known_frontier=low)
             continue
         if trial.status == "oom":
             high = mid
+            maybe_report_progress(is_new=is_new, best_known_frontier=low)
             continue
+        maybe_report_progress(is_new=is_new, best_known_frontier=low)
         raise RuntimeError(
             "Search aborted during binary search because trial failed with "
             f"status={trial.status}: {trial.error_type}: {trial.error_message}"
         )
 
     return low, list(attempts_by_mb.values())
-
-
-def adaptive_find_budget_frontiers(
-    *,
-    min_budget: float,
-    max_budget: float,
-    min_budget_delta: float,
-    max_budget_evals: int,
-    budget_runner: Callable[[BudgetSpec], tuple[int | None, list[TrialResult]]],
-) -> list[BudgetSweepResult]:
-    if min_budget < 0.0 or max_budget > 1.0:
-        raise ValueError("Budget bounds must be within [0.0, 1.0].")
-    if min_budget > max_budget:
-        raise ValueError("min_budget must be <= max_budget.")
-    if min_budget_delta <= 0.0:
-        raise ValueError("min_budget_delta must be > 0.")
-    if max_budget_evals < 2:
-        raise ValueError("max_budget_evals must be >= 2.")
-
-    evaluated: dict[float, BudgetSweepResult] = {}
-
-    def evaluate_budget(raw_budget: float) -> BudgetSweepResult:
-        budget_value = _normalize_budget(raw_budget)
-        existing = evaluated.get(budget_value)
-        if existing is not None:
-            return existing
-        budget_spec = BudgetSpec(activation_memory_budget=budget_value)
-        frontier, trials = budget_runner(budget_spec)
-        result = BudgetSweepResult(
-            budget_spec=budget_spec,
-            frontier=frontier,
-            trials=trials,
-        )
-        evaluated[budget_value] = result
-        return result
-
-    left = evaluate_budget(min_budget)
-    right = evaluate_budget(max_budget)
-    pending_intervals: list[tuple[float, float]] = [
-        (left.budget_spec.activation_memory_budget, right.budget_spec.activation_memory_budget)
-    ]
-
-    while pending_intervals and len(evaluated) < max_budget_evals:
-        low_budget, high_budget = pending_intervals.pop(0)
-        if high_budget - low_budget <= min_budget_delta:
-            continue
-
-        low_result = evaluated[_normalize_budget(low_budget)]
-        high_result = evaluated[_normalize_budget(high_budget)]
-        if low_result.frontier == high_result.frontier:
-            continue
-        if (
-            low_result.frontier is not None
-            and high_result.frontier is not None
-            and abs(low_result.frontier - high_result.frontier) <= 1
-        ):
-            continue
-
-        mid_budget = _normalize_budget((low_budget + high_budget) / 2.0)
-        if mid_budget <= low_budget or mid_budget >= high_budget:
-            continue
-        mid_result = evaluate_budget(mid_budget)
-
-        if len(evaluated) >= max_budget_evals:
-            break
-
-        if mid_result.frontier != low_result.frontier:
-            pending_intervals.append((low_budget, mid_budget))
-        if mid_result.frontier != high_result.frontier:
-            pending_intervals.append((mid_budget, high_budget))
-        pending_intervals.sort(key=lambda pair: pair[1] - pair[0], reverse=True)
-
-    return sorted(
-        evaluated.values(),
-        key=lambda item: item.budget_spec.activation_memory_budget,
-    )
 
 
 def _to_row_value(value: float | int | str | None) -> float | int | str | None:
@@ -676,9 +577,10 @@ def _to_row_value(value: float | int | str | None) -> float | int | str | None:
 def log_wandb_summary_tables(
     *,
     sweep_group: str,
-    budget_labels: list[str],
     trial_results: list[TrialResult],
-    frontiers: dict[str, int | None],
+    frontier: int | None,
+    summary_stage: str = "final",
+    snapshot_id: str | None = None,
 ) -> None:
     try:
         import wandb
@@ -687,27 +589,32 @@ def log_wandb_summary_tables(
             "W&B summary table logging requires the `wandb` package."
         ) from exc
 
-    summary_run_name = f"{sweep_group}-summary"
+    if summary_stage not in {"partial", "final"}:
+        raise ValueError("summary_stage must be one of: partial, final")
+
+    summary_run_name = f"{sweep_group}-summary-{summary_stage}"
+    if summary_stage == "partial":
+        if snapshot_id is None or not snapshot_id.strip():
+            raise ValueError("snapshot_id is required for partial summary stage.")
+        summary_run_name = f"{summary_run_name}-{snapshot_id}"
+
     run = wandb.init(
         project=PROJECT_NAME,
         name=summary_run_name,
         group=sweep_group,
         config={
-            "budgets": budget_labels,
-            "budget_search_min": MIN_ACTIVATION_MEMORY_BUDGET,
-            "budget_search_max": MAX_ACTIVATION_MEMORY_BUDGET,
-            "budget_search_min_delta": BUDGET_SEARCH_MIN_DELTA,
-            "budget_search_max_evals": BUDGET_SEARCH_MAX_EVALS,
             "min_micro_batch": MIN_MICRO_BATCH,
-            "max_micro_batch": MAX_MICRO_BATCH,
+            "initial_max_micro_batch": INITIAL_MAX_MICRO_BATCH,
+            "measure_training_only": float(1 if MEASURE_TRAINING_ONLY else 0),
             "epochs": EPOCHS,
             "data_fraction": DATA_FRACTION,
             "step": "memory_frontier",
+            "summary_stage": summary_stage,
+            "summary_snapshot_id": snapshot_id,
         },
     )
     try:
         trial_columns = [
-            "budget",
             "micro_batch_size",
             "status",
             "global_step",
@@ -723,7 +630,6 @@ def log_wandb_summary_tables(
         ]
         trial_rows = [
             [
-                trial.budget_label,
                 trial.micro_batch_size,
                 trial.status,
                 _to_row_value(trial.global_step),
@@ -739,17 +645,11 @@ def log_wandb_summary_tables(
             ]
             for trial in sorted(
                 trial_results,
-                key=lambda trial: (trial.budget_label, trial.micro_batch_size),
+                key=lambda trial: trial.micro_batch_size,
             )
         ]
-        frontier_columns = [
-            "budget",
-            "frontier_micro_batch_size",
-        ]
-        frontier_rows = [
-            [budget_label, _to_row_value(frontier_mb)]
-            for budget_label, frontier_mb in frontiers.items()
-        ]
+        frontier_columns = ["frontier_micro_batch_size"]
+        frontier_rows = [[_to_row_value(frontier)]]
 
         run.log(
             {
@@ -768,7 +668,6 @@ def log_wandb_summary_tables(
 
 
 def _print_frontier_summary(
-    budget_spec: BudgetSpec,
     frontier: int | None,
     trials: list[TrialResult],
 ) -> None:
@@ -779,8 +678,7 @@ def _print_frontier_summary(
         else None
     )
     print(
-        "Budget summary | "
-        f"budget={budget_spec.label} | "
+        "Frontier summary | "
         f"frontier_micro_batch={frontier} | "
         "frontier_rule=status_only | "
         f"trials={len(trials)} | "
@@ -796,8 +694,6 @@ def main() -> int:
             "(peak_memory_gib / peak_reserved_memory_gib) are CUDA-only."
         )
 
-    preflight_activation_memory_budget_api()
-
     vocab_path = (
         PROJECT_ROOT
         / "src"
@@ -812,62 +708,60 @@ def main() -> int:
     sweep_group = _build_sweep_group()
     print(f"Starting memory-frontier sweep group: {sweep_group}")
     print(
-        "Budget search config | "
-        f"min_budget={MIN_ACTIVATION_MEMORY_BUDGET} | "
-        f"max_budget={MAX_ACTIVATION_MEMORY_BUDGET} | "
-        f"min_budget_delta={BUDGET_SEARCH_MIN_DELTA} | "
-        f"max_budget_evals={BUDGET_SEARCH_MAX_EVALS}"
+        "Micro-batch frontier config | "
+        f"min_micro_batch={MIN_MICRO_BATCH} | "
+        f"initial_max_micro_batch={INITIAL_MAX_MICRO_BATCH} | "
+        f"measure_training_only={MEASURE_TRAINING_ONLY}"
     )
 
-    all_trial_results: list[TrialResult] = []
-    frontiers: dict[str, int | None] = {}
-
-    budget_sweep_results = adaptive_find_budget_frontiers(
-        min_budget=MIN_ACTIVATION_MEMORY_BUDGET,
-        max_budget=MAX_ACTIVATION_MEMORY_BUDGET,
-        min_budget_delta=BUDGET_SEARCH_MIN_DELTA,
-        max_budget_evals=BUDGET_SEARCH_MAX_EVALS,
-        budget_runner=lambda budget_spec: adaptive_find_frontier(
-            min_micro_batch=MIN_MICRO_BATCH,
-            max_micro_batch=MAX_MICRO_BATCH,
-            trial_runner=lambda micro_batch_size: run_trial(
+    def persist_partial_summary(
+        trial_results: list[TrialResult],
+        best_known_frontier: int | None,
+    ) -> None:
+        if not trial_results:
+            return
+        snapshot_id = (
+            f"trial_{len(trial_results):03d}-"
+            f"mb_{trial_results[-1].micro_batch_size}"
+        )
+        try:
+            log_wandb_summary_tables(
                 sweep_group=sweep_group,
-                budget_spec=budget_spec,
-                micro_batch_size=micro_batch_size,
-                base_vocab_size=base_vocab_size,
-            ),
+                trial_results=trial_results,
+                frontier=best_known_frontier,
+                summary_stage="partial",
+                snapshot_id=snapshot_id,
+            )
+        except Exception as exc:
+            print(
+                "Warning: failed to persist partial summary checkpoint | "
+                f"snapshot_id={snapshot_id} | error={exc}"
+            )
+
+    frontier, trials = adaptive_find_frontier(
+        min_micro_batch=MIN_MICRO_BATCH,
+        initial_max_micro_batch=INITIAL_MAX_MICRO_BATCH,
+        trial_runner=lambda micro_batch_size: run_trial(
+            sweep_group=sweep_group,
+            micro_batch_size=micro_batch_size,
+            base_vocab_size=base_vocab_size,
         ),
+        progress_callback=persist_partial_summary,
     )
-
-    for sweep_result in budget_sweep_results:
-        budget_spec = sweep_result.budget_spec
-        print(
-            "Budget sweep result | "
-            f"budget={budget_spec.label} | "
-            f"min_micro_batch={MIN_MICRO_BATCH} | "
-            f"max_micro_batch={MAX_MICRO_BATCH}"
-        )
-        frontier = sweep_result.frontier
-        trials = sweep_result.trials
-
-        all_trial_results.extend(trials)
-        frontiers[budget_spec.label] = frontier
-        _print_frontier_summary(
-            budget_spec=budget_spec,
-            frontier=frontier,
-            trials=trials,
-        )
+    _print_frontier_summary(
+        frontier=frontier,
+        trials=trials,
+    )
 
     log_wandb_summary_tables(
         sweep_group=sweep_group,
-        budget_labels=[result.budget_spec.label for result in budget_sweep_results],
-        trial_results=all_trial_results,
-        frontiers=frontiers,
+        trial_results=trials,
+        frontier=frontier,
+        summary_stage="final",
     )
 
     print("Sweep completed.")
-    for budget_label, frontier in frontiers.items():
-        print(f"Frontier | budget={budget_label} | micro_batch={frontier}")
+    print(f"Frontier | micro_batch={frontier}")
     return 0
 
 

@@ -6,12 +6,11 @@ from unittest import mock
 
 import torch
 
+import experiments.baseline.memory_experiments.microbatch_memory_frontier_exp as frontier_exp
 from experiments.baseline.memory_experiments.microbatch_memory_frontier_exp import (
-    BudgetSpec,
     MemoryFrontierSummaryPlugin,
     TrialResult,
     _to_row_value,
-    adaptive_find_budget_frontiers,
     adaptive_find_frontier,
     classify_oom_exception,
     compute_avg_tokens_per_sec,
@@ -26,8 +25,6 @@ def _trial(
     status: str,
 ) -> TrialResult:
     return TrialResult(
-        budget_label="0",
-        activation_memory_budget=0.0,
         micro_batch_size=micro_batch_size,
         run_name=f"run-mb-{micro_batch_size}",
         status=status,
@@ -35,6 +32,9 @@ def _trial(
 
 
 class AdaptiveFrontierSearchTests(unittest.TestCase):
+    def test_default_initial_max_micro_batch_is_128(self) -> None:
+        self.assertEqual(frontier_exp.INITIAL_MAX_MICRO_BATCH, 128)
+
     def test_adaptive_search_finds_exact_boundary(self) -> None:
         attempts: list[int] = []
 
@@ -47,7 +47,7 @@ class AdaptiveFrontierSearchTests(unittest.TestCase):
 
         frontier, trials = adaptive_find_frontier(
             min_micro_batch=8,
-            max_micro_batch=64,
+            initial_max_micro_batch=64,
             trial_runner=runner,
         )
 
@@ -55,6 +55,59 @@ class AdaptiveFrontierSearchTests(unittest.TestCase):
         self.assertIn(40, attempts)
         self.assertEqual(len(attempts), len(set(attempts)))
         self.assertEqual({trial.micro_batch_size for trial in trials}, set(attempts))
+
+    def test_adaptive_search_expands_past_initial_max_until_first_oom(self) -> None:
+        attempts: list[int] = []
+
+        def runner(micro_batch_size: int) -> TrialResult:
+            attempts.append(micro_batch_size)
+            return _trial(
+                micro_batch_size=micro_batch_size,
+                status="success" if micro_batch_size <= 160 else "oom",
+            )
+
+        frontier, trials = adaptive_find_frontier(
+            min_micro_batch=16,
+            initial_max_micro_batch=64,
+            trial_runner=runner,
+        )
+
+        self.assertEqual(frontier, 160)
+        self.assertIn(128, attempts)
+        self.assertIn(256, attempts)
+        self.assertEqual(len(attempts), len(set(attempts)))
+        self.assertEqual({trial.micro_batch_size for trial in trials}, set(attempts))
+
+    def test_progress_callback_fires_once_per_new_trial_not_cached_reads(self) -> None:
+        attempts: list[int] = []
+        callback_frontiers: list[int | None] = []
+        callback_sizes: list[int] = []
+
+        def runner(micro_batch_size: int) -> TrialResult:
+            attempts.append(micro_batch_size)
+            return _trial(
+                micro_batch_size=micro_batch_size,
+                status="success" if micro_batch_size <= 100 else "oom",
+            )
+
+        def progress_callback(
+            trial_results: list[TrialResult],
+            best_known_frontier: int | None,
+        ) -> None:
+            callback_frontiers.append(best_known_frontier)
+            callback_sizes.append(len(trial_results))
+
+        frontier, _ = adaptive_find_frontier(
+            min_micro_batch=16,
+            initial_max_micro_batch=64,
+            trial_runner=runner,
+            progress_callback=progress_callback,
+        )
+
+        self.assertEqual(frontier, 100)
+        self.assertEqual(len(callback_frontiers), len(attempts))
+        self.assertEqual(callback_sizes, list(range(1, len(attempts) + 1)))
+        self.assertEqual(callback_frontiers[-1], frontier)
 
     def test_adaptive_search_handles_no_fit_at_minimum(self) -> None:
         attempts: list[int] = []
@@ -65,7 +118,7 @@ class AdaptiveFrontierSearchTests(unittest.TestCase):
 
         frontier, trials = adaptive_find_frontier(
             min_micro_batch=16,
-            max_micro_batch=128,
+            initial_max_micro_batch=128,
             trial_runner=runner,
         )
 
@@ -82,75 +135,20 @@ class AdaptiveFrontierSearchTests(unittest.TestCase):
             if micro_batch_size <= 16:
                 return _trial(micro_batch_size=micro_batch_size, status="success")
             return TrialResult(
-                budget_label="0",
-                activation_memory_budget=0.0,
                 micro_batch_size=micro_batch_size,
                 run_name=f"run-mb-{micro_batch_size}",
                 status="error",
-                error_type="IncompleteEpochOrValidation",
-                error_message="did not complete epoch validation",
+                error_type="UnexpectedError",
+                error_message="training failed",
             )
 
         with self.assertRaisesRegex(RuntimeError, "status=error"):
             adaptive_find_frontier(
                 min_micro_batch=16,
-                max_micro_batch=64,
+                initial_max_micro_batch=64,
                 trial_runner=runner,
             )
         self.assertEqual(attempts, [16, 32])
-
-
-class AdaptiveBudgetSearchTests(unittest.TestCase):
-    def _budget_trial(self, budget: float) -> TrialResult:
-        return TrialResult(
-            budget_label=f"{budget:g}",
-            activation_memory_budget=budget,
-            micro_batch_size=16,
-            run_name=f"run-budget-{budget:g}",
-            status="success",
-        )
-
-    def test_adaptive_budget_search_adds_midpoint_when_frontier_changes(self) -> None:
-        attempts: list[float] = []
-
-        def budget_runner(spec: BudgetSpec) -> tuple[int | None, list[TrialResult]]:
-            attempts.append(spec.activation_memory_budget)
-            frontier = 40 if spec.activation_memory_budget < 0.5 else 20
-            return frontier, [self._budget_trial(spec.activation_memory_budget)]
-
-        results = adaptive_find_budget_frontiers(
-            min_budget=0.0,
-            max_budget=1.0,
-            min_budget_delta=0.25,
-            max_budget_evals=5,
-            budget_runner=budget_runner,
-        )
-
-        searched = [result.budget_spec.activation_memory_budget for result in results]
-        self.assertIn(0.0, searched)
-        self.assertIn(1.0, searched)
-        self.assertIn(0.5, searched)
-        self.assertLessEqual(len(searched), 5)
-        self.assertEqual(len(set(attempts)), len(attempts))
-
-    def test_adaptive_budget_search_stops_when_endpoint_frontiers_match(self) -> None:
-        attempts: list[float] = []
-
-        def budget_runner(spec: BudgetSpec) -> tuple[int | None, list[TrialResult]]:
-            attempts.append(spec.activation_memory_budget)
-            return 24, [self._budget_trial(spec.activation_memory_budget)]
-
-        results = adaptive_find_budget_frontiers(
-            min_budget=0.0,
-            max_budget=1.0,
-            min_budget_delta=0.1,
-            max_budget_evals=8,
-            budget_runner=budget_runner,
-        )
-
-        searched = [result.budget_spec.activation_memory_budget for result in results]
-        self.assertEqual(searched, [0.0, 1.0])
-        self.assertEqual(len(attempts), 2)
 
 
 class OOMClassifierTests(unittest.TestCase):
@@ -178,10 +176,6 @@ class ThroughputDerivationTests(unittest.TestCase):
             (2, {"tokens_seen_train": 1024.0, "step_time_ms": 100.0}),
             (3, {"tokens_seen_train": 1536.0, "step_time_ms": 100.0}),
         ]
-        # Rates by step:
-        # step1:  512 / 0.2 = 2560
-        # step2:  512 / 0.1 = 5120
-        # step3:  512 / 0.1 = 5120
         expected = (2560.0 + 5120.0 + 5120.0) / 3.0
         observed = compute_avg_tokens_per_sec(logged_entries)
         self.assertIsNotNone(observed)
@@ -321,14 +315,14 @@ class MemoryFrontierSummaryPluginTests(unittest.TestCase):
 
 
 class RunTrialValidityTests(unittest.TestCase):
-    def test_run_trial_marks_success_when_full_epoch_and_val_complete(self) -> None:
+    def test_run_trial_marks_success_when_training_only_epoch_completes(self) -> None:
         mocked_run_result = SimpleNamespace(
             global_step=7,
             run_artifact_dir="/tmp/fake-run",
             final_train_loss=1.23,
-            final_val_loss=1.56,
+            final_val_loss=float("nan"),
             completed_epochs=1,
-            epoch_end_validation_ran=True,
+            epoch_end_validation_ran=False,
         )
         with mock.patch(
             "experiments.baseline.memory_experiments.microbatch_memory_frontier_exp.model_pipeline",
@@ -336,7 +330,6 @@ class RunTrialValidityTests(unittest.TestCase):
         ):
             result = run_trial(
                 sweep_group="test-sweep",
-                budget_spec=BudgetSpec(activation_memory_budget=0.8),
                 micro_batch_size=40,
                 base_vocab_size=128,
             )
@@ -345,14 +338,14 @@ class RunTrialValidityTests(unittest.TestCase):
         self.assertIsNone(result.error_type)
         self.assertEqual(result.global_step, 7)
         self.assertAlmostEqual(result.final_train_loss or 0.0, 1.23, places=6)
-        self.assertAlmostEqual(result.final_val_loss or 0.0, 1.56, places=6)
+        self.assertIsNone(result.final_val_loss)
 
-    def test_run_trial_marks_error_when_epoch_or_validation_incomplete(self) -> None:
+    def test_run_trial_marks_error_when_epoch_is_incomplete(self) -> None:
         mocked_run_result = SimpleNamespace(
             global_step=7,
             run_artifact_dir="/tmp/fake-run",
             final_train_loss=2.34,
-            final_val_loss=3.45,
+            final_val_loss=float("nan"),
             completed_epochs=0,
             epoch_end_validation_ran=False,
         )
@@ -362,7 +355,6 @@ class RunTrialValidityTests(unittest.TestCase):
         ):
             result = run_trial(
                 sweep_group="test-sweep",
-                budget_spec=BudgetSpec(activation_memory_budget=0.8),
                 micro_batch_size=40,
                 base_vocab_size=128,
             )
@@ -370,8 +362,65 @@ class RunTrialValidityTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.error_type, "IncompleteEpochOrValidation")
         self.assertIn("completed_epochs=0", result.error_message or "")
+        self.assertIn("requires_validation=False", result.error_message or "")
         self.assertAlmostEqual(result.final_train_loss or 0.0, 2.34, places=6)
-        self.assertAlmostEqual(result.final_val_loss or 0.0, 3.45, places=6)
+        self.assertIsNone(result.final_val_loss)
+
+
+class MainSummaryLoggingTests(unittest.TestCase):
+    def test_main_logs_partial_snapshots_and_one_final_summary(self) -> None:
+        def trial_stub(
+            *,
+            sweep_group: str,
+            micro_batch_size: int,
+            base_vocab_size: int,
+        ) -> TrialResult:
+            _ = (sweep_group, base_vocab_size)
+            return TrialResult(
+                micro_batch_size=micro_batch_size,
+                run_name=f"run-mb-{micro_batch_size}",
+                status="success" if micro_batch_size <= 40 else "oom",
+            )
+
+        with (
+            mock.patch(
+                "experiments.baseline.memory_experiments.microbatch_memory_frontier_exp.torch.cuda.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "experiments.baseline.memory_experiments.microbatch_memory_frontier_exp.ensure_wikitext_vocab_file",
+                return_value=128,
+            ),
+            mock.patch(
+                "experiments.baseline.memory_experiments.microbatch_memory_frontier_exp.run_trial",
+                side_effect=trial_stub,
+            ),
+            mock.patch(
+                "experiments.baseline.memory_experiments.microbatch_memory_frontier_exp.log_wandb_summary_tables",
+            ) as log_summary_mock,
+        ):
+            rc = frontier_exp.main()
+
+        self.assertEqual(rc, 0)
+        partial_calls = [
+            call
+            for call in log_summary_mock.call_args_list
+            if call.kwargs.get("summary_stage") == "partial"
+        ]
+        final_calls = [
+            call
+            for call in log_summary_mock.call_args_list
+            if call.kwargs.get("summary_stage") == "final"
+        ]
+
+        self.assertGreater(len(partial_calls), 0)
+        self.assertEqual(len(final_calls), 1)
+        self.assertEqual(final_calls[0].kwargs.get("frontier"), 40)
+        self.assertTrue(all(call.kwargs.get("snapshot_id") for call in partial_calls))
+        self.assertEqual(
+            len({call.kwargs["snapshot_id"] for call in partial_calls}),
+            len(partial_calls),
+        )
 
 
 if __name__ == "__main__":

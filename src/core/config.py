@@ -106,6 +106,7 @@ class TrainConfig:
     seq_len: int = 128
     stride: int = 128
     data_fraction: float = 1.0
+    run_validation: bool = True
 
     def __post_init__(self) -> None:
         resolved = resolve_train_batching(self)
@@ -337,6 +338,8 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("train.stride must be > 0.")
     if not 0 < config.train.data_fraction <= 1:
         raise ValueError("train.data_fraction must be in (0, 1].")
+    if not isinstance(config.train.run_validation, bool):
+        raise ValueError("train.run_validation must be a bool.")
 
     if config.split.name != "holdout":
         raise ValueError(

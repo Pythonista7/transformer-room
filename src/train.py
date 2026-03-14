@@ -689,12 +689,13 @@ def train_loop(
     non_blocking = device.type == "cuda"
     batching: ResolvedTrainBatchingConfig = resolve_train_batching(config.train)
     accumulation_steps = int(batching.accumulation_steps)
+    run_validation = bool(config.train.run_validation)
     train_loader_len = len(train_loader)
 
     start_epoch, start_batch_idx, global_step, tokens_seen_train = load_checkpoint_if_available()
 
     last_avg_train_loss = 0.0
-    last_val_metrics = {"val_loss": 0.0, "val_perplexity": 0.0}
+    last_val_metrics = {"val_loss": float("nan"), "val_perplexity": float("nan")}
     completed_epochs = int(start_epoch)
     epoch_end_validation_ran = False
 
@@ -843,7 +844,7 @@ def train_loop(
                     step_metrics = metrics_engine.collect_step_metrics(step_ctx)
                     logger.log(step_metrics, step=global_step)
 
-                if step_ctx.schedule.periodic_val_due:
+                if run_validation and step_ctx.schedule.periodic_val_due:
                     val_metrics = evaluate(
                         model,
                         val_loader,
@@ -886,11 +887,20 @@ def train_loop(
                 micro_batches_in_step = 0
 
             avg_train_loss = epoch_train_loss_sum / max(epoch_token_count, 1)
-            val_metrics = evaluate(model, val_loader, loss_fn, device, use_bf16=use_bf16)
-            model.train()
             completed_epochs = int(epoch + 1)
-            epoch_end_validation_ran = True
             epoch_time_s = time.perf_counter() - epoch_wall_start
+            val_metrics = last_val_metrics
+            if run_validation:
+                val_metrics = evaluate(
+                    model,
+                    val_loader,
+                    loss_fn,
+                    device,
+                    use_bf16=use_bf16,
+                )
+                model.train()
+                epoch_end_validation_ran = True
+                last_val_metrics = val_metrics
             epoch_metrics = metrics_engine.collect_epoch_metrics(
                 EpochMetricsContext(
                     global_step=global_step,
@@ -903,15 +913,20 @@ def train_loop(
             )
             logger.log(epoch_metrics, step=global_step)
 
-            print(
-                f"Epoch {epoch + 1}/{config.train.epochs} | "
-                f"train_loss={avg_train_loss:.4f} | "
-                f"val_loss={val_metrics['val_loss']:.4f} | "
-                f"val_perplexity={val_metrics['val_perplexity']:.4f}"
-            )
+            if run_validation:
+                print(
+                    f"Epoch {epoch + 1}/{config.train.epochs} | "
+                    f"train_loss={avg_train_loss:.4f} | "
+                    f"val_loss={val_metrics['val_loss']:.4f} | "
+                    f"val_perplexity={val_metrics['val_perplexity']:.4f}"
+                )
+            else:
+                print(
+                    f"Epoch {epoch + 1}/{config.train.epochs} | "
+                    f"train_loss={avg_train_loss:.4f}"
+                )
 
             last_avg_train_loss = float(avg_train_loss)
-            last_val_metrics = val_metrics
     finally:
         metrics_engine.on_train_end()
 
@@ -925,19 +940,23 @@ def train_loop(
     if persist_local_artifacts:
         torch.save(checkpoint_model.state_dict(), run_paths["final_model_path"])
     if artifact_io_enabled and persist_local_artifacts:
+        final_model_metadata = {
+            "global_step": int(global_step),
+            "final_train_loss": float(last_avg_train_loss),
+            "run_name": run_label,
+            "group_name": config.run.group_name,
+        }
+        if epoch_end_validation_ran:
+            final_model_metadata["final_val_loss"] = float(last_val_metrics["val_loss"])
+            final_model_metadata["final_val_perplexity"] = float(
+                last_val_metrics["val_perplexity"]
+            )
         final_model_artifact_ref = logger.save(
             str(run_paths["final_model_path"]),
             artifact_name=final_model_artifact_name,
             artifact_type="model",
             aliases=("latest", "final"),
-            metadata={
-                "global_step": int(global_step),
-                "final_train_loss": float(last_avg_train_loss),
-                "final_val_loss": float(last_val_metrics["val_loss"]),
-                "final_val_perplexity": float(last_val_metrics["val_perplexity"]),
-                "run_name": run_label,
-                "group_name": config.run.group_name,
-            },
+            metadata=final_model_metadata,
         )
     return TrainLoopResult(
         global_step=global_step,
