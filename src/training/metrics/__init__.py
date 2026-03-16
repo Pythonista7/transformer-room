@@ -1,6 +1,7 @@
 from .contracts import (
     BaseMetricPlugin,
     EpochMetricsContext,
+    MicroBatchMetricsContext,
     MetricPayload,
     MetricPlugin,
     PeriodicValMetricsContext,
@@ -14,6 +15,7 @@ from .schedule import MetricSchedule, build_metric_schedule, should_log_every
 __all__ = [
     "BaseMetricPlugin",
     "EpochMetricsContext",
+    "MicroBatchMetricsContext",
     "MetricPayload",
     "MetricPlugin",
     "MetricSchedule",

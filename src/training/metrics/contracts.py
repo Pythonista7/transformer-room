@@ -23,10 +23,24 @@ class StepMetricsContext:
     peak_memory_gib: float | None = None
     peak_reserved_memory_gib: float | None = None
     include_in_perf_aggregates: bool = True
+    model: object | None = None
+    optimizer: object | None = None
 
     @property
     def epoch_progress(self) -> float:
         return float(self.epoch + (self.batch_idx + 1) / max(self.train_loader_len, 1))
+
+
+@dataclass(slots=True)
+class MicroBatchMetricsContext:
+    step_ctx: StepMetricsContext
+    micro_batch_in_step: int
+    accumulation_steps: int
+    valid_tokens: int
+
+    @property
+    def include_in_perf_aggregates(self) -> bool:
+        return bool(self.step_ctx.include_in_perf_aggregates)
 
 
 @dataclass(slots=True)
@@ -63,6 +77,8 @@ class MetricPlugin(Protocol):
 
     def after_backward(self, ctx: StepMetricsContext) -> None: ...
 
+    def after_microbatch_backward(self, ctx: MicroBatchMetricsContext) -> None: ...
+
     def after_optimizer_step(self, ctx: StepMetricsContext) -> None: ...
 
     def collect_step_metrics(self, ctx: StepMetricsContext) -> MetricPayload: ...
@@ -87,6 +103,9 @@ class BaseMetricPlugin:
         _ = ctx
 
     def after_backward(self, ctx: StepMetricsContext) -> None:
+        _ = ctx
+
+    def after_microbatch_backward(self, ctx: MicroBatchMetricsContext) -> None:
         _ = ctx
 
     def after_optimizer_step(self, ctx: StepMetricsContext) -> None:

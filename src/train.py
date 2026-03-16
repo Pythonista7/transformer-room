@@ -35,6 +35,7 @@ from .core.registry import (
 from .core.types import RunResult, TokenizedCorpus
 from .training.metrics import (
     EpochMetricsContext,
+    MicroBatchMetricsContext,
     MetricsEngine,
     PeriodicValMetricsContext,
     StepMetricsContext,
@@ -741,6 +742,8 @@ def train_loop(
                         tokens_seen_train=tokens_seen_train,
                         step_loss=None,
                         include_in_perf_aggregates=include_in_perf_aggregates,
+                        model=checkpoint_model,
+                        optimizer=optimizer,
                     )
                     metrics_engine.on_step_start(step_ctx)
 
@@ -777,6 +780,7 @@ def train_loop(
                     step_loss_sum += loss_sum.item()
                     epoch_token_count += valid_tokens
                     epoch_train_loss_sum += loss_sum.item()
+                    micro_batch_in_step = micro_batches_in_step + 1
 
                     synchronize_if_cuda(device)
                     backward_start = time.perf_counter()
@@ -784,6 +788,14 @@ def train_loop(
                     synchronize_if_cuda(device)
                     step_backward_pass_time_ms += (
                         (time.perf_counter() - backward_start) * 1000.0
+                    )
+                    metrics_engine.after_microbatch_backward(
+                        MicroBatchMetricsContext(
+                            step_ctx=step_ctx,
+                            micro_batch_in_step=micro_batch_in_step,
+                            accumulation_steps=accumulation_steps,
+                            valid_tokens=valid_tokens,
+                        )
                     )
 
                 micro_batches_in_step += 1

@@ -19,6 +19,7 @@ from src.config import (
 )
 from src.core.registry import LOGGER_ADAPTERS
 from src.train import model_pipeline
+from src.training.metrics import BaseMetricPlugin, MicroBatchMetricsContext, StepMetricsContext
 
 
 class RecordingLoggerSession:
@@ -96,6 +97,25 @@ class RecordingLoggerAdapter:
         session = RecordingLoggerSession()
         self.sessions.append(session)
         return session
+
+
+class _MicroBatchCallbackRecorder(BaseMetricPlugin):
+    name = "microbatch_callback_recorder"
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, int, int]] = []
+        self.microbatch_counts_by_step: dict[int, int] = {}
+
+    def after_microbatch_backward(self, ctx: MicroBatchMetricsContext) -> None:
+        step = int(ctx.step_ctx.next_global_step)
+        micro_batch_in_step = int(ctx.micro_batch_in_step)
+        self.events.append(("micro", step, micro_batch_in_step))
+        self.microbatch_counts_by_step[step] = (
+            self.microbatch_counts_by_step.get(step, 0) + 1
+        )
+
+    def after_optimizer_step(self, ctx: StepMetricsContext) -> None:
+        self.events.append(("optim", int(ctx.global_step), 0))
 
 
 def _make_dataset(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -263,6 +283,47 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
             run_dir = Path(result.run_artifact_dir)
             self.assertFalse((run_dir / cfg.run.checkpoint_filename).exists())
             self.assertFalse((run_dir / cfg.run.final_model_filename).exists())
+
+    def test_microbatch_backward_callback_runs_before_optimizer_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+                micro_batch_size=2,
+                accumulation_steps=2,
+            )
+            recorder = _MicroBatchCallbackRecorder()
+
+            result = model_pipeline(cfg, extra_metric_plugins=[recorder])
+            self.assertGreater(result.global_step, 0)
+
+            optimizer_events = 0
+            pending_microbatches = 0
+            for event_type, _, _ in recorder.events:
+                if event_type == "micro":
+                    pending_microbatches += 1
+                    continue
+
+                self.assertGreater(
+                    pending_microbatches,
+                    0,
+                    "Optimizer step happened before any microbatch callback.",
+                )
+                pending_microbatches = 0
+                optimizer_events += 1
+
+            self.assertEqual(optimizer_events, result.global_step)
+            self.assertEqual(
+                pending_microbatches,
+                0,
+                "Found trailing microbatch callbacks without optimizer step.",
+            )
+            self.assertTrue(recorder.microbatch_counts_by_step)
+            self.assertTrue(
+                all(1 <= count <= 2 for count in recorder.microbatch_counts_by_step.values())
+            )
 
 
 if __name__ == "__main__":

@@ -8,12 +8,13 @@ This package keeps training metrics modular and logger-agnostic.
 
 1. `on_train_start()`
 2. `on_step_start(step_ctx)`
-3. `after_backward(step_ctx)`
-4. `after_optimizer_step(step_ctx)`
-5. `collect_step_metrics(step_ctx)`
-6. `collect_periodic_val_metrics(val_ctx)`
-7. `collect_epoch_metrics(epoch_ctx)`
-8. `on_train_end()`
+3. `after_microbatch_backward(microbatch_ctx)` (called once per successful micro-batch backward inside an optimizer step)
+4. `after_backward(step_ctx)`
+5. `after_optimizer_step(step_ctx)`
+6. `collect_step_metrics(step_ctx)`
+7. `collect_periodic_val_metrics(val_ctx)`
+8. `collect_epoch_metrics(epoch_ctx)`
+9. `on_train_end()`
 
 `build_metric_schedule(...)` computes cadence/gating booleans used by plugins.
 

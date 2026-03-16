@@ -5,6 +5,7 @@ import unittest
 from src.training.metrics import (
     BaseMetricPlugin,
     EpochMetricsContext,
+    MicroBatchMetricsContext,
     MetricSchedule,
     MetricsEngine,
     PeriodicValMetricsContext,
@@ -35,6 +36,15 @@ def _step_ctx() -> StepMetricsContext:
         train_loader_len=10,
         tokens_seen_train=16,
         step_loss=1.25,
+    )
+
+
+def _microbatch_ctx() -> MicroBatchMetricsContext:
+    return MicroBatchMetricsContext(
+        step_ctx=_step_ctx(),
+        micro_batch_in_step=1,
+        accumulation_steps=2,
+        valid_tokens=16,
     )
 
 
@@ -78,6 +88,10 @@ class _LifecyclePlugin(BaseMetricPlugin):
     def after_backward(self, ctx: StepMetricsContext) -> None:
         _ = ctx
         self.events.append("after_backward")
+
+    def after_microbatch_backward(self, ctx: MicroBatchMetricsContext) -> None:
+        _ = ctx
+        self.events.append("after_microbatch")
 
     def after_optimizer_step(self, ctx: StepMetricsContext) -> None:
         _ = ctx
@@ -135,6 +149,7 @@ class MetricsEngineTests(unittest.TestCase):
 
         engine.on_train_start()
         engine.on_step_start(step_ctx)
+        engine.after_microbatch_backward(_microbatch_ctx())
         engine.after_backward(step_ctx)
         engine.after_optimizer_step(step_ctx)
         self.assertEqual(engine.collect_periodic_val_metrics(val_ctx), {"p": 3.0})
@@ -146,6 +161,7 @@ class MetricsEngineTests(unittest.TestCase):
             [
                 "start",
                 "step_start",
+                "after_microbatch",
                 "after_backward",
                 "after_optimizer",
                 "periodic",

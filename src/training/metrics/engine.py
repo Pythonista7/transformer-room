@@ -6,6 +6,7 @@ from typing import Iterable
 
 from .contracts import (
     EpochMetricsContext,
+    MicroBatchMetricsContext,
     MetricPayload,
     MetricPlugin,
     PeriodicValMetricsContext,
@@ -90,6 +91,13 @@ class MetricsEngine:
 
     def after_backward(self, ctx: StepMetricsContext) -> None:
         self._call_lifecycle_with_ctx("after_backward", ctx, "after_backward")
+
+    def after_microbatch_backward(self, ctx: MicroBatchMetricsContext) -> None:
+        self._call_lifecycle_with_ctx(
+            "after_microbatch_backward",
+            ctx,
+            "after_microbatch_backward",
+        )
 
     def after_optimizer_step(self, ctx: StepMetricsContext) -> None:
         self._call_lifecycle_with_ctx(
