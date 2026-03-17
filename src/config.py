@@ -13,6 +13,7 @@ from .core.config import (
     ModelConfig,
     OptimizerConfig,
     ResolvedTrainBatchingConfig,
+    ResolvedTrainLearningRateConfig,
     RunConfig,
     SACDecoderConfig,
     SplitConfig,
@@ -20,6 +21,7 @@ from .core.config import (
     TrainConfig,
     WandbMetricsConfig,
     resolve_train_batching,
+    resolve_train_learning_rate,
     resolve_special_token_ids,
     validate_experiment_config,
 )
@@ -37,6 +39,7 @@ __all__ = [
     "ModelConfig",
     "OptimizerConfig",
     "ResolvedTrainBatchingConfig",
+    "ResolvedTrainLearningRateConfig",
     "RunConfig",
     "SACDecoderConfig",
     "SplitConfig",
@@ -44,6 +47,7 @@ __all__ = [
     "TrainConfig",
     "WandbMetricsConfig",
     "resolve_train_batching",
+    "resolve_train_learning_rate",
     "resolve_special_token_ids",
     "validate_experiment_config",
 ]

@@ -1,3 +1,8 @@
+"""
+Note: this experiment was run before I introduced gated check for lr-scaling when accumulating, 
+but the results of this expriment are designed with the goal of accessing gradient quality metrics (coherence, global grad norm, adam snr norm) at various effective batch sizes with a fixed base learning rate, 
+to see how the gradient quality changes as we increase the effective batch size via accumulation, specifically looking as coherence as a core metric here, should not change with lr-scaling on reruns.
+"""
 from __future__ import annotations
 
 import gc
@@ -327,6 +332,8 @@ class GradientQualitySummaryPlugin(BaseMetricPlugin):
         self._step_gradient_coherence: float | None = None
         self._step_gradient_coherence_pairs: int = 0
         self._step_global_grad_norm: float | None = None
+        self._step_microbatch_count: int = 0
+        self._step_expected_accumulation_steps: int = 1
 
     def on_step_start(self, ctx: StepMetricsContext) -> None:
         _ = ctx
@@ -336,8 +343,12 @@ class GradientQualitySummaryPlugin(BaseMetricPlugin):
         self._step_gradient_coherence = None
         self._step_gradient_coherence_pairs = 0
         self._step_global_grad_norm = None
+        self._step_microbatch_count = 0
+        self._step_expected_accumulation_steps = 1
 
     def after_microbatch_backward(self, ctx: MicroBatchMetricsContext) -> None:
+        self._step_microbatch_count += 1
+        self._step_expected_accumulation_steps = int(ctx.accumulation_steps)
         if ctx.valid_tokens <= 0:
             return
 
@@ -408,6 +419,12 @@ class GradientQualitySummaryPlugin(BaseMetricPlugin):
         if self._step_coherence_values:
             self._step_gradient_coherence = float(mean(self._step_coherence_values))
             self._step_gradient_coherence_pairs = len(self._step_coherence_values)
+        elif (
+            self._step_microbatch_count == 1
+            and self._step_expected_accumulation_steps == 1
+        ):
+            self._step_gradient_coherence = 1.0
+            self._step_gradient_coherence_pairs = 0
         else:
             self._step_gradient_coherence = None
             self._step_gradient_coherence_pairs = 0
@@ -459,6 +476,8 @@ class GradientQualitySummaryPlugin(BaseMetricPlugin):
         self._prev_cumulative_grads = {}
         self._prev_normalized_micro_grads = {}
         self._step_coherence_values = []
+        self._step_microbatch_count = 0
+        self._step_expected_accumulation_steps = 1
 
 
 def build_config(
@@ -520,6 +539,7 @@ def build_config(
             effective_batch_size=effective_batch_size,
             micro_batch_size=MICRO_BATCH_SIZE,
             accumulation_steps=accumulation_steps,
+            lr_scaling="sqrt" if accumulation_steps > 1 else "none",
             seq_len=SEQ_LEN,
             stride=STRIDE,
             data_fraction=DATA_FRACTION,
@@ -563,7 +583,7 @@ def build_config(
 
 def _build_sweep_group() -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    return f"4-effective-batch-fixed-lr-{timestamp}"
+    return f"4-effective-batch-scaled-lr-{timestamp}"
 
 
 def trial_specs() -> list[tuple[int, int]]:
@@ -699,7 +719,8 @@ def log_wandb_summary_tables(
             "measure_training_only": float(1 if MEASURE_TRAINING_ONLY else 0),
             "epochs": EPOCHS,
             "data_fraction": DATA_FRACTION,
-            "fixed_learning_rate": LEARNING_RATE,
+            "base_learning_rate": LEARNING_RATE,
+            "lr_scaling_mode": "sqrt_if_accumulating",
             "summary_stage": summary_stage,
             "summary_snapshot_id": snapshot_id,
         },
@@ -756,7 +777,7 @@ def log_wandb_summary_tables(
 
         run.log(
             {
-                "effective_batch_fixed_lr_trials": wandb.Table(
+                "effective_batch_scaled_lr_trials": wandb.Table(
                     columns=trial_columns,
                     data=trial_rows,
                 ),
@@ -797,13 +818,14 @@ def main() -> int:
 
     sweep_group = _build_sweep_group()
     specs = trial_specs()
-    print(f"Starting fixed-LR effective-batch sweep group: {sweep_group}")
+    print(f"Starting LR-scaled effective-batch sweep group: {sweep_group}")
     print(
-        "Effective-batch sweep config | "
+        "Effective-batch LR-scaled sweep config | "
         f"micro_batch_size={MICRO_BATCH_SIZE} | "
         f"accumulation_steps={specs[0][0]}-{specs[-1][0]} | "
         f"effective_batch_size=[{MICRO_BATCH_SIZE * specs[0][0]},{MICRO_BATCH_SIZE * specs[-1][0]}] | "
-        f"fixed_learning_rate={LEARNING_RATE}"
+        f"base_learning_rate={LEARNING_RATE} | "
+        "lr_scaling=sqrt_if_accumulating"
     )
 
     trial_results: list[TrialResult] = []

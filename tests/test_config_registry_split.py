@@ -18,6 +18,7 @@ from src.config import (
     SACDecoderConfig,
     TrainConfig,
     WandbMetricsConfig,
+    resolve_train_learning_rate,
     validate_experiment_config,
 )
 from src.core.registry import get_dataset_adapter, get_model_adapter
@@ -68,10 +69,49 @@ class ConfigValidationTests(unittest.TestCase):
             effective_batch_size=8,
             micro_batch_size=4,
             accumulation_steps=2,
+            lr_scaling="sqrt",
         )
         self.assertEqual(train_cfg.effective_batch_size, 8)
         self.assertEqual(train_cfg.micro_batch_size, 4)
         self.assertEqual(train_cfg.accumulation_steps, 2)
+
+    def test_train_lr_scaling_defaults_to_none(self) -> None:
+        train_cfg = TrainConfig(effective_batch_size=8)
+        self.assertEqual(train_cfg.lr_scaling, "none")
+
+    def test_train_lr_scaling_requires_sqrt_when_accumulating(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "train.lr_scaling must be 'sqrt'",
+        ):
+            TrainConfig(
+                effective_batch_size=8,
+                micro_batch_size=4,
+                accumulation_steps=2,
+                lr_scaling="none",
+            )
+
+    def test_train_lr_scaling_resolver_computes_sqrt_factor(self) -> None:
+        train_cfg = TrainConfig(
+            effective_batch_size=8,
+            micro_batch_size=4,
+            accumulation_steps=2,
+            optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
+            lr_scaling="sqrt",
+        )
+        resolved = resolve_train_learning_rate(train_cfg)
+        self.assertAlmostEqual(resolved.scale_factor, 2**0.5, places=9)
+        self.assertAlmostEqual(resolved.applied_learning_rate, 1e-3 * (2**0.5), places=9)
+        self.assertTrue(resolved.scaling_active)
+
+    def test_validate_experiment_config_rejects_invalid_lr_scaling_mode(self) -> None:
+        config = make_config()
+        config.train.lr_scaling = "invalid"  # type: ignore[assignment]
+        with self.assertRaisesRegex(
+            ValueError,
+            "train.lr_scaling must be one of: none, sqrt",
+        ):
+            validate_experiment_config(config)
 
     def test_train_batching_equation_mismatch_fails(self) -> None:
         with self.assertRaisesRegex(
@@ -144,7 +184,7 @@ class ConfigValidationTests(unittest.TestCase):
         config.run.activation_memory_budget = 1.5
         with self.assertRaisesRegex(
             ValueError,
-            "activation_memory_budget must be in \\(0, 1\\] when set",
+            "activation_memory_budget must be in \\[0, 1\\] when set",
         ):
             validate_experiment_config(config)
 

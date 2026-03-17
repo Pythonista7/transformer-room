@@ -54,6 +54,23 @@ class TrialSpecsTests(unittest.TestCase):
         for accumulation_steps, effective_batch_size in specs:
             self.assertEqual(effective_batch_size, 28 * accumulation_steps)
 
+    def test_build_config_uses_sqrt_lr_scaling_only_when_accumulating(self) -> None:
+        non_accum_cfg = fixed_lr_exp.build_config(
+            run_name="non-accum",
+            sweep_group="group-a",
+            base_vocab_size=100,
+            accumulation_steps=1,
+        )
+        accum_cfg = fixed_lr_exp.build_config(
+            run_name="accum",
+            sweep_group="group-a",
+            base_vocab_size=100,
+            accumulation_steps=2,
+        )
+
+        self.assertEqual(non_accum_cfg.train.lr_scaling, "none")
+        self.assertEqual(accum_cfg.train.lr_scaling, "sqrt")
+
 
 class GradientCoherencePluginTests(unittest.TestCase):
     def test_gradient_coherence_uses_per_token_microbatch_gradients(self) -> None:

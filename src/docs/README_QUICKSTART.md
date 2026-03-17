@@ -118,11 +118,13 @@ TrainConfig(
     effective_batch_size=128,
     micro_batch_size=32,
     accumulation_steps=4,
+    lr_scaling="sqrt",
     ...
 )
 ```
 
 `train.batch_size` was removed. Any legacy `batch_size=...` usage now fails at constructor time.
+When accumulation is active (`effective_batch_size > micro_batch_size`), `lr_scaling="sqrt"` is required.
 
 ## 2) Run it
 
@@ -167,6 +169,7 @@ For `LoggingConfig(provider="wandb", ...)` runs:
   - `d_model`, `n_heads`, `layers`
 - Optimizer:
   - `OptimizerConfig(name="adam" | "adamw" | "sgd", learning_rate=..., weight_decay=...)`
+  - When using accumulation (`effective_batch_size > micro_batch_size`), set `TrainConfig(lr_scaling="sqrt")` to enable required LR scaling.
 - Tokenizer size:
   - `base_vocab_size`
 

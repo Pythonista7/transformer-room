@@ -239,11 +239,19 @@ TrainConfig(
     effective_batch_size=64,
     micro_batch_size=16,
     accumulation_steps=4,
+    lr_scaling="sqrt",
     ...
 )
 ```
 
 Legacy `train.batch_size` is removed and intentionally unsupported.
+
+Learning-rate scaling under accumulation is explicit:
+
+- `lr_scaling` supports `"none"` and `"sqrt"`.
+- If `effective_batch_size > micro_batch_size`, `lr_scaling="sqrt"` is required.
+- Applied LR is:
+  - `applied_lr = base_lr * sqrt(effective_batch_size / micro_batch_size)`
 
 ---
 

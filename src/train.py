@@ -23,6 +23,7 @@ from .core.config import (
     ExperimentConfig,
     ResolvedTrainBatchingConfig,
     resolve_train_batching,
+    resolve_train_learning_rate,
     validate_experiment_config,
 )
 from .core.registry import (
@@ -212,10 +213,17 @@ def get_autocast_context(device: torch.device, use_bf16: bool):
 def build_optimizer(
     model: torch.nn.Module,
     config: ExperimentConfig,
+    *,
+    learning_rate: float | None = None,
 ) -> optim.Optimizer:
     optimizer_cfg = config.train.optimizer
+    resolved_learning_rate = (
+        float(optimizer_cfg.learning_rate)
+        if learning_rate is None
+        else float(learning_rate)
+    )
     optimizer_kwargs = {
-        "lr": optimizer_cfg.learning_rate,
+        "lr": resolved_learning_rate,
         "weight_decay": optimizer_cfg.weight_decay,
     }
     if optimizer_cfg.name == "adam":
@@ -999,11 +1007,20 @@ def model_pipeline(
     use_bf16 = should_enable_bf16_autocast(device)
     print(f"bf16 autocast: {'enabled' if use_bf16 else 'disabled'}")
     batching = resolve_train_batching(config.train)
+    learning_rate_cfg = resolve_train_learning_rate(config.train)
     print(
         "Batching config: "
         f"effective_batch_size={batching.effective_batch_size} | "
         f"micro_batch_size={batching.micro_batch_size} | "
         f"accumulation_steps={batching.accumulation_steps}"
+    )
+    print(
+        "Learning-rate config: "
+        f"base_learning_rate={learning_rate_cfg.base_learning_rate:g} | "
+        f"lr_scaling={learning_rate_cfg.scaling_mode} | "
+        f"scale_factor={learning_rate_cfg.scale_factor:g} | "
+        f"applied_learning_rate={learning_rate_cfg.applied_learning_rate:g} | "
+        f"scaling_active={learning_rate_cfg.scaling_active}"
     )
 
     run_paths = prepare_run_artifact_paths(config)
@@ -1033,7 +1050,11 @@ def model_pipeline(
     print(f"Model parameters: {param_count:,}")
 
     model = model.to(device)
-    optimizer = build_optimizer(model, config)
+    optimizer = build_optimizer(
+        model,
+        config,
+        learning_rate=learning_rate_cfg.applied_learning_rate,
+    )
     loss_fn = CrossEntropyLoss(ignore_index=tokenized.vocab.special.pad_id, reduction="sum")
 
     logger = logger_adapter.start(
@@ -1073,6 +1094,10 @@ def model_pipeline(
             {
                 "torch_compile_enabled": float(1 if compile_enabled else 0),
                 "bf16_autocast_enabled": float(1 if use_bf16 else 0),
+                "lr_base": float(learning_rate_cfg.base_learning_rate),
+                "lr_scale_factor": float(learning_rate_cfg.scale_factor),
+                "lr_applied": float(learning_rate_cfg.applied_learning_rate),
+                "lr_scaling_active": float(1 if learning_rate_cfg.scaling_active else 0),
             },
             step=0,
         )

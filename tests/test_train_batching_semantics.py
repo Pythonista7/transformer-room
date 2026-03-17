@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import torch
+
 from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
@@ -16,9 +18,10 @@ from src.config import (
     RunConfig,
     TrainConfig,
     WandbMetricsConfig,
+    resolve_train_learning_rate,
 )
 from src.core.registry import LOGGER_ADAPTERS
-from src.train import model_pipeline
+from src.train import build_optimizer, model_pipeline
 from src.training.metrics import BaseMetricPlugin, MicroBatchMetricsContext, StepMetricsContext
 
 
@@ -141,6 +144,21 @@ def _make_config(
     wandb_cfg: WandbMetricsConfig | None = None,
 ) -> ExperimentConfig:
     dataset_path, vocab_path, artifacts_root = _make_dataset(tmp_path)
+    resolved_micro_batch_size = (
+        effective_batch_size
+        if micro_batch_size is None
+        else int(micro_batch_size)
+    )
+    resolved_accumulation_steps = (
+        1
+        if accumulation_steps is None
+        else int(accumulation_steps)
+    )
+    lr_scaling = (
+        "sqrt"
+        if effective_batch_size > resolved_micro_batch_size and resolved_accumulation_steps > 1
+        else "none"
+    )
     return ExperimentConfig(
         run=RunConfig(
             project_name="batching-semantics-test",
@@ -162,6 +180,7 @@ def _make_config(
             effective_batch_size=effective_batch_size,
             micro_batch_size=micro_batch_size,
             accumulation_steps=accumulation_steps,
+            lr_scaling=lr_scaling,
             epochs=1,
             optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
             seq_len=8,
@@ -275,7 +294,8 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
             result = model_pipeline(cfg)
             session = self.recording_adapter.sessions[-1]
 
-            self.assertEqual(session.saved, [])
+            saved_types = [entry["artifact_type"] for entry in session.saved]
+            self.assertEqual(saved_types, ["metadata", "metadata"])
             self.assertEqual(session.restore_calls, [])
             self.assertIsNone(result.checkpoint_artifact_ref)
             self.assertIsNone(result.final_model_artifact_ref)
@@ -324,6 +344,64 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
             self.assertTrue(
                 all(1 <= count <= 2 for count in recorder.microbatch_counts_by_step.values())
             )
+
+    def test_optimizer_lr_matches_resolved_scaled_lr_under_accumulation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+                micro_batch_size=2,
+                accumulation_steps=2,
+            )
+            model = torch.nn.Linear(2, 1, bias=False)
+            resolved = resolve_train_learning_rate(cfg.train)
+            optimizer = build_optimizer(
+                model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+
+            self.assertAlmostEqual(
+                float(optimizer.param_groups[0]["lr"]),
+                float(resolved.applied_learning_rate),
+                places=12,
+            )
+
+    def test_step_zero_logs_lr_scaling_diagnostics_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name="lr-step-zero-run",
+                provider="wandb",
+                effective_batch_size=4,
+                micro_batch_size=2,
+                accumulation_steps=2,
+                wandb_cfg=WandbMetricsConfig(
+                    log_every_n_steps=1,
+                    diagnostics_every_n_steps=1,
+                    val_every_n_steps=1,
+                    attention_entropy_every_n_steps=1,
+                    attention_entropy_head_cap=1,
+                    attention_entropy_token_cap=8,
+                ),
+            )
+
+            model_pipeline(cfg)
+            session = self.recording_adapter.sessions[-1]
+            step_zero_payloads = [payload for step, payload in session.logged if step == 0]
+            self.assertEqual(len(step_zero_payloads), 1)
+
+            payload = step_zero_payloads[0]
+            self.assertIn("lr_base", payload)
+            self.assertIn("lr_scale_factor", payload)
+            self.assertIn("lr_applied", payload)
+            self.assertIn("lr_scaling_active", payload)
+            self.assertAlmostEqual(payload["lr_base"], 1e-3, places=12)
+            self.assertAlmostEqual(payload["lr_scale_factor"], 2**0.5, places=9)
+            self.assertAlmostEqual(payload["lr_applied"], 1e-3 * (2**0.5), places=9)
+            self.assertEqual(payload["lr_scaling_active"], 1.0)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
@@ -103,6 +104,7 @@ class TrainConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     micro_batch_size: int | None = None
     accumulation_steps: int | None = None
+    lr_scaling: Literal["none", "sqrt"] = "none"
     seq_len: int = 128
     stride: int = 128
     data_fraction: float = 1.0
@@ -113,6 +115,7 @@ class TrainConfig:
         self.effective_batch_size = resolved.effective_batch_size
         self.micro_batch_size = resolved.micro_batch_size
         self.accumulation_steps = resolved.accumulation_steps
+        resolve_train_learning_rate(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +127,15 @@ class ResolvedTrainBatchingConfig:
     @property
     def loader_batch_size(self) -> int:
         return int(self.micro_batch_size)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedTrainLearningRateConfig:
+    base_learning_rate: float
+    scale_factor: float
+    applied_learning_rate: float
+    scaling_active: bool
+    scaling_mode: Literal["none", "sqrt"]
 
 
 @dataclass(slots=True)
@@ -215,6 +227,43 @@ def resolve_train_batching(train_cfg: TrainConfig) -> ResolvedTrainBatchingConfi
         effective_batch_size=effective_batch_size,
         micro_batch_size=micro_batch_size,
         accumulation_steps=accumulation_steps,
+    )
+
+
+def resolve_train_learning_rate(
+    train_cfg: TrainConfig,
+) -> ResolvedTrainLearningRateConfig:
+    batching = resolve_train_batching(train_cfg)
+    scaling_mode = str(train_cfg.lr_scaling)
+    if scaling_mode not in {"none", "sqrt"}:
+        raise ValueError("train.lr_scaling must be one of: none, sqrt.")
+
+    accumulation_active = batching.effective_batch_size > batching.micro_batch_size
+    if accumulation_active and scaling_mode != "sqrt":
+        raise ValueError(
+            "train.lr_scaling must be 'sqrt' when "
+            "train.effective_batch_size > train.micro_batch_size."
+        )
+
+    base_learning_rate = float(train_cfg.optimizer.learning_rate)
+    scale_factor = 1.0
+    scaling_active = False
+    if (
+        scaling_mode == "sqrt"
+        and batching.effective_batch_size > batching.micro_batch_size
+        and batching.accumulation_steps > 1
+    ):
+        scale_factor = math.sqrt(
+            float(batching.effective_batch_size) / float(batching.micro_batch_size)
+        )
+        scaling_active = True
+
+    return ResolvedTrainLearningRateConfig(
+        base_learning_rate=base_learning_rate,
+        scale_factor=scale_factor,
+        applied_learning_rate=base_learning_rate * scale_factor,
+        scaling_active=scaling_active,
+        scaling_mode=scaling_mode,
     )
 
 
@@ -331,7 +380,7 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("train.optimizer.learning_rate must be > 0.")
     if config.train.optimizer.weight_decay < 0:
         raise ValueError("train.optimizer.weight_decay must be >= 0.")
-    resolve_train_batching(config.train)
+    resolve_train_learning_rate(config.train)
     if config.train.seq_len <= 0:
         raise ValueError("train.seq_len must be > 0.")
     if config.train.stride <= 0:
