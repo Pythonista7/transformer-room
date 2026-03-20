@@ -1,27 +1,18 @@
 
-# ===============================================================
-#             DECODER BLOCK DEFINITIONS
-# ===============================================================
-
-import torch
 from torch import nn
+import torch
 
-from ..attention.basic_mh_self_attn import BasicMultiHeadSelfAttention
-from ..primitive.layers import DropoutLayer, LinearLayer, LayerNorm, ReluActivation
+from src.components.primitive.layers import DropoutLayer, LayerNorm, LinearLayer, ReluActivation
+from ..attention import SDPASelfAttn
 
-
-class BasicSelfAttnDecoder(nn.Module):
+class SDPASelfAttnDecoder(nn.Module):
     def __init__(self, d_model, n_heads, dropout=0.0, **kwargs):
-        """
-        NOTE: I've currently skipped "padding key mask" in the MHA block since i wanted to use the tested/jagged tensors, 
-        need to do this when creating embedding/processing training data!
-        """
         super().__init__(**kwargs)
-
-        self.multi_head_attention = BasicMultiHeadSelfAttention(
-            E_q=d_model, E_out=d_model, n_heads=n_heads, E_bias=True
+        self.multi_head_attention = SDPASelfAttn(
+            d_model=d_model,
+            n_heads=n_heads,
+            dropout=dropout
         )
-        self.attn_dropout = DropoutLayer(p=dropout)
         self.ln1 = LayerNorm(d_model)
         self.ln2 = LayerNorm(d_model)
         self.linear1 = LinearLayer(d_model, d_model * 4)
@@ -37,10 +28,8 @@ class BasicSelfAttnDecoder(nn.Module):
         """
         # self attn
         attention = self.multi_head_attention(
-            Q, is_causal=True, key_padding_mask=key_padding_mask
+            Q, key_padding_mask=key_padding_mask, is_causal= True
         )
-        # apply dropout
-        attention = self.attn_dropout(attention)
         
         # Linear Block
         # Add & Norm
