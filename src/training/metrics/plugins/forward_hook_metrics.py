@@ -163,7 +163,13 @@ def register_forward_metric_hooks(
         if attn is None:
             continue
 
-        def attention_entropy_hook(_module, args, kwargs, label_tuple=label_tuple):
+        def attention_entropy_hook(
+            _module,
+            args,
+            kwargs,
+            label_tuple=label_tuple,
+            attn=attn,
+        ):
             if not collector.capture_attention_entropy:
                 return
             if not args:

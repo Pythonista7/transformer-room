@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import torch
 
+from src.adapters import register_builtin_adapters
 from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
@@ -21,7 +23,8 @@ from src.config import (
     resolve_train_learning_rate,
 )
 from src.core.registry import LOGGER_ADAPTERS
-from src.train import build_optimizer, model_pipeline
+from src.train import model_pipeline
+from src.training.optimizer import build_optimizer
 from src.training.metrics import BaseMetricPlugin, MicroBatchMetricsContext, StepMetricsContext
 
 
@@ -198,6 +201,7 @@ def _make_config(
 
 class TrainBatchingSemanticsTests(unittest.TestCase):
     def setUp(self) -> None:
+        register_builtin_adapters()
         self.original_wandb_adapter = LOGGER_ADAPTERS["wandb"]
         self.recording_adapter = RecordingLoggerAdapter()
         LOGGER_ADAPTERS["wandb"] = self.recording_adapter
@@ -402,6 +406,36 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
             self.assertAlmostEqual(payload["lr_scale_factor"], 2**0.5, places=9)
             self.assertAlmostEqual(payload["lr_applied"], 1e-3 * (2**0.5), places=9)
             self.assertEqual(payload["lr_scaling_active"], 1.0)
+
+    def test_disabling_step_timing_avoids_sync_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name="no-step-timing-run",
+                provider="wandb",
+                effective_batch_size=4,
+                wandb_cfg=WandbMetricsConfig(
+                    enable_step_time=False,
+                    enable_peak_memory=False,
+                    log_every_n_steps=1,
+                    diagnostics_every_n_steps=1,
+                    val_every_n_steps=0,
+                    attention_entropy_every_n_steps=1,
+                    attention_entropy_head_cap=1,
+                    attention_entropy_token_cap=8,
+                ),
+            )
+
+            sync_calls = 0
+
+            def _record_sync(_device: torch.device) -> None:
+                nonlocal sync_calls
+                sync_calls += 1
+
+            with mock.patch("src.train.synchronize_if_cuda", side_effect=_record_sync):
+                model_pipeline(cfg)
+
+            self.assertEqual(sync_calls, 0)
 
 
 if __name__ == "__main__":

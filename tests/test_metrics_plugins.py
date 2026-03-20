@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import unittest
 
 import torch
@@ -427,6 +428,116 @@ class ForwardHookMetricsPluginTests(unittest.TestCase):
                 plugin.on_train_end()
 
         self.assertEqual(_count_forward_hooks(model), 0)
+
+    def test_attention_entropy_hooks_use_each_layer_attention_module(self) -> None:
+        model = _FakeDecoderModel(layers=3)
+        labels = get_decoder_layer_labels(model)
+        plugin = ForwardHookMetricsPlugin(
+            wandb_enabled=True,
+            wandb_cfg=WandbMetricsConfig(
+                enable_activation_norms=False,
+                enable_attention_entropy=True,
+                attention_entropy_head_cap=1,
+                attention_entropy_token_cap=4,
+            ),
+            model=model,
+            layer_labels=labels,
+        )
+
+        packed_proj_calls: list[int] = [0 for _ in range(len(model.dec_layers))]
+        handles: list[torch.utils.hooks.RemovableHandle] = []
+        for layer_idx, layer in enumerate(model.dec_layers):
+            handle = layer.multi_head_attention.packed_proj.register_forward_hook(
+                lambda _module, _inputs, _output, layer_idx=layer_idx: packed_proj_calls.__setitem__(
+                    layer_idx,
+                    packed_proj_calls[layer_idx] + 1,
+                )
+            )
+            handles.append(handle)
+
+        plugin.on_train_start()
+        try:
+            ctx = _step_ctx(
+                _make_schedule(
+                    capture_activation_norms=False,
+                    capture_attention_entropy=True,
+                )
+            )
+            plugin.on_step_start(ctx)
+            _ = model(torch.randn(2, 4, 8))
+            _ = plugin.collect_step_metrics(ctx)
+        finally:
+            plugin.on_train_end()
+            for handle in handles:
+                handle.remove()
+
+        self.assertEqual(packed_proj_calls, [2, 2, 2])
+
+    def test_forward_hook_metrics_do_not_change_step_update(self) -> None:
+        torch.manual_seed(0)
+        base_model = _FakeDecoderModel(layers=3)
+        model_with_metrics = copy.deepcopy(base_model)
+        model_without_metrics = copy.deepcopy(base_model)
+
+        optimizer_with_metrics = torch.optim.Adam(
+            model_with_metrics.parameters(),
+            lr=1e-3,
+        )
+        optimizer_without_metrics = torch.optim.Adam(
+            model_without_metrics.parameters(),
+            lr=1e-3,
+        )
+
+        plugin = ForwardHookMetricsPlugin(
+            wandb_enabled=True,
+            wandb_cfg=WandbMetricsConfig(
+                enable_activation_norms=True,
+                enable_attention_entropy=True,
+                attention_entropy_head_cap=1,
+                attention_entropy_token_cap=4,
+            ),
+            model=model_with_metrics,
+            layer_labels=get_decoder_layer_labels(model_with_metrics),
+        )
+        ctx = _step_ctx(
+            _make_schedule(
+                capture_activation_norms=True,
+                capture_attention_entropy=True,
+            )
+        )
+        inputs = torch.randn(2, 4, 8)
+
+        plugin.on_train_start()
+        try:
+            optimizer_with_metrics.zero_grad()
+            plugin.on_step_start(ctx)
+            output_with_metrics = model_with_metrics(inputs)
+            _ = plugin.collect_step_metrics(ctx)
+            loss_with_metrics = output_with_metrics.pow(2).mean()
+            loss_with_metrics.backward()
+            optimizer_with_metrics.step()
+        finally:
+            plugin.on_train_end()
+
+        optimizer_without_metrics.zero_grad()
+        output_without_metrics = model_without_metrics(inputs)
+        loss_without_metrics = output_without_metrics.pow(2).mean()
+        loss_without_metrics.backward()
+        optimizer_without_metrics.step()
+
+        self.assertAlmostEqual(
+            float(loss_with_metrics.item()),
+            float(loss_without_metrics.item()),
+            places=8,
+        )
+        for with_metrics, without_metrics in zip(
+            model_with_metrics.parameters(),
+            model_without_metrics.parameters(),
+        ):
+            self.assertTrue(
+                torch.equal(with_metrics, without_metrics),
+                "Metric hooks changed optimization results.",
+            )
 
     def test_unified_entropy_matches_basic_attention_probs(self) -> None:
         attn = BasicMultiHeadSelfAttention(E_q=8, E_out=8, n_heads=2, E_bias=True)

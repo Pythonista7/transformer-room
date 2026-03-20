@@ -1,24 +1,17 @@
 from __future__ import annotations
 
-import json
-import random
-import sys
 import time
-from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Sequence
+from typing import TYPE_CHECKING, Sequence
 
-import numpy as np
 import torch
 from torch import optim
 from torch.nn import CrossEntropyLoss
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .adapters import register_builtin_adapters
-from .adapters.loggers import sanitize_wandb_name
 from .core.config import (
     ExperimentConfig,
     ResolvedTrainBatchingConfig,
@@ -30,10 +23,18 @@ from .core.registry import (
     get_dataset_adapter,
     get_logger_adapter,
     get_model_adapter,
-    get_split_adapter,
     get_tokenizer_adapter,
 )
-from .core.types import RunResult, TokenizedCorpus
+from .core.types import RunResult
+from .training.artifacts import (
+    build_checkpoint_artifact_name,
+    build_final_model_artifact_name,
+    prepare_run_artifact_paths,
+    resolve_wandb_lineage,
+    write_run_metadata,
+)
+from .training.data import build_data_loaders
+from .training.evaluate import evaluate
 from .training.metrics import (
     EpochMetricsContext,
     MicroBatchMetricsContext,
@@ -43,6 +44,20 @@ from .training.metrics import (
     build_default_metric_plugins,
     build_metric_schedule,
     get_decoder_layer_labels,
+)
+from .training.optimizer import (
+    build_optimizer,
+    move_optimizer_state_to_device,
+    scale_gradients_by_token_count,
+)
+from .training.runtime import (
+    get_autocast_context,
+    get_best_device,
+    get_uncompiled_model,
+    maybe_compile_model,
+    set_seed,
+    should_enable_bf16_autocast,
+    synchronize_if_cuda,
 )
 
 if TYPE_CHECKING:
@@ -58,520 +73,6 @@ class TrainLoopResult:
     final_model_artifact_ref: str | None
     completed_epochs: int
     epoch_end_validation_ran: bool
-
-
-class LMWindowDataset(Dataset):
-    """Fixed-window LM dataset with optional tail padding and key padding mask."""
-
-    def __init__(self, tokens: list[int], seq_len: int, stride: int, pad_id: int):
-        if not tokens:
-            raise ValueError("Token stream is empty after preprocessing.")
-        if seq_len <= 0:
-            raise ValueError(f"seq_len must be > 0, got {seq_len}")
-        if stride <= 0:
-            raise ValueError(f"stride must be > 0, got {stride}")
-
-        self.tokens = tokens
-        self.seq_len = seq_len
-        self.window = seq_len + 1
-        self.stride = stride
-        self.pad_id = pad_id
-        self.starts = self._build_starts()
-
-    def _build_starts(self) -> list[int]:
-        token_count = len(self.tokens)
-        if token_count <= self.window:
-            return [0]
-
-        full_limit = token_count - self.window + 1
-        starts = list(range(0, full_limit, self.stride))
-        if not starts:
-            starts = [0]
-
-        next_start = starts[-1] + self.stride
-        if next_start < token_count:
-            starts.append(next_start)
-        return starts
-
-    def __len__(self) -> int:
-        return len(self.starts)
-
-    def __getitem__(self, idx: int):
-        start = self.starts[idx]
-        sample = self.tokens[start : start + self.window]
-        if len(sample) < self.window:
-            sample = sample + [self.pad_id] * (self.window - len(sample))
-
-        sample_tensor = torch.tensor(sample, dtype=torch.long)
-        input_seq = sample_tensor[:-1]
-        target_seq = sample_tensor[1:]
-        key_padding_mask = input_seq != self.pad_id
-        return input_seq, target_seq, key_padding_mask
-
-
-def get_best_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def move_optimizer_state_to_device(
-    optimizer: optim.Optimizer, device: torch.device
-) -> None:
-    for state in optimizer.state.values():
-        for key, value in state.items():
-            if torch.is_tensor(value):
-                state[key] = value.to(device)
-
-
-def get_uncompiled_model(model: torch.nn.Module) -> torch.nn.Module:
-    return model._orig_mod if hasattr(model, "_orig_mod") else model
-
-
-def _set_activation_memory_budget_if_configured(config: ExperimentConfig) -> None:
-    budget = config.run.activation_memory_budget
-    if budget is None:
-        return
-
-    dynamo_module = getattr(torch, "_dynamo", None)
-    if dynamo_module is None:
-        raise RuntimeError(
-            "run.activation_memory_budget is set, but torch._dynamo is unavailable "
-            "on this PyTorch build."
-        )
-    _ = dynamo_module
-
-    functorch_module = getattr(torch, "_functorch", None)
-    functorch_config = getattr(functorch_module, "config", None)
-    if functorch_config is None or not hasattr(
-        functorch_config,
-        "activation_memory_budget",
-    ):
-        raise RuntimeError(
-            "run.activation_memory_budget is set, but "
-            "torch._functorch.config.activation_memory_budget is unavailable on this "
-            "PyTorch build."
-        )
-    functorch_config.activation_memory_budget = float(budget)
-
-
-def maybe_compile_model(
-    model: torch.nn.Module, device: torch.device, config: ExperimentConfig
-) -> tuple[torch.nn.Module, bool, str]:
-    if not config.run.use_torch_compile:
-        return model, False, "disabled"
-    if not hasattr(torch, "compile"):
-        return model, False, "torch.compile unavailable"
-    if device.type != "cuda":
-        return model, False, f"skipped on {device.type}"
-
-    _set_activation_memory_budget_if_configured(config)
-
-    try:
-        compiled_model = torch.compile(
-            model,
-            mode=config.run.torch_compile_mode,
-            fullgraph=bool(config.run.torch_compile_fullgraph),
-            dynamic=bool(config.run.torch_compile_dynamic),
-        )
-        return compiled_model, True, "enabled"
-    except Exception as exc:  # pragma: no cover - backend-specific failure paths.
-        return model, False, f"failed: {exc}"
-
-
-def should_enable_bf16_autocast(device: torch.device) -> bool:
-    if device.type != "cuda":
-        return False
-    checker = getattr(torch.cuda, "is_bf16_supported", None)
-    if not callable(checker):
-        return False
-    return bool(checker())
-
-
-# TODO: @Ash remove this if possible or atleast make it optional only when specific timing metrics are essential.
-def synchronize_if_cuda(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-
-def get_autocast_context(device: torch.device, use_bf16: bool):
-    if device.type == "cuda" and use_bf16:
-        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-    return nullcontext()
-
-
-def build_optimizer(
-    model: torch.nn.Module,
-    config: ExperimentConfig,
-    *,
-    learning_rate: float | None = None,
-) -> optim.Optimizer:
-    optimizer_cfg = config.train.optimizer
-    resolved_learning_rate = (
-        float(optimizer_cfg.learning_rate)
-        if learning_rate is None
-        else float(learning_rate)
-    )
-    optimizer_kwargs = {
-        "lr": resolved_learning_rate,
-        "weight_decay": optimizer_cfg.weight_decay,
-    }
-    if optimizer_cfg.name == "adam":
-        return optim.Adam(model.parameters(), **optimizer_kwargs)
-    if optimizer_cfg.name == "adamw":
-        return optim.AdamW(model.parameters(), **optimizer_kwargs)
-    if optimizer_cfg.name == "sgd":
-        return optim.SGD(model.parameters(), **optimizer_kwargs)
-    raise ValueError(
-        f"Unsupported train.optimizer.name '{optimizer_cfg.name}'. "
-        "Expected one of: adam, adamw, sgd."
-    )
-
-
-def truncate_stream_by_fraction_at_eos(
-    token_stream: list[int], data_fraction: float, eos_id: int
-) -> list[int]:
-    if not 0 < data_fraction <= 1:
-        raise ValueError(f"data_fraction must be in (0, 1], got {data_fraction}")
-    if data_fraction >= 1:
-        return token_stream
-
-    target_len = max(1, int(len(token_stream) * data_fraction))
-    if target_len >= len(token_stream):
-        return token_stream
-
-    prefix = token_stream[:target_len]
-    if eos_id in prefix:
-        cutoff = max(i for i, token in enumerate(prefix) if token == eos_id) + 1
-        return token_stream[:cutoff]
-
-    for idx in range(target_len, len(token_stream)):
-        if token_stream[idx] == eos_id:
-            return token_stream[: idx + 1]
-    return token_stream
-
-
-def find_latest_artifact_dir_with_checkpoint(
-    models_root: Path,
-    checkpoint_filename: str,
-) -> Path | None:
-    latest_dir: Path | None = None
-    latest_mtime = float("-inf")
-
-    if not models_root.exists():
-        return None
-
-    for entry in models_root.iterdir():
-        if not entry.is_dir():
-            continue
-        checkpoint_path = entry / checkpoint_filename
-        if not checkpoint_path.exists():
-            continue
-
-        checkpoint_mtime = checkpoint_path.stat().st_mtime
-        if checkpoint_mtime > latest_mtime:
-            latest_mtime = checkpoint_mtime
-            latest_dir = entry
-
-    return latest_dir
-
-
-def prepare_run_artifact_paths(config: ExperimentConfig) -> dict[str, Path]:
-    models_root = Path(config.run.artifacts_root).expanduser().resolve()
-    models_root.mkdir(parents=True, exist_ok=True)
-
-    if config.run.run_name:
-        run_dir = models_root / config.run.run_name
-        run_dir.mkdir(parents=True, exist_ok=True)
-    elif config.run.resume_from_checkpoint:
-        run_dir = find_latest_artifact_dir_with_checkpoint(
-            models_root=models_root,
-            checkpoint_filename=config.run.checkpoint_filename,
-        )
-        if run_dir is None:
-            run_dir = models_root / datetime.now().strftime("run_%Y%m%d_%H%M%S")
-            run_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            print(f"Resuming artifacts from: {run_dir}")
-    else:
-        run_dir = models_root / datetime.now().strftime("run_%Y%m%d_%H%M%S")
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-    paths = {
-        "run_artifact_dir": run_dir,
-        "checkpoint_path": run_dir / config.run.checkpoint_filename,
-        "final_model_path": run_dir / config.run.final_model_filename,
-        "model_diagram_path": run_dir / "baseline_model_architecture",
-        "run_config_path": run_dir / "run_config.json",
-        "inference_config_path": run_dir / "inference_config.json",
-    }
-    print(f"Run artifacts will be saved to: {run_dir}")
-    return paths
-
-
-def build_checkpoint_artifact_name(run_name: str) -> str:
-    return f"{run_name}-checkpoint"
-
-
-def build_final_model_artifact_name(run_name: str) -> str:
-    return f"{run_name}-model"
-
-
-def clone_config_with_run_settings(
-    config: ExperimentConfig,
-    *,
-    run_name: str,
-    resume_from_checkpoint: bool,
-) -> ExperimentConfig:
-    return replace(
-        config,
-        run=replace(
-            config.run,
-            run_name=run_name,
-            resume_from_checkpoint=resume_from_checkpoint,
-        ),
-    )
-
-
-def stdin_is_interactive() -> bool:
-    return bool(getattr(sys.stdin, "isatty", lambda: False)())
-
-
-def resolve_wandb_lineage(
-    config: ExperimentConfig,
-    logger_adapter,
-    *,
-    input_fn: Callable[[str], str] = input,
-    interactive: bool | None = None,
-) -> ExperimentConfig:
-    if config.logging.provider != "wandb":
-        return config
-    if not config.logging.enable_artifact_io:
-        return config
-
-    has_remote_artifact = getattr(logger_adapter, "has_remote_artifact", None)
-    if not callable(has_remote_artifact):
-        return config
-
-    base_run_name = config.run.run_name
-    if base_run_name is None:
-        return config
-
-    def remote_checkpoint_exists(run_name: str) -> bool:
-        return bool(
-            has_remote_artifact(
-                project_name=config.run.project_name,
-                artifact_name=build_checkpoint_artifact_name(run_name),
-                alias="latest",
-            )
-        )
-
-    if not remote_checkpoint_exists(base_run_name):
-        return config
-
-    interactive_mode = stdin_is_interactive() if interactive is None else interactive
-    if not interactive_mode:
-        if config.run.resume_from_checkpoint:
-            print(
-                f"Remote checkpoint already exists for run_name={base_run_name}; "
-                "resuming latest lineage."
-            )
-            return clone_config_with_run_settings(
-                config,
-                run_name=base_run_name,
-                resume_from_checkpoint=True,
-            )
-        raise ValueError(
-            f"Remote checkpoint already exists for run_name={base_run_name}. "
-            "Re-run interactively to resume or provide a distinct run.run_name."
-        )
-
-    print(f"Remote checkpoint already exists for run_name={base_run_name}.")
-    while True:
-        print("1. Resume from the existing latest remote checkpoint.")
-        print("2. Start a new lineage with a manual suffix.")
-        choice = input_fn("Select 1 or 2: ").strip()
-        if choice == "1":
-            return clone_config_with_run_settings(
-                config,
-                run_name=base_run_name,
-                resume_from_checkpoint=True,
-            )
-        if choice != "2":
-            print("Please enter 1 or 2.")
-            continue
-
-        while True:
-            raw_suffix = input_fn("Enter a new lineage suffix: ").strip()
-            if not raw_suffix:
-                print("Suffix must be non-empty.")
-                continue
-
-            suffix = sanitize_wandb_name(raw_suffix)
-            candidate_run_name = f"{base_run_name}-{suffix}"
-            if remote_checkpoint_exists(candidate_run_name):
-                print(
-                    f"Remote checkpoint already exists for run_name={candidate_run_name}. "
-                    "Enter a different suffix."
-                )
-                continue
-
-            return clone_config_with_run_settings(
-                config,
-                run_name=candidate_run_name,
-                resume_from_checkpoint=False,
-            )
-
-
-def write_run_metadata(
-    config: ExperimentConfig,
-    tokenized: TokenizedCorpus,
-    run_paths: dict[str, Path],
-) -> None:
-    run_paths["run_config_path"].write_text(
-        json.dumps(asdict(config), indent=2),
-        encoding="utf-8",
-    )
-
-    special = tokenized.vocab.special
-    inference_config = {
-        "model_name": config.model.name,
-        "tokenizer_name": config.tokenizer.name,
-        "base_vocab_size": special.base_vocab_size,
-        "num_special_tokens": special.num_special_tokens,
-        "vocab_size": special.vocab_size,
-        "d_model": config.model.d_model,
-        "n_heads": config.model.n_heads,
-        "layers": config.model.layers,
-        "attention_impl": config.model.attention_impl,
-        "training_seq_len": config.train.seq_len,
-        "tokenizer_vocab_path": str(Path(config.tokenizer.vocab_path).expanduser().resolve()),
-    }
-    run_paths["inference_config_path"].write_text(
-        json.dumps(inference_config, indent=2),
-        encoding="utf-8",
-    )
-
-
-def build_data_loaders(
-    config: ExperimentConfig,
-    tokenized: TokenizedCorpus,
-    pin_memory: bool,
-) -> tuple[DataLoader, DataLoader]:
-    batching = resolve_train_batching(config.train)
-    special = tokenized.vocab.special
-
-    token_stream = truncate_stream_by_fraction_at_eos(
-        token_stream=tokenized.token_stream,
-        data_fraction=config.train.data_fraction,
-        eos_id=special.eos_id,
-    )
-
-    retained_eos = sum(1 for token in token_stream if token == special.eos_id)
-    print(
-        f"Encoded stream tokens: {len(token_stream):,} | "
-        f"EOS inserted: {tokenized.eos_inserted:,} | EOS retained: {retained_eos:,} | "
-        f"UNK replacements: {tokenized.unk_replacements:,}"
-    )
-
-    if any(token < 0 or token >= tokenized.vocab.vocab_size for token in token_stream):
-        raise ValueError("Token stream contains token ids outside model vocab range.")
-
-    dataset = LMWindowDataset(
-        token_stream,
-        seq_len=config.train.seq_len,
-        stride=config.train.stride,
-        pad_id=special.pad_id,
-    )
-
-    print(
-        f"Dataset samples: {len(dataset):,} | "
-        f"seq_len={config.train.seq_len} | stride={config.train.stride} | pad_id={special.pad_id}"
-    )
-
-    split_adapter = get_split_adapter(config.split.name)
-    train_set, val_set = split_adapter.split(dataset=dataset, cfg=config.split)
-
-    train_loader = DataLoader(
-        train_set,
-        batch_size=batching.loader_batch_size,
-        shuffle=True,
-        pin_memory=pin_memory,
-    )
-    val_loader = DataLoader(
-        val_set,
-        batch_size=batching.loader_batch_size,
-        shuffle=False,
-        pin_memory=pin_memory,
-    )
-    return train_loader, val_loader
-
-
-def evaluate(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    loss_fn: CrossEntropyLoss,
-    device: torch.device,
-    use_bf16: bool,
-) -> dict[str, float]:
-    model.eval()
-    pad_id = int(loss_fn.ignore_index)
-    total_tokens = 0
-    total_loss = 0.0
-    non_blocking = device.type == "cuda"
-
-    with torch.no_grad():
-        for input_seq, target_seq, key_padding_mask in loader:
-            input_seq = input_seq.to(device, non_blocking=non_blocking)
-            target_seq = target_seq.to(device, non_blocking=non_blocking)
-            key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
-
-            with get_autocast_context(device=device, use_bf16=use_bf16):
-                output = model(input_seq, key_padding_mask=key_padding_mask)
-                loss_sum = loss_fn(
-                    output.reshape(-1, output.size(-1)),
-                    target_seq.reshape(-1),
-                )
-
-            valid_target_mask = target_seq != pad_id
-            tokens = int(valid_target_mask.sum().item())
-            if tokens == 0:
-                continue
-
-            total_tokens += tokens
-            total_loss += loss_sum.item()
-
-    avg_loss = total_loss / max(total_tokens, 1)
-    perplexity = torch.exp(torch.tensor(avg_loss)).item()
-
-    return {
-        "val_loss": avg_loss,
-        "val_perplexity": perplexity,
-    }
-
-
-def scale_gradients_by_token_count(
-    model: torch.nn.Module,
-    token_count: int,
-) -> None:
-    if token_count <= 0:
-        raise ValueError(f"token_count must be > 0, got {token_count}")
-
-    scale = 1.0 / float(token_count)
-    with torch.no_grad():
-        for param in model.parameters():
-            if param.grad is not None:
-                param.grad.mul_(scale)
 
 
 def train_loop(
@@ -721,6 +222,7 @@ def train_loop(
             step_start = 0.0
             step_forward_pass_time_ms = 0.0
             step_backward_pass_time_ms = 0.0
+            should_measure_step_timing = False
             step_loss_sum = 0.0
             step_token_count = 0
             step_last_batch_idx = 0
@@ -757,8 +259,14 @@ def train_loop(
                     metrics_engine.on_step_start(step_ctx)
 
                     optimizer.zero_grad()
-                    synchronize_if_cuda(device)
-                    step_start = time.perf_counter()
+                    should_measure_step_timing = (
+                        wandb_enabled
+                        and wandb_cfg.enable_step_time
+                        and step_ctx.include_in_perf_aggregates
+                    )
+                    if should_measure_step_timing:
+                        synchronize_if_cuda(device)
+                        step_start = time.perf_counter()
                     step_forward_pass_time_ms = 0.0
                     step_backward_pass_time_ms = 0.0
                     step_loss_sum = 0.0
@@ -772,16 +280,23 @@ def train_loop(
                 target_seq = target_seq.to(device, non_blocking=non_blocking)
                 key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
 
-                synchronize_if_cuda(device)
-                forward_start = time.perf_counter()
+                forward_start = 0.0
+                if should_measure_step_timing:
+                    synchronize_if_cuda(device)
+                    forward_start = time.perf_counter()
                 with get_autocast_context(device=device, use_bf16=use_bf16):
+                    # FORWARD PASS
                     output = model(input_seq, key_padding_mask=key_padding_mask)
+                    # COMPUTE LOSS
                     loss_sum = loss_fn(
                         output.reshape(-1, output.size(-1)),
                         target_seq.reshape(-1),
                     )
-                synchronize_if_cuda(device)
-                step_forward_pass_time_ms += (time.perf_counter() - forward_start) * 1000.0
+                if should_measure_step_timing:
+                    synchronize_if_cuda(device)
+                    step_forward_pass_time_ms += (
+                        time.perf_counter() - forward_start
+                    ) * 1000.0
 
                 valid_tokens = int((target_seq != pad_id).sum().item())
                 if valid_tokens > 0:
@@ -791,13 +306,18 @@ def train_loop(
                     epoch_train_loss_sum += loss_sum.item()
                     micro_batch_in_step = micro_batches_in_step + 1
 
-                    synchronize_if_cuda(device)
-                    backward_start = time.perf_counter()
+                    backward_start = 0.0
+                    if should_measure_step_timing:
+                        synchronize_if_cuda(device)
+                        backward_start = time.perf_counter()
+                    # CALCULATE GRADIENTS
                     loss_sum.backward()
-                    synchronize_if_cuda(device)
-                    step_backward_pass_time_ms += (
-                        (time.perf_counter() - backward_start) * 1000.0
-                    )
+                    
+                    if should_measure_step_timing:
+                        synchronize_if_cuda(device)
+                        step_backward_pass_time_ms += (
+                            (time.perf_counter() - backward_start) * 1000.0
+                        )
                     metrics_engine.after_microbatch_backward(
                         MicroBatchMetricsContext(
                             step_ctx=step_ctx,
@@ -818,7 +338,8 @@ def train_loop(
                 if step_token_count <= 0:
                     micro_batches_in_step = 0
                     continue
-
+                
+                # SCALE GRADs BY TOKEN COUNT
                 scale_gradients_by_token_count(checkpoint_model, step_token_count)
                 step_loss = step_loss_sum / step_token_count
                 step_ctx = replace(
@@ -830,12 +351,20 @@ def train_loop(
                 )
                 metrics_engine.after_backward(step_ctx)
 
-                synchronize_if_cuda(device)
-                optim_start = time.perf_counter()
+                optim_start = 0.0
+                if should_measure_step_timing:
+                    synchronize_if_cuda(device)
+                    optim_start = time.perf_counter()
+                    
+                # UPDATE WEIGHTS BASED ON CALCULATED GRADIENTS    
                 optimizer.step()
-                synchronize_if_cuda(device)
-                optim_step_time_ms = (time.perf_counter() - optim_start) * 1000.0
-                step_time_ms = (time.perf_counter() - step_start) * 1000.0
+                
+                optim_step_time_ms: float | None = None
+                step_time_ms: float | None = None
+                if should_measure_step_timing:
+                    synchronize_if_cuda(device)
+                    optim_step_time_ms = (time.perf_counter() - optim_start) * 1000.0
+                    step_time_ms = (time.perf_counter() - step_start) * 1000.0
 
                 peak_memory_gib: float | None = None
                 peak_reserved_memory_gib: float | None = None
@@ -854,8 +383,8 @@ def train_loop(
                     batch_idx=step_last_batch_idx,
                     global_step=global_step,
                     tokens_seen_train=tokens_seen_train,
-                    optim_step_time_ms=float(optim_step_time_ms),
-                    step_time_ms=float(step_time_ms),
+                    optim_step_time_ms=optim_step_time_ms,
+                    step_time_ms=step_time_ms,
                     peak_memory_gib=peak_memory_gib,
                     peak_reserved_memory_gib=peak_reserved_memory_gib,
                 )

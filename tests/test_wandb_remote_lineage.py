@@ -22,7 +22,8 @@ from src.config import (
 )
 from src.core.registry import LOGGER_ADAPTERS, get_model_adapter
 from src.core.types import SpecialTokenIds, VocabInfo
-from src.train import model_pipeline, resolve_wandb_lineage
+from src.train import model_pipeline
+from src.training.artifacts import resolve_wandb_lineage
 
 register_builtin_adapters()
 
