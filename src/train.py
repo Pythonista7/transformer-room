@@ -585,6 +585,9 @@ def model_pipeline(
         config,
         learning_rate=learning_rate_cfg.applied_learning_rate,
     )
+    # We need to do reduction="sum" because we have grad-acc, if we set it to "mean" then
+    # at the end of effective batch we will have (avg_loss_mb_1 + avg_loss_mb_2 ...)/num_of_mb which i wrong,
+    # what we want is (loss_mb_1 + loss_mb_2 + ...)/num_of_mb hence we use reduction="sum"
     loss_fn = CrossEntropyLoss(ignore_index=tokenized.vocab.special.pad_id, reduction="sum")
 
     logger = logger_adapter.start(
