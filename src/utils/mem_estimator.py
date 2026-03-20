@@ -33,6 +33,7 @@ class ShapeConfig:
     d_model: int = 768
     n_heads: int = 8
     layers: int = 12
+    attention_impl: str = "basic"
     base_vocab_size: int = 33280
     num_special_tokens: int = 3
 
@@ -128,6 +129,7 @@ def load_shape_config_from_run_config(path: Path) -> ShapeConfig:
         d_model=int(model_cfg.get("d_model", 768)),
         n_heads=int(model_cfg.get("n_heads", 8)),
         layers=int(model_cfg.get("layers", 12)),
+        attention_impl=str(model_cfg.get("attention_impl", "basic")),
         base_vocab_size=int(tok_cfg.get("base_vocab_size", 33280)),
         num_special_tokens=int(tok_cfg.get("num_special_tokens", 3)),
     )
@@ -167,6 +169,7 @@ def collect_meta_records(cfg: ShapeConfig) -> list[TensorRecord]:
             layers=cfg.layers,
             d_model=cfg.d_model,
             n_heads=cfg.n_heads,
+            attention_impl=cfg.attention_impl,
             pad_id=cfg.vocab_size - 2,
         )
 
@@ -268,6 +271,7 @@ def collect_param_counts(
             layers=cfg.layers,
             d_model=cfg.d_model,
             n_heads=cfg.n_heads,
+            attention_impl=cfg.attention_impl,
             pad_id=cfg.vocab_size - 2,
         )
 
@@ -638,6 +642,7 @@ def run_train_step_profile(
         layers=cfg.layers,
         d_model=cfg.d_model,
         n_heads=cfg.n_heads,
+        attention_impl=cfg.attention_impl,
         pad_id=pad_id,
     ).to(device)
     model.train()

@@ -453,6 +453,7 @@ def write_run_metadata(
         "d_model": config.model.d_model,
         "n_heads": config.model.n_heads,
         "layers": config.model.layers,
+        "attention_impl": config.model.attention_impl,
         "training_seq_len": config.train.seq_len,
         "tokenizer_vocab_path": str(Path(config.tokenizer.vocab_path).expanduser().resolve()),
     }

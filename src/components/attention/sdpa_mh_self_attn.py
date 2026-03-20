@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 
+from .common import build_attention_mask, reshape_for_multi_head
 from ..primitive.layers import LinearLayer
 
 
@@ -24,6 +25,7 @@ class SDPASelfAttn(torch.nn.Module):
     def forward(
         self,
         Q: torch.Tensor,
+        mask: torch.Tensor = None,
         key_padding_mask: torch.Tensor = None,
         is_causal: bool = True,
     ):
@@ -36,32 +38,34 @@ class SDPASelfAttn(torch.nn.Module):
         all_projs = self.packed_proj(Q)
         query, key, value = torch.chunk(all_projs, 3, dim=-1)
 
-        query = query.reshape(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        key = key.reshape(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        value = value.reshape(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        query = reshape_for_multi_head(
+            query,
+            n_heads=self.n_heads,
+            head_dim=self.head_dim,
+        )
+        key = reshape_for_multi_head(
+            key,
+            n_heads=self.n_heads,
+            head_dim=self.head_dim,
+        )
+        value = reshape_for_multi_head(
+            value,
+            n_heads=self.n_heads,
+            head_dim=self.head_dim,
+        )
 
         attn_mask = None
-        sdpa_is_causal = is_causal
-
-        if key_padding_mask is not None:
-            if key_padding_mask.shape != (batch_size, seq_len):
-                raise ValueError(
-                    f"key_padding_mask must have shape {(batch_size, seq_len)}, "
-                    f"got {tuple(key_padding_mask.shape)}"
-                )
-
-            key_mask = key_padding_mask.to(device=query.device, dtype=torch.bool)
-            key_mask = key_mask.unsqueeze(1).unsqueeze(1)  # [B, 1, 1, T]
-            attn_mask = key_mask
-
-            # SDPA does not allow attn_mask + is_causal=True together, so combine here.
-            if is_causal:
-                causal_mask = torch.tril(
-                    torch.ones((seq_len, seq_len), dtype=torch.bool, device=query.device),
-                    diagonal=0,
-                ).unsqueeze(0).unsqueeze(0)  # [1, 1, T, T]
-                attn_mask = attn_mask & causal_mask
-                sdpa_is_causal = False
+        sdpa_is_causal = bool(is_causal and mask is None and key_padding_mask is None)
+        if not sdpa_is_causal or mask is not None or key_padding_mask is not None:
+            attn_mask = build_attention_mask(
+                batch_size=batch_size,
+                seq_len=seq_len,
+                device=query.device,
+                is_causal=is_causal,
+                mask=mask,
+                key_padding_mask=key_padding_mask,
+            )
+            sdpa_is_causal = False
 
         attention = F.scaled_dot_product_attention(
             query=query,

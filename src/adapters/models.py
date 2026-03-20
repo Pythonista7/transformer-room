@@ -27,6 +27,7 @@ class BaselineDecoderModelAdapter:
             n_heads=cfg.n_heads,
             layers=cfg.layers,
             dropout=cfg.dropout,
+            attention_impl=cfg.attention_impl,
             pad_id=special.pad_id,
         )
 
@@ -44,6 +45,7 @@ class ACEveryNDecoderModelAdapter:
             n_heads=cfg.n_heads,
             layers=cfg.layers,
             dropout=cfg.dropout,
+            attention_impl=cfg.attention_impl,
             pad_id=special.pad_id,
             checkpoint_every_n_layers=cfg.checkpoint_every_n_layers,
             use_activation_checkpointing=True,
@@ -63,6 +65,7 @@ class SACDecoderModelAdapter:
             n_heads=cfg.n_heads,
             layers=cfg.layers,
             dropout=cfg.dropout,
+            attention_impl=cfg.attention_impl,
             pad_id=special.pad_id,
         )
 

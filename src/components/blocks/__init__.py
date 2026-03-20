@@ -1,4 +1,3 @@
-from .self_attn_decoder_block import BasicSelfAttnDecoder as BasicSelfAttnDecoder
-from .sdpa_self_attn_decoder_block import SDPASelfAttnDecoder as SDPASelfAttnDecoder
+from .self_attn_decoder_block import SelfAttnDecoderBlock as SelfAttnDecoderBlock
 
-__all__ = ["BasicSelfAttnDecoder", "SDPASelfAttnDecoder"]
+__all__ = ["SelfAttnDecoderBlock"]

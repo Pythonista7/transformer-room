@@ -394,6 +394,7 @@ def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[
         d_model=safe_int(config["d_model"], "d_model"),
         n_heads=safe_int(config["n_heads"], "n_heads"),
         layers=safe_int(config["layers"], "layers"),
+        attention_impl=str(config.get("attention_impl", "basic")),
         pad_id=pad_id,
     )
 

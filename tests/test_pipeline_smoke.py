@@ -85,6 +85,16 @@ class PipelineSmokeTests(unittest.TestCase):
     def test_cpu_smoke_train_and_artifacts_baseline(self) -> None:
         self._run_smoke_with_model(BaselineDecoderConfig(d_model=32, n_heads=4, layers=1))
 
+    def test_cpu_smoke_train_and_artifacts_baseline_sdpa(self) -> None:
+        self._run_smoke_with_model(
+            BaselineDecoderConfig(
+                d_model=32,
+                n_heads=4,
+                layers=1,
+                attention_impl="sdpa",
+            )
+        )
+
     def test_cpu_smoke_train_and_artifacts_ac_every_n(self) -> None:
         self._run_smoke_with_model(
             ACEveryNDecoderConfig(

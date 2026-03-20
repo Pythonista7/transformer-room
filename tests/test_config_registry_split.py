@@ -173,6 +173,20 @@ class ConfigValidationTests(unittest.TestCase):
             config.train.optimizer.name = optimizer_name
             validate_experiment_config(config)
 
+    def test_attention_impl_sdpa_passes_validation(self) -> None:
+        config = make_config()
+        config.model.attention_impl = "sdpa"
+        validate_experiment_config(config)
+
+    def test_invalid_attention_impl_fails(self) -> None:
+        config = make_config()
+        config.model.attention_impl = "not_real"  # type: ignore[assignment]
+        with self.assertRaisesRegex(
+            ValueError,
+            "model.attention_impl must be one of: basic, sdpa",
+        ):
+            validate_experiment_config(config)
+
     def test_invalid_compile_warmup_steps_fails(self) -> None:
         config = make_config()
         config.run.compile_warmup_steps = -1

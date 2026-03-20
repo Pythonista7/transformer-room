@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from ..blocks.self_attn_decoder_block import BasicSelfAttnDecoder
+from ..blocks.self_attn_decoder_block import SelfAttnDecoderBlock
 from ..positional.positional_encoder import SinusoidalPositionalEncoder as PositionalEncoder
 from ..primitive.layers import EmbeddingLayer, LinearLayer
 
@@ -18,6 +18,7 @@ class ACEveryN_DecoderModel(nn.Module):
         n_heads,
         pad_id=None,
         dropout=0.1,
+        attention_impl: str = "basic",
         use_activation_checkpointing=True,
         checkpoint_every_n_layers=1,
         **kwargs,
@@ -34,6 +35,7 @@ class ACEveryN_DecoderModel(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.dropout = dropout
+        self.attention_impl = attention_impl
         self.use_activation_checkpointing = use_activation_checkpointing
         self.checkpoint_every_n_layers = checkpoint_every_n_layers
         if self.checkpoint_every_n_layers <= 0:
@@ -41,9 +43,14 @@ class ACEveryN_DecoderModel(nn.Module):
                 "checkpoint_every_n_layers must be > 0, got "
                 f"{self.checkpoint_every_n_layers}"
             )
-        self.dec_layers: List[BasicSelfAttnDecoder] = torch.nn.ModuleList(
+        self.dec_layers: List[SelfAttnDecoderBlock] = torch.nn.ModuleList(
             [
-                BasicSelfAttnDecoder(d_model=d_model, n_heads=n_heads, dropout=dropout)
+                SelfAttnDecoderBlock(
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    dropout=dropout,
+                    attention_impl=attention_impl,
+                )
                 for _ in range(self.layer_count)
             ]
         )
@@ -51,7 +58,7 @@ class ACEveryN_DecoderModel(nn.Module):
 
     def _forward_decoder_layer(
         self,
-        layer: BasicSelfAttnDecoder,
+        layer: SelfAttnDecoderBlock,
         x: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:

@@ -6,6 +6,8 @@ from typing import Literal
 
 from .types import SpecialTokenIds
 
+AttentionImplementation = Literal["basic", "sdpa"]
+
 
 @dataclass(slots=True)
 class RunConfig:
@@ -66,6 +68,7 @@ class BaselineDecoderConfig:
     n_heads: int = 8
     layers: int = 2
     dropout: float = 0.1
+    attention_impl: AttentionImplementation = "basic"
 
 
 @dataclass(slots=True)
@@ -75,6 +78,7 @@ class ACEveryNDecoderConfig:
     n_heads: int = 8
     layers: int = 2
     dropout: float = 0.1
+    attention_impl: AttentionImplementation = "basic"
     checkpoint_every_n_layers: int = 1
 
 
@@ -85,6 +89,7 @@ class SACDecoderConfig:
     n_heads: int = 8
     layers: int = 2
     dropout: float = 0.1
+    attention_impl: AttentionImplementation = "basic"
 
 
 ModelConfig = BaselineDecoderConfig | ACEveryNDecoderConfig | SACDecoderConfig
@@ -357,6 +362,10 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("model.layers must be > 0.")
     if not 0.0 <= config.model.dropout <= 1.0:
         raise ValueError("model.dropout must be in [0, 1].")
+    if config.model.attention_impl not in {"basic", "sdpa"}:
+        raise ValueError(
+            "model.attention_impl must be one of: basic, sdpa."
+        )
     if config.model.d_model % config.model.n_heads != 0:
         raise ValueError(
             "model.d_model must be divisible by model.n_heads "

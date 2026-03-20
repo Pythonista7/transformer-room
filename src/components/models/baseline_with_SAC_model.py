@@ -9,7 +9,7 @@ from torch.utils.checkpoint import (
     CheckpointPolicy,
 )
 
-from ..blocks.self_attn_decoder_block import BasicSelfAttnDecoder
+from ..blocks.self_attn_decoder_block import SelfAttnDecoderBlock
 from ..positional.positional_encoder import SinusoidalPositionalEncoder as PositionalEncoder
 from ..primitive.layers import EmbeddingLayer, LinearLayer
 
@@ -37,6 +37,7 @@ class SelectiveAC_DecoderModel(nn.Module):
         n_heads,
         pad_id=None,
         dropout=0.1,
+        attention_impl: str = "basic",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -51,9 +52,15 @@ class SelectiveAC_DecoderModel(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.dropout = dropout
-        self.dec_layers: List[BasicSelfAttnDecoder] = torch.nn.ModuleList(
+        self.attention_impl = attention_impl
+        self.dec_layers: List[SelfAttnDecoderBlock] = torch.nn.ModuleList(
             [
-                BasicSelfAttnDecoder(d_model=d_model, n_heads=n_heads, dropout=dropout)
+                SelfAttnDecoderBlock(
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    dropout=dropout,
+                    attention_impl=attention_impl,
+                )
                 for _ in range(self.layer_count)
             ]
         )

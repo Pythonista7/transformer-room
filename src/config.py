@@ -2,6 +2,7 @@
 
 from .core.config import (
     ACEveryNDecoderConfig,
+    AttentionImplementation,
     BPETokenizerConfig,
     BaselineDecoderConfig,
     DatasetConfig,
@@ -28,6 +29,7 @@ from .core.config import (
 
 __all__ = [
     "ACEveryNDecoderConfig",
+    "AttentionImplementation",
     "BPETokenizerConfig",
     "BaselineDecoderConfig",
     "DatasetConfig",

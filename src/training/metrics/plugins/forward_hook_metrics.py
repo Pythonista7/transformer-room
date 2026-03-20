@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import torch
 
+from src.components.attention.common import (
+    attention_scale,
+    build_attention_mask,
+    reshape_for_multi_head,
+)
 from src.core.config import WandbMetricsConfig
 
 from ..contracts import BaseMetricPlugin, MetricPayload, StepMetricsContext
@@ -34,6 +39,76 @@ class ForwardMetricCollector:
         self.activation_norms.clear()
         self.attention_entropy.clear()
         return metrics
+
+
+def compute_attention_entropy_from_module_inputs(
+    attn: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    *,
+    attention_head_cap: int,
+    attention_token_cap: int,
+    mask: torch.Tensor | None = None,
+    key_padding_mask: torch.Tensor | None = None,
+    is_causal: bool = True,
+) -> torch.Tensor | None:
+    packed_proj = getattr(attn, "packed_proj", None)
+    n_heads = getattr(attn, "n_heads", None)
+    head_dim = getattr(attn, "head_dim", None)
+    if packed_proj is None or n_heads is None or head_dim is None:
+        return None
+    if not torch.is_tensor(hidden_states) or hidden_states.dim() != 3:
+        return None
+
+    with torch.no_grad():
+        batch_size, seq_len, _ = hidden_states.shape
+        all_projs = packed_proj(hidden_states.detach())
+        query, key, _ = torch.chunk(all_projs, 3, dim=-1)
+        query = reshape_for_multi_head(
+            query,
+            n_heads=int(n_heads),
+            head_dim=int(head_dim),
+        )
+        key = reshape_for_multi_head(
+            key,
+            n_heads=int(n_heads),
+            head_dim=int(head_dim),
+        )
+
+        sampled_heads = min(attention_head_cap, query.size(1))
+        sampled_tokens = min(attention_token_cap, query.size(2), key.size(2))
+        if sampled_heads <= 0 or sampled_tokens <= 0:
+            return None
+
+        attention_mask = build_attention_mask(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            device=hidden_states.device,
+            is_causal=bool(is_causal),
+            mask=mask,
+            key_padding_mask=key_padding_mask,
+        )
+
+        query = (
+            query[:, :sampled_heads, :sampled_tokens, :]
+            .detach()
+            .to(device="cpu", dtype=torch.float32)
+        )
+        key = (
+            key[:, :sampled_heads, :sampled_tokens, :]
+            .detach()
+            .to(device="cpu", dtype=torch.float32)
+        )
+        attention_mask = attention_mask[:, :, :sampled_tokens, :sampled_tokens].detach().to(
+            device="cpu"
+        )
+
+        scores = (query @ key.transpose(-2, -1)) / attention_scale(int(head_dim))
+        scores = scores.masked_fill(~attention_mask, float("-inf"))
+        fully_masked = ~attention_mask.any(dim=-1, keepdim=True)
+        scores = scores.masked_fill(fully_masked, 0.0)
+
+        probs = torch.softmax(scores, dim=-1).clamp_min(1e-12)
+        return -(probs * probs.log()).sum(dim=-1).mean()
 
 
 def get_decoder_layer_labels(model: torch.nn.Module) -> dict[int, list[str]]:
@@ -85,29 +160,34 @@ def register_forward_metric_hooks(
         handles.append(layer.register_forward_hook(activation_hook))
 
         attn = getattr(layer, "multi_head_attention", None)
-        softmax_module = getattr(attn, "softmax", None)
-        if softmax_module is None:
+        if attn is None:
             continue
 
-        def attention_entropy_hook(_module, _inputs, output, label_tuple=label_tuple):
+        def attention_entropy_hook(_module, args, kwargs, label_tuple=label_tuple):
             if not collector.capture_attention_entropy:
                 return
-            if not torch.is_tensor(output) or output.dim() != 4:
+            if not args:
                 return
-
-            _, heads, query_len, key_len = output.shape
-            sampled_heads = min(attention_head_cap, heads)
-            sampled_tokens = min(attention_token_cap, query_len, key_len)
-            if sampled_heads <= 0 or sampled_tokens <= 0:
+            hidden_states = args[0]
+            if kwargs is None:
+                kwargs = {}
+            entropy = compute_attention_entropy_from_module_inputs(
+                attn,
+                hidden_states,
+                attention_head_cap=attention_head_cap,
+                attention_token_cap=attention_token_cap,
+                mask=kwargs.get("mask"),
+                key_padding_mask=kwargs.get("key_padding_mask"),
+                is_causal=bool(kwargs.get("is_causal", True)),
+            )
+            if entropy is None:
                 return
-
-            probs = output[:, :sampled_heads, :sampled_tokens, :sampled_tokens].detach().float()
-            probs = probs.clamp_min(1e-12)
-            entropy = -(probs * probs.log()).sum(dim=-1).mean()
             for label in label_tuple:
                 collector.attention_entropy[f"attention_entropy_{label}"] = entropy
 
-        handles.append(softmax_module.register_forward_hook(attention_entropy_hook))
+        handles.append(
+            attn.register_forward_pre_hook(attention_entropy_hook, with_kwargs=True)
+        )
 
     return handles
 

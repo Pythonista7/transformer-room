@@ -5,9 +5,14 @@ import unittest
 import torch
 
 from src.config import WandbMetricsConfig
+from src.components.attention.basic_mh_self_attn import BasicMultiHeadSelfAttention
+from src.components.attention.sdpa_mh_self_attn import SDPASelfAttn
 from src.training.metrics import EpochMetricsContext, MetricSchedule, PeriodicValMetricsContext, StepMetricsContext
 from src.training.metrics.plugins import get_decoder_layer_labels
-from src.training.metrics.plugins.forward_hook_metrics import ForwardHookMetricsPlugin
+from src.training.metrics.plugins.forward_hook_metrics import (
+    ForwardHookMetricsPlugin,
+    compute_attention_entropy_from_module_inputs,
+)
 from src.training.metrics.plugins.global_grad_norm import GlobalGradNormPlugin
 from src.training.metrics.plugins.layernorm_grad_norm import LayerNormGradNormPlugin
 from src.training.metrics.plugins.loss_perplexity import LossPerplexityPlugin
@@ -23,14 +28,16 @@ class _FakeLayerNorm(torch.nn.Module):
 
 
 class _FakeMultiHeadAttention(torch.nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, width: int, n_heads: int = 2) -> None:
         super().__init__()
-        self.softmax = torch.nn.Softmax(dim=-1)
+        self.n_heads = n_heads
+        self.head_dim = width // n_heads
+        self.packed_proj = torch.nn.Linear(width, width * 3, bias=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size = x.size(0)
-        scores = torch.randn(batch_size, 2, 4, 4, device=x.device, dtype=x.dtype)
-        return self.softmax(scores)
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        _ = kwargs
+        _ = self.packed_proj(x)
+        return x
 
 
 class _FakeDecoderLayer(torch.nn.Module):
@@ -38,7 +45,7 @@ class _FakeDecoderLayer(torch.nn.Module):
         super().__init__()
         self.ln1 = _FakeLayerNorm(width)
         self.ln2 = _FakeLayerNorm(width)
-        self.multi_head_attention = _FakeMultiHeadAttention()
+        self.multi_head_attention = _FakeMultiHeadAttention(width)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x * self.ln1.gamma.mean() + self.ln1.beta.mean()
@@ -141,7 +148,7 @@ def _count_forward_hooks(model: _FakeDecoderModel) -> int:
     count = 0
     for layer in model.dec_layers:
         count += len(layer._forward_hooks)
-        count += len(layer.multi_head_attention.softmax._forward_hooks)
+        count += len(layer.multi_head_attention._forward_pre_hooks)
     return count
 
 
@@ -420,6 +427,80 @@ class ForwardHookMetricsPluginTests(unittest.TestCase):
                 plugin.on_train_end()
 
         self.assertEqual(_count_forward_hooks(model), 0)
+
+    def test_unified_entropy_matches_basic_attention_probs(self) -> None:
+        attn = BasicMultiHeadSelfAttention(E_q=8, E_out=8, n_heads=2, E_bias=True)
+        inputs = torch.randn(2, 4, 8)
+        key_padding_mask = torch.tensor(
+            [[True, True, True, False], [True, True, True, True]],
+            dtype=torch.bool,
+        )
+        captured: dict[str, torch.Tensor] = {}
+
+        def capture_probs(_module, _inputs, output) -> None:
+            captured["probs"] = output.detach()
+
+        handle = attn.softmax.register_forward_hook(capture_probs)
+        try:
+            _ = attn(inputs, key_padding_mask=key_padding_mask, is_causal=True)
+        finally:
+            handle.remove()
+
+        probs = captured["probs"][:, :1, :4, :4].float().clamp_min(1e-12)
+        expected_entropy = -(probs * probs.log()).sum(dim=-1).mean()
+        computed_entropy = compute_attention_entropy_from_module_inputs(
+            attn,
+            inputs,
+            attention_head_cap=1,
+            attention_token_cap=4,
+            key_padding_mask=key_padding_mask,
+            is_causal=True,
+        )
+
+        self.assertIsNotNone(computed_entropy)
+        self.assertAlmostEqual(
+            float(computed_entropy.item()),
+            float(expected_entropy.item()),
+            places=6,
+        )
+
+    def test_unified_entropy_matches_between_basic_and_sdpa_modules(self) -> None:
+        basic_attn = BasicMultiHeadSelfAttention(E_q=8, E_out=8, n_heads=2, E_bias=True)
+        sdpa_attn = SDPASelfAttn(d_model=8, n_heads=2, dropout=0.0)
+        inputs = torch.randn(2, 4, 8)
+        key_padding_mask = torch.tensor(
+            [[True, True, True, False], [True, True, True, True]],
+            dtype=torch.bool,
+        )
+
+        with torch.no_grad():
+            sdpa_attn.packed_proj.W.copy_(basic_attn.packed_proj.W)
+            sdpa_attn.packed_proj.b.copy_(basic_attn.packed_proj.b)
+
+        basic_entropy = compute_attention_entropy_from_module_inputs(
+            basic_attn,
+            inputs,
+            attention_head_cap=2,
+            attention_token_cap=4,
+            key_padding_mask=key_padding_mask,
+            is_causal=True,
+        )
+        sdpa_entropy = compute_attention_entropy_from_module_inputs(
+            sdpa_attn,
+            inputs,
+            attention_head_cap=2,
+            attention_token_cap=4,
+            key_padding_mask=key_padding_mask,
+            is_causal=True,
+        )
+
+        self.assertIsNotNone(basic_entropy)
+        self.assertIsNotNone(sdpa_entropy)
+        self.assertAlmostEqual(
+            float(basic_entropy.item()),
+            float(sdpa_entropy.item()),
+            places=6,
+        )
 
 
 class ParameterOptimizerNormsPluginTests(unittest.TestCase):
