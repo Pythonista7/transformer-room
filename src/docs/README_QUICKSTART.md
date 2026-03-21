@@ -196,6 +196,7 @@ logging=LoggingConfig(
         enable_train_loss_vs_tokens=True,
         enable_val_loss_vs_tokens=True,
         enable_perplexity=True,
+        enable_bits_per_byte=True,
         enable_step_time=True,
         enable_peak_memory=True,
         enable_global_grad_norm=True,

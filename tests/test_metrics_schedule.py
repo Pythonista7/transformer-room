@@ -68,6 +68,7 @@ class MetricScheduleTests(unittest.TestCase):
         cfg = WandbMetricsConfig(
             enable_val_loss_vs_tokens=False,
             enable_perplexity=False,
+            enable_bits_per_byte=False,
             val_every_n_steps=2,
         )
         schedule = build_metric_schedule(
@@ -77,6 +78,21 @@ class MetricScheduleTests(unittest.TestCase):
             layer_labels_available=True,
         )
         self.assertFalse(schedule.periodic_val_due)
+
+    def test_periodic_val_due_can_be_driven_by_bits_per_byte(self) -> None:
+        cfg = WandbMetricsConfig(
+            enable_val_loss_vs_tokens=False,
+            enable_perplexity=False,
+            enable_bits_per_byte=True,
+            val_every_n_steps=2,
+        )
+        schedule = build_metric_schedule(
+            next_global_step=2,
+            wandb_enabled=True,
+            wandb_cfg=cfg,
+            layer_labels_available=True,
+        )
+        self.assertTrue(schedule.periodic_val_due)
 
     def test_attention_capture_requires_labels(self) -> None:
         cfg = WandbMetricsConfig(

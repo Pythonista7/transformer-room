@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from src.adapters import register_builtin_adapters
 from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
@@ -160,6 +161,7 @@ def _make_config(
 
 class WandbMetricGatingTests(unittest.TestCase):
     def setUp(self) -> None:
+        register_builtin_adapters()
         self.original_wandb_adapter = LOGGER_ADAPTERS["wandb"]
         self.recording_adapter = RecordingLoggerAdapter()
         LOGGER_ADAPTERS["wandb"] = self.recording_adapter
@@ -175,6 +177,7 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_train_loss_vs_tokens=False,
                     enable_val_loss_vs_tokens=False,
                     enable_perplexity=False,
+                    enable_bits_per_byte=False,
                     enable_step_time=False,
                     enable_peak_memory=False,
                     enable_global_grad_norm=False,
@@ -205,8 +208,11 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertNotIn("tokens_seen_train", keys)
             self.assertNotIn("val_loss", keys)
             self.assertNotIn("val_perplexity", keys)
+            self.assertNotIn("val_bits_per_byte", keys)
             self.assertNotIn("train_perplexity", keys)
             self.assertNotIn("train_perplexity_epoch", keys)
+            self.assertNotIn("train_bits_per_byte", keys)
+            self.assertNotIn("train_bits_per_byte_epoch", keys)
             self.assertNotIn("global_grad_norm", keys)
             self.assertNotIn("global_param_norm", keys)
             self.assertNotIn("layer_param_norm_first", keys)
@@ -229,6 +235,7 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_train_loss_vs_tokens=True,
                     enable_val_loss_vs_tokens=True,
                     enable_perplexity=True,
+                    enable_bits_per_byte=True,
                     enable_step_time=True,
                     enable_peak_memory=True,
                     enable_global_grad_norm=True,
@@ -261,6 +268,9 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertIn("train_perplexity", keys)
             self.assertIn("train_perplexity_epoch", keys)
             self.assertIn("val_perplexity", keys)
+            self.assertIn("train_bits_per_byte", keys)
+            self.assertIn("train_bits_per_byte_epoch", keys)
+            self.assertIn("val_bits_per_byte", keys)
             self.assertIn("step_time_ms", keys)
             self.assertIn("global_grad_norm", keys)
             self.assertIn("global_param_norm", keys)
@@ -298,6 +308,7 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_train_loss_vs_tokens=True,
                     enable_val_loss_vs_tokens=True,
                     enable_perplexity=True,
+                    enable_bits_per_byte=True,
                     enable_step_time=False,
                     enable_peak_memory=False,
                     enable_global_grad_norm=True,
@@ -328,6 +339,7 @@ class WandbMetricGatingTests(unittest.TestCase):
                 "train_loss_step",
                 "tokens_seen_train",
                 "train_perplexity",
+                "train_bits_per_byte",
                 "global_grad_norm",
                 "global_param_norm",
                 "layer_param_norm_first",
@@ -346,6 +358,7 @@ class WandbMetricGatingTests(unittest.TestCase):
                 "epoch",
                 "val_loss",
                 "val_perplexity",
+                "val_bits_per_byte",
                 "tokens_seen_train",
             }
             expected_epoch_subset = {
@@ -353,7 +366,9 @@ class WandbMetricGatingTests(unittest.TestCase):
                 "train_loss_epoch",
                 "val_loss",
                 "val_perplexity",
+                "val_bits_per_byte",
                 "train_perplexity_epoch",
+                "train_bits_per_byte_epoch",
                 "tokens_seen_train",
             }
 

@@ -176,6 +176,7 @@ def build_config() -> ExperimentConfig:
                 enable_train_loss_vs_tokens=True,
                 enable_val_loss_vs_tokens=True,
                 enable_perplexity=True,
+                enable_bits_per_byte=True,
                 enable_step_time=True,
                 enable_peak_memory=True,
                 enable_global_grad_norm=True,
@@ -342,6 +343,7 @@ This keeps W&B staging traffic off small default system volumes.
 - `enable_train_loss_vs_tokens`: logs `train_loss` and `tokens_seen_train`
 - `enable_val_loss_vs_tokens`: logs `val_loss` and `tokens_seen_train`
 - `enable_perplexity`: logs `train_perplexity`, `train_perplexity_epoch`, `val_perplexity`
+- `enable_bits_per_byte`: logs `train_bits_per_byte`, `train_bits_per_byte_epoch`, `val_bits_per_byte`
 - `enable_step_time`: logs `step_time_ms`
 - `enable_peak_memory`: logs `peak_memory_gib` (CUDA only)
 - `enable_global_grad_norm`: logs `global_grad_norm`
@@ -352,7 +354,7 @@ This keeps W&B staging traffic off small default system volumes.
 
 ### Cadence and sampling controls
 
-- `log_every_n_steps`: cadence for step metrics (loss/tokens/perplexity/time/memory)
+- `log_every_n_steps`: cadence for step metrics (loss/tokens/perplexity/bits-per-byte/time/memory)
 - `diagnostics_every_n_steps`: cadence for grad/activation/LN diagnostics
 - `parameter_optimizer_norms_every_n_steps`: cadence override for parameter/optimizer norm metrics (defaults to `diagnostics_every_n_steps` when omitted)
 - `val_every_n_steps`: periodic validation cadence (`0` disables periodic val; epoch-end val remains)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -64,10 +65,33 @@ if TYPE_CHECKING:
     from .training.metrics import MetricPlugin
 
 
+def _token_bytes_len(token: object) -> int:
+    if isinstance(token, int):
+        return 1
+    if isinstance(token, tuple):
+        return sum(_token_bytes_len(part) for part in token)
+    return 0
+
+
+def _build_token_byte_lengths(
+    *,
+    id_to_token: Sequence[object],
+    base_vocab_size: int,
+) -> list[int]:
+    token_byte_lengths: list[int] = []
+    for token_id, token in enumerate(id_to_token):
+        if token_id >= base_vocab_size:
+            token_byte_lengths.append(0)
+            continue
+        token_byte_lengths.append(_token_bytes_len(token))
+    return token_byte_lengths
+
+
 @dataclass(slots=True)
 class TrainLoopResult:
     global_step: int
     final_train_loss: float
+    final_train_bits_per_byte: float
     final_val_metrics: dict[str, float]
     checkpoint_artifact_ref: str | None
     final_model_artifact_ref: str | None
@@ -87,12 +111,18 @@ def train_loop(
     use_bf16: bool,
     compile_enabled: bool,
     run_paths: dict[str, Path],
+    token_byte_lengths: Sequence[int],
     *,
     extra_metric_plugins: Sequence[MetricPlugin] | None = None,
     metrics_debug_timing: bool = False,
 ) -> TrainLoopResult:
     checkpoint_model = get_uncompiled_model(model)
     pad_id = int(loss_fn.ignore_index)
+    token_byte_lengths_tensor = torch.tensor(
+        token_byte_lengths,
+        dtype=torch.long,
+        device=device,
+    )
     wandb_cfg = config.logging.wandb
     wandb_enabled = config.logging.provider == "wandb"
     persist_local_artifacts = bool(config.run.persist_local_artifacts)
@@ -206,7 +236,12 @@ def train_loop(
     start_epoch, start_batch_idx, global_step, tokens_seen_train = load_checkpoint_if_available()
 
     last_avg_train_loss = 0.0
-    last_val_metrics = {"val_loss": float("nan"), "val_perplexity": float("nan")}
+    last_train_bits_per_byte = float("nan")
+    last_val_metrics = {
+        "val_loss": float("nan"),
+        "val_perplexity": float("nan"),
+        "val_bits_per_byte": float("nan"),
+    }
     completed_epochs = int(start_epoch)
     epoch_end_validation_ran = False
 
@@ -216,6 +251,7 @@ def train_loop(
             epoch_wall_start = time.perf_counter()
             epoch_train_loss_sum = 0.0
             epoch_token_count = 0
+            epoch_byte_count = 0
 
             micro_batches_in_step = 0
             step_ctx: StepMetricsContext | None = None
@@ -225,6 +261,7 @@ def train_loop(
             should_measure_step_timing = False
             step_loss_sum = 0.0
             step_token_count = 0
+            step_byte_count = 0
             step_last_batch_idx = 0
 
             for batch_idx, (input_seq, target_seq, key_padding_mask) in enumerate(train_loader):
@@ -271,6 +308,7 @@ def train_loop(
                     step_backward_pass_time_ms = 0.0
                     step_loss_sum = 0.0
                     step_token_count = 0
+                    step_byte_count = 0
 
                 if step_ctx is None:
                     raise RuntimeError("Step metrics context was not initialized.")
@@ -300,9 +338,16 @@ def train_loop(
 
                 valid_tokens = int((target_seq != pad_id).sum().item())
                 if valid_tokens > 0:
+                    valid_target_mask = target_seq != pad_id
+                    valid_target_ids = target_seq[valid_target_mask]
+                    valid_bytes = int(
+                        token_byte_lengths_tensor[valid_target_ids].sum().item()
+                    )
                     step_token_count += valid_tokens
+                    step_byte_count += valid_bytes
                     step_loss_sum += loss_sum.item()
                     epoch_token_count += valid_tokens
+                    epoch_byte_count += valid_bytes
                     epoch_train_loss_sum += loss_sum.item()
                     micro_batch_in_step = micro_batches_in_step + 1
 
@@ -342,10 +387,16 @@ def train_loop(
                 # SCALE GRADs BY TOKEN COUNT
                 scale_gradients_by_token_count(checkpoint_model, step_token_count)
                 step_loss = step_loss_sum / step_token_count
+                step_bits_per_byte = float("nan")
+                if step_byte_count > 0:
+                    step_bits_per_byte = float(
+                        (step_loss_sum / math.log(2.0)) / float(step_byte_count)
+                    )
                 step_ctx = replace(
                     step_ctx,
                     batch_idx=step_last_batch_idx,
                     step_loss=float(step_loss),
+                    step_bits_per_byte=step_bits_per_byte,
                     forward_pass_time_ms=float(step_forward_pass_time_ms),
                     backward_pass_time_ms=float(step_backward_pass_time_ms),
                 )
@@ -401,6 +452,7 @@ def train_loop(
                         loss_fn,
                         device,
                         use_bf16=use_bf16,
+                        token_byte_lengths=token_byte_lengths,
                     )
                     model.train()
                     last_val_metrics = val_metrics
@@ -437,6 +489,11 @@ def train_loop(
                 micro_batches_in_step = 0
 
             avg_train_loss = epoch_train_loss_sum / max(epoch_token_count, 1)
+            train_bits_per_byte_epoch = float("nan")
+            if epoch_byte_count > 0:
+                train_bits_per_byte_epoch = float(
+                    (epoch_train_loss_sum / math.log(2.0)) / float(epoch_byte_count)
+                )
             completed_epochs = int(epoch + 1)
             epoch_time_s = time.perf_counter() - epoch_wall_start
             val_metrics = last_val_metrics
@@ -447,6 +504,7 @@ def train_loop(
                     loss_fn,
                     device,
                     use_bf16=use_bf16,
+                    token_byte_lengths=token_byte_lengths,
                 )
                 model.train()
                 epoch_end_validation_ran = True
@@ -458,6 +516,7 @@ def train_loop(
                     avg_train_loss=float(avg_train_loss),
                     tokens_seen_train=tokens_seen_train,
                     val_metrics=val_metrics,
+                    train_bits_per_byte_epoch=train_bits_per_byte_epoch,
                     epoch_time_s=float(epoch_time_s),
                 )
             )
@@ -468,7 +527,8 @@ def train_loop(
                     f"Epoch {epoch + 1}/{config.train.epochs} | "
                     f"train_loss={avg_train_loss:.4f} | "
                     f"val_loss={val_metrics['val_loss']:.4f} | "
-                    f"val_perplexity={val_metrics['val_perplexity']:.4f}"
+                    f"val_perplexity={val_metrics['val_perplexity']:.4f} | "
+                    f"val_bits_per_byte={val_metrics['val_bits_per_byte']:.4f}"
                 )
             else:
                 print(
@@ -477,6 +537,7 @@ def train_loop(
                 )
 
             last_avg_train_loss = float(avg_train_loss)
+            last_train_bits_per_byte = float(train_bits_per_byte_epoch)
     finally:
         metrics_engine.on_train_end()
 
@@ -493,6 +554,7 @@ def train_loop(
         final_model_metadata = {
             "global_step": int(global_step),
             "final_train_loss": float(last_avg_train_loss),
+            "final_train_bits_per_byte": float(last_train_bits_per_byte),
             "run_name": run_label,
             "group_name": config.run.group_name,
         }
@@ -500,6 +562,9 @@ def train_loop(
             final_model_metadata["final_val_loss"] = float(last_val_metrics["val_loss"])
             final_model_metadata["final_val_perplexity"] = float(
                 last_val_metrics["val_perplexity"]
+            )
+            final_model_metadata["final_val_bits_per_byte"] = float(
+                last_val_metrics["val_bits_per_byte"]
             )
         final_model_artifact_ref = logger.save(
             str(run_paths["final_model_path"]),
@@ -511,6 +576,7 @@ def train_loop(
     return TrainLoopResult(
         global_step=global_step,
         final_train_loss=last_avg_train_loss,
+        final_train_bits_per_byte=last_train_bits_per_byte,
         final_val_metrics=last_val_metrics,
         checkpoint_artifact_ref=last_checkpoint_artifact_ref,
         final_model_artifact_ref=final_model_artifact_ref,
@@ -560,6 +626,10 @@ def model_pipeline(
 
     tokenizer_adapter = get_tokenizer_adapter(config.tokenizer.name)
     tokenized = tokenizer_adapter.build(corpus=corpus, cfg=config.tokenizer)
+    token_byte_lengths = _build_token_byte_lengths(
+        id_to_token=tokenized.vocab.id_to_token,
+        base_vocab_size=tokenized.vocab.special.base_vocab_size,
+    )
 
     write_run_metadata(config=config, tokenized=tokenized, run_paths=run_paths)
 
@@ -651,6 +721,7 @@ def model_pipeline(
             use_bf16=use_bf16,
             compile_enabled=compile_enabled,
             run_paths=run_paths,
+            token_byte_lengths=token_byte_lengths,
             extra_metric_plugins=extra_metric_plugins,
             metrics_debug_timing=metrics_debug_timing,
         )
@@ -667,8 +738,12 @@ def model_pipeline(
         final_model_artifact_ref=train_result.final_model_artifact_ref,
         global_step=train_result.global_step,
         final_train_loss=train_result.final_train_loss,
+        final_train_bits_per_byte=train_result.final_train_bits_per_byte,
         final_val_loss=float(train_result.final_val_metrics["val_loss"]),
         final_val_perplexity=float(train_result.final_val_metrics["val_perplexity"]),
+        final_val_bits_per_byte=float(
+            train_result.final_val_metrics["val_bits_per_byte"]
+        ),
         completed_epochs=train_result.completed_epochs,
         epoch_end_validation_ran=train_result.epoch_end_validation_ran,
     )

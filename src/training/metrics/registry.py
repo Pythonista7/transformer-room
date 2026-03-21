@@ -12,7 +12,7 @@ from .plugins import (
     ForwardHookMetricsPlugin,
     GlobalGradNormPlugin,
     LayerNormGradNormPlugin,
-    LossPerplexityPlugin,
+    LossMetricsPlugin,
     ParameterOptimizerNormsPlugin,
     StepTimingAndMemoryPlugin,
 )
@@ -30,7 +30,7 @@ def build_default_metric_plugins(
 ) -> list[MetricPlugin]:
     wandb_cfg = config.logging.wandb
     plugins: list[MetricPlugin] = [
-        LossPerplexityPlugin(
+        LossMetricsPlugin(
             wandb_enabled=wandb_enabled,
             wandb_cfg=wandb_cfg,
         ),

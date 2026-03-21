@@ -16,6 +16,7 @@ class StepMetricsContext:
     train_loader_len: int
     tokens_seen_train: int
     step_loss: float | None
+    step_bits_per_byte: float | None = None
     step_time_ms: float | None = None
     forward_pass_time_ms: float | None = None
     backward_pass_time_ms: float | None = None
@@ -65,6 +66,7 @@ class EpochMetricsContext:
     avg_train_loss: float
     tokens_seen_train: int
     val_metrics: Mapping[str, float]
+    train_bits_per_byte_epoch: float | None = None
     epoch_time_s: float | None = None
 
 

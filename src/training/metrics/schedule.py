@@ -75,7 +75,11 @@ def build_metric_schedule(
     periodic_val_enabled = (
         wandb_enabled
         and wandb_cfg.val_every_n_steps > 0
-        and (wandb_cfg.enable_val_loss_vs_tokens or wandb_cfg.enable_perplexity)
+        and (
+            wandb_cfg.enable_val_loss_vs_tokens
+            or wandb_cfg.enable_perplexity
+            or wandb_cfg.enable_bits_per_byte
+        )
     )
     periodic_val_due = periodic_val_enabled and should_log_every(
         next_global_step,

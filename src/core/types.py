@@ -70,8 +70,10 @@ class RunResult:
     final_model_artifact_ref: str | None
     global_step: int
     final_train_loss: float
+    final_train_bits_per_byte: float
     final_val_loss: float
     final_val_perplexity: float
+    final_val_bits_per_byte: float
     completed_epochs: int
     epoch_end_validation_ran: bool
 

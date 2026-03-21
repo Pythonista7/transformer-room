@@ -159,6 +159,7 @@ class WandbMetricsConfig:
     enable_train_loss_vs_tokens: bool = True
     enable_val_loss_vs_tokens: bool = True
     enable_perplexity: bool = True
+    enable_bits_per_byte: bool = True
     enable_step_time: bool = True
     enable_peak_memory: bool = True
     enable_global_grad_norm: bool = True

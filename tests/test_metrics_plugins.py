@@ -16,7 +16,7 @@ from src.training.metrics.plugins.forward_hook_metrics import (
 )
 from src.training.metrics.plugins.global_grad_norm import GlobalGradNormPlugin
 from src.training.metrics.plugins.layernorm_grad_norm import LayerNormGradNormPlugin
-from src.training.metrics.plugins.loss_perplexity import LossPerplexityPlugin
+from src.training.metrics.plugins.loss_metrics import LossMetricsPlugin
 from src.training.metrics.plugins.parameter_optimizer_norms import ParameterOptimizerNormsPlugin
 from src.training.metrics.plugins.step_timing_memory import StepTimingAndMemoryPlugin
 
@@ -96,6 +96,7 @@ def _step_ctx(
     schedule: MetricSchedule,
     *,
     step_loss: float | None = 1.25,
+    step_bits_per_byte: float | None = 0.5,
     step_time_ms: float | None = None,
     forward_pass_time_ms: float | None = None,
     backward_pass_time_ms: float | None = None,
@@ -113,6 +114,7 @@ def _step_ctx(
         train_loader_len=10,
         tokens_seen_train=32,
         step_loss=step_loss,
+        step_bits_per_byte=step_bits_per_byte,
         step_time_ms=step_time_ms,
         forward_pass_time_ms=forward_pass_time_ms,
         backward_pass_time_ms=backward_pass_time_ms,
@@ -131,7 +133,11 @@ def _periodic_val_ctx(schedule: MetricSchedule) -> PeriodicValMetricsContext:
         batch_idx=0,
         train_loader_len=10,
         tokens_seen_train=32,
-        val_metrics={"val_loss": 1.75, "val_perplexity": 3.5},
+        val_metrics={
+            "val_loss": 1.75,
+            "val_perplexity": 3.5,
+            "val_bits_per_byte": 2.25,
+        },
     )
 
 
@@ -141,7 +147,12 @@ def _epoch_ctx() -> EpochMetricsContext:
         epoch=0,
         avg_train_loss=2.0,
         tokens_seen_train=64,
-        val_metrics={"val_loss": 1.5, "val_perplexity": 2.5},
+        val_metrics={
+            "val_loss": 1.5,
+            "val_perplexity": 2.5,
+            "val_bits_per_byte": 2.0,
+        },
+        train_bits_per_byte_epoch=2.75,
     )
 
 
@@ -153,14 +164,15 @@ def _count_forward_hooks(model: _FakeDecoderModel) -> int:
     return count
 
 
-class LossPerplexityPluginTests(unittest.TestCase):
+class LossMetricsPluginTests(unittest.TestCase):
     def test_enabled_metrics_emitted(self) -> None:
-        plugin = LossPerplexityPlugin(
+        plugin = LossMetricsPlugin(
             wandb_enabled=True,
             wandb_cfg=WandbMetricsConfig(
                 enable_train_loss_vs_tokens=True,
                 enable_val_loss_vs_tokens=True,
                 enable_perplexity=True,
+                enable_bits_per_byte=True,
             ),
         )
 
@@ -173,25 +185,30 @@ class LossPerplexityPluginTests(unittest.TestCase):
         self.assertIn("epoch", step_metrics)
         self.assertIn("train_loss_step", step_metrics)
         self.assertIn("train_perplexity", step_metrics)
+        self.assertIn("train_bits_per_byte", step_metrics)
         self.assertIn("tokens_seen_train", step_metrics)
 
         self.assertIn("epoch", periodic_metrics)
         self.assertIn("val_loss", periodic_metrics)
         self.assertIn("val_perplexity", periodic_metrics)
+        self.assertIn("val_bits_per_byte", periodic_metrics)
 
         self.assertIn("train_loss_epoch", epoch_metrics)
         self.assertIn("val_loss", epoch_metrics)
         self.assertIn("val_perplexity", epoch_metrics)
+        self.assertIn("val_bits_per_byte", epoch_metrics)
         self.assertIn("train_perplexity_epoch", epoch_metrics)
+        self.assertIn("train_bits_per_byte_epoch", epoch_metrics)
         self.assertIn("tokens_seen_train", epoch_metrics)
 
     def test_disabled_wandb_metrics_keep_epoch_progress_only(self) -> None:
-        plugin = LossPerplexityPlugin(
+        plugin = LossMetricsPlugin(
             wandb_enabled=True,
             wandb_cfg=WandbMetricsConfig(
                 enable_train_loss_vs_tokens=False,
                 enable_val_loss_vs_tokens=False,
                 enable_perplexity=False,
+                enable_bits_per_byte=False,
             ),
         )
         step_metrics = plugin.collect_step_metrics(_step_ctx(_make_schedule()))

@@ -254,6 +254,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
                 {
                     "train_loss_step": 1.5,
                     "train_perplexity": 2.0,
+                    "train_bits_per_byte": 2.5,
                     "ln_weight_grad_norm_first": 3.0,
                     "global_grad_norm": 4.0,
                     "activation_norm_last": 5.0,
@@ -283,6 +284,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
         self.assertEqual(logged_step, 10)
         self.assertIn("Loss Curves/train_loss_step", logged_metrics)
         self.assertIn("Perplexity/train_perplexity", logged_metrics)
+        self.assertIn("Bits per Byte/train_bits_per_byte", logged_metrics)
         self.assertIn("LN Norms/ln_weight_grad_norm_first", logged_metrics)
         self.assertIn("Grad Norm/global_grad_norm", logged_metrics)
         self.assertIn("Activation Norms/activation_norm_last", logged_metrics)
