@@ -12,11 +12,14 @@ from experiments.baseline.memory_experiments.microbatch_memory_frontier_exp impo
     TrialResult,
     _to_row_value,
     adaptive_find_frontier,
-    classify_oom_exception,
-    compute_avg_tokens_per_sec,
     run_trial,
 )
-from src.training.metrics import MetricSchedule, StepMetricsContext
+from src.training.metrics import (
+    MetricSchedule,
+    StepMetricsContext,
+    compute_avg_tokens_per_sec,
+)
+from src.training.runtime import classify_oom_exception
 
 
 def _trial(
@@ -388,7 +391,7 @@ class MainSummaryLoggingTests(unittest.TestCase):
                 return_value=True,
             ),
             mock.patch(
-                "experiments.baseline.memory_experiments.microbatch_memory_frontier_exp.ensure_wikitext_vocab_file",
+                "src.training.wikitext.ensure_wikitext_vocab_file",
                 return_value=128,
             ),
             mock.patch(

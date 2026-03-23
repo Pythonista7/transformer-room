@@ -1,3 +1,4 @@
+from .aggregation import compute_avg_tokens_per_sec, merge_logged_metrics_by_step
 from .contracts import (
     BaseMetricPlugin,
     EpochMetricsContext,
@@ -22,8 +23,10 @@ __all__ = [
     "MetricsEngine",
     "PeriodicValMetricsContext",
     "StepMetricsContext",
+    "compute_avg_tokens_per_sec",
     "build_default_metric_plugins",
     "build_metric_schedule",
     "get_decoder_layer_labels",
+    "merge_logged_metrics_by_step",
     "should_log_every",
 ]

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import gc
-import importlib
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Callable, Iterable
+from typing import Callable
 
 import torch
 
@@ -29,6 +27,9 @@ from src.config import (
 )
 from src.train import model_pipeline
 from src.training.metrics import BaseMetricPlugin, MetricPayload, StepMetricsContext
+from src.training.metrics import aggregation as metrics_aggregation
+from src.training import runtime as training_runtime
+from src.training import wikitext as training_wikitext
 
 PROJECT_NAME = "transformer-room-baseline"
 DATASET_NAME = "Salesforce/wikitext"
@@ -69,152 +70,10 @@ class TrialResult:
     error_message: str | None = None
 
 
-def _resolve_hf_load_dataset():
-    try:
-        datasets_module = importlib.import_module("datasets")
-    except ImportError as exc:
-        raise ImportError(
-            "Hugging Face dataset support requires the `datasets` package. "
-            "Install it with `pip install datasets`."
-        ) from exc
-
-    load_dataset = getattr(datasets_module, "load_dataset", None)
-    if not callable(load_dataset):
-        raise ImportError(
-            "Resolved `datasets` module does not expose `load_dataset`. "
-            "A local `datasets/` directory may be shadowing the Hugging Face package."
-        )
-    return load_dataset
-
-
-def _iter_wikitext_tokens(text: str) -> Iterable[str]:
-    for token in text.strip().split():
-        if token:
-            yield token
-
-
-def ensure_wikitext_vocab_file(
-    dataset_name: str,
-    dataset_config: str,
-    vocab_path: Path,
-) -> int:
-    if vocab_path.exists():
-        size = 0
-        with vocab_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    size += 1
-        if size <= 0:
-            raise ValueError(f"Existing vocab file is empty: {vocab_path}")
-        print(f"Using existing Wikitext vocab file: {vocab_path} | size={size:,}")
-        return size
-
-    load_dataset = _resolve_hf_load_dataset()
-    splits = ("train", "validation", "test")
-    token_set: set[str] = {" ", "\n", "\t"}
-
-    for split in splits:
-        dataset = load_dataset(dataset_name, name=dataset_config, split=split)
-        for row in dataset:
-            text = str(row.get("text", "")).strip()
-            if not text:
-                continue
-            token_set.update(_iter_wikitext_tokens(text))
-
-    ordered_tokens = sorted(token_set)
-    byte_tokens = [tuple(token.encode("utf-8")) for token in ordered_tokens]
-
-    vocab_path.parent.mkdir(parents=True, exist_ok=True)
-    with vocab_path.open("w", encoding="utf-8") as handle:
-        for token in byte_tokens:
-            handle.write(f"{token}\n")
-
-    print(
-        f"Created Wikitext vocab file: {vocab_path} | "
-        f"tokens={len(byte_tokens):,} | splits={','.join(splits)}"
-    )
-    return len(byte_tokens)
-
-
-def classify_oom_exception(exc: BaseException) -> bool:
-    if isinstance(exc, torch.OutOfMemoryError):
-        return True
-    message = str(exc).lower()
-    return any(
-        marker in message
-        for marker in (
-            "out of memory",
-            "cuda error: out of memory",
-            "cublas_status_alloc_failed",
-        )
-    )
-
-
-def clear_runtime_state() -> None:
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        reset_peak_memory_stats = getattr(torch.cuda, "reset_peak_memory_stats", None)
-        if callable(reset_peak_memory_stats):
-            try:
-                reset_peak_memory_stats()
-            except Exception:
-                pass
-    reset_compiler = getattr(getattr(torch, "compiler", None), "reset", None)
-    if callable(reset_compiler):
-        reset_compiler()
-
-
-def merge_logged_metrics_by_step(
-    logged_entries: list[tuple[int | None, dict[str, float]]],
-) -> dict[int, dict[str, float]]:
-    merged: dict[int, dict[str, float]] = {}
-    for step, payload in logged_entries:
-        if step is None:
-            continue
-        step_metrics = merged.setdefault(int(step), {})
-        for key, value in payload.items():
-            if isinstance(value, (int, float)):
-                step_metrics[key] = float(value)
-    return merged
-
-
-def compute_avg_tokens_per_sec(
-    logged_entries: list[tuple[int | None, dict[str, float]]],
-) -> float | None:
-    step_metrics = merge_logged_metrics_by_step(logged_entries)
-    if not step_metrics:
-        return None
-
-    rates: list[float] = []
-    prev_tokens_seen: float | None = None
-    for step in sorted(step_metrics):
-        metrics = step_metrics[step]
-        tokens_seen = metrics.get("tokens_seen_train")
-        step_time_ms = metrics.get("step_time_ms")
-        if tokens_seen is None:
-            continue
-        if step_time_ms is None or step_time_ms <= 0:
-            prev_tokens_seen = tokens_seen
-            continue
-
-        delta_tokens = (
-            tokens_seen if prev_tokens_seen is None else tokens_seen - prev_tokens_seen
-        )
-        prev_tokens_seen = tokens_seen
-        if delta_tokens <= 0:
-            continue
-        rates.append(delta_tokens / (step_time_ms / 1000.0))
-
-    if not rates:
-        return None
-    return float(mean(rates))
-
-
 def summarize_logged_steps(
     logged_entries: list[tuple[int | None, dict[str, float]]],
 ) -> LoggedStepSummary:
-    step_metrics = merge_logged_metrics_by_step(logged_entries)
+    step_metrics = metrics_aggregation.merge_logged_metrics_by_step(logged_entries)
     if not step_metrics:
         return LoggedStepSummary(
             max_peak_memory_gib=None,
@@ -245,7 +104,7 @@ def summarize_logged_steps(
         if peak_reserved_values
         else None,
         avg_step_time_ms=float(mean(step_times)) if step_times else None,
-        avg_tokens_per_sec=compute_avg_tokens_per_sec(logged_entries),
+        avg_tokens_per_sec=metrics_aggregation.compute_avg_tokens_per_sec(logged_entries),
     )
 
 
@@ -417,7 +276,7 @@ def run_trial(
                 f"epoch_end_validation_ran={epoch_end_validation_ran}"
             )
     except Exception as exc:
-        status = "oom" if classify_oom_exception(exc) else "error"
+        status = "oom" if training_runtime.classify_oom_exception(exc) else "error"
         error_type = exc.__class__.__name__
         error_message = str(exc)
         global_step = None
@@ -426,7 +285,7 @@ def run_trial(
         final_val_loss = None
     finally:
         logged_summary = summary_plugin.summary
-        clear_runtime_state()
+        training_runtime.clear_runtime_state()
 
     result = TrialResult(
         micro_batch_size=micro_batch_size,
@@ -700,7 +559,7 @@ def main() -> int:
         / "vocabs"
         / "wikitext2_v1_hf_vocab_bpe.txt"
     )
-    base_vocab_size = ensure_wikitext_vocab_file(
+    base_vocab_size = training_wikitext.ensure_wikitext_vocab_file(
         dataset_name=DATASET_NAME,
         dataset_config=DATASET_CONFIG,
         vocab_path=vocab_path,

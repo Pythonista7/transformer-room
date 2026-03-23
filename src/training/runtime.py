@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gc
 from contextlib import nullcontext
+from typing import Iterable
 
 import torch
 
@@ -101,3 +103,63 @@ def maybe_compile_model(
         return compiled_model, True, "enabled"
     except Exception as exc:  # pragma: no cover - backend-specific failure paths.
         return model, False, f"failed: {exc}"
+
+
+def classify_oom_exception(exc: BaseException) -> bool:
+    if isinstance(exc, torch.OutOfMemoryError):
+        return True
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "out of memory",
+            "cuda error: out of memory",
+            "cublas_status_alloc_failed",
+        )
+    )
+
+
+def clear_runtime_state() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        reset_peak_memory_stats = getattr(torch.cuda, "reset_peak_memory_stats", None)
+        if callable(reset_peak_memory_stats):
+            try:
+                reset_peak_memory_stats()
+            except Exception:
+                pass
+    elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+        empty_cache = getattr(torch.mps, "empty_cache", None)
+        if callable(empty_cache):
+            empty_cache()
+    reset_compiler = getattr(getattr(torch, "compiler", None), "reset", None)
+    if callable(reset_compiler):
+        reset_compiler()
+
+
+def preflight_dynamo_activation_memory_budget_api(
+    activation_memory_budgets: Iterable[float | None],
+) -> None:
+    needs_budget = any(budget is not None for budget in activation_memory_budgets)
+    if not needs_budget:
+        return
+
+    dynamo_module = getattr(torch, "_dynamo", None)
+    if dynamo_module is None:
+        raise RuntimeError(
+            "Budgeted compile variants were requested, but torch._dynamo is unavailable."
+        )
+    _ = dynamo_module
+
+    functorch_module = getattr(torch, "_functorch", None)
+    functorch_config = getattr(functorch_module, "config", None)
+    if functorch_config is None or not hasattr(
+        functorch_config,
+        "activation_memory_budget",
+    ):
+        raise RuntimeError(
+            "Budgeted compile variants were requested, but "
+            "torch._functorch.config.activation_memory_budget is unavailable. "
+            "This experiment is configured to fail early in this case."
+        )

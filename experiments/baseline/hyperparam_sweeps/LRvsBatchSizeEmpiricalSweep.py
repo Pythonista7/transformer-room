@@ -1,10 +1,7 @@
 from __future__ import annotations
-import gc
-import importlib
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
 
 import torch
 
@@ -25,74 +22,8 @@ from src.config import (
     WandbMetricsConfig,
 )
 from src.train import model_pipeline
-
-
-def _resolve_hf_load_dataset():
-    try:
-        datasets_module = importlib.import_module("datasets")
-    except ImportError as exc:
-        raise ImportError(
-            "Hugging Face dataset support requires the `datasets` package. "
-            "Install it with `pip install datasets`."
-        ) from exc
-
-    load_dataset = getattr(datasets_module, "load_dataset", None)
-    if not callable(load_dataset):
-        raise ImportError(
-            "Resolved `datasets` module does not expose `load_dataset`. "
-            "A local `datasets/` directory may be shadowing the Hugging Face package."
-        )
-
-    return load_dataset
-
-
-def _iter_wikitext_tokens(text: str) -> Iterable[str]:
-    for token in text.strip().split():
-        if token:
-            yield token
-
-
-def ensure_wikitext_vocab_file(
-    dataset_name: str,
-    dataset_config: str,
-    vocab_path: Path,
-) -> int:
-    if vocab_path.exists():
-        size = 0
-        with vocab_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    size += 1
-        if size <= 0:
-            raise ValueError(f"Existing vocab file is empty: {vocab_path}")
-        print(f"Using existing Wikitext vocab file: {vocab_path} | size={size:,}")
-        return size
-
-    load_dataset = _resolve_hf_load_dataset()
-    splits = ("train", "validation", "test")
-    token_set: set[str] = {" ", "\n", "\t"}
-
-    for split in splits:
-        dataset = load_dataset(dataset_name, name=dataset_config, split=split)
-        for row in dataset:
-            text = str(row.get("text", "")).strip()
-            if not text:
-                continue
-            token_set.update(_iter_wikitext_tokens(text))
-
-    ordered_tokens = sorted(token_set)
-    byte_tokens = [tuple(token.encode("utf-8")) for token in ordered_tokens]
-
-    vocab_path.parent.mkdir(parents=True, exist_ok=True)
-    with vocab_path.open("w", encoding="utf-8") as handle:
-        for token in byte_tokens:
-            handle.write(f"{token}\n")
-
-    print(
-        f"Created Wikitext vocab file: {vocab_path} | "
-        f"tokens={len(byte_tokens):,} | splits={','.join(splits)}"
-    )
-    return len(byte_tokens)
+from src.training import runtime as training_runtime
+from src.training import wikitext as training_wikitext
 
 
 def _format_lr_slug(learning_rate: float) -> str:
@@ -123,7 +54,7 @@ def build_config(
         / "vocabs"
         / "wikitext2_v1_hf_vocab_bpe.txt"
     )
-    base_vocab_size = ensure_wikitext_vocab_file(
+    base_vocab_size = training_wikitext.ensure_wikitext_vocab_file(
         dataset_name=dataset_name,
         dataset_config=dataset_config,
         vocab_path=vocab_path,
@@ -248,13 +179,7 @@ def main() -> int:
             )
 
             del result
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            elif hasattr(torch, "mps") and torch.backends.mps.is_available():
-                empty_cache = getattr(torch.mps, "empty_cache", None)
-                if callable(empty_cache):
-                    empty_cache()
+            training_runtime.clear_runtime_state()
 
     print("Sweep summary:")
     for summary in results:
