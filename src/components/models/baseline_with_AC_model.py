@@ -50,6 +50,7 @@ class ACEveryN_DecoderModel(nn.Module):
                     n_heads=n_heads,
                     dropout=dropout,
                     attention_impl=attention_impl,
+                    norm_placement="post"
                 )
                 for _ in range(self.layer_count)
             ]

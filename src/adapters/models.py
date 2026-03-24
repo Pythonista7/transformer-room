@@ -29,6 +29,7 @@ class BaselineDecoderModelAdapter:
             dropout=cfg.dropout,
             attention_impl=cfg.attention_impl,
             pad_id=special.pad_id,
+            norm_placement=cfg.norm_placement
         )
 
 

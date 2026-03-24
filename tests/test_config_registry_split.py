@@ -187,6 +187,26 @@ class ConfigValidationTests(unittest.TestCase):
         ):
             validate_experiment_config(config)
 
+    def test_norm_placement_pre_passes_validation(self) -> None:
+        """Validates: config accepts `model.norm_placement="pre"` for baseline decoder.
+        Why: we need an explicit positive check so pre-norm configs are guaranteed to remain runnable.
+        """
+        config = make_config()
+        config.model.norm_placement = "pre"
+        validate_experiment_config(config)
+
+    def test_invalid_norm_placement_fails(self) -> None:
+        """Validates: invalid `model.norm_placement` values are rejected with a clear error.
+        Why: without this guard, typos can silently route to wrong code paths and invalidate experiment conclusions.
+        """
+        config = make_config()
+        config.model.norm_placement = "not_real"  # type: ignore[assignment]
+        with self.assertRaisesRegex(
+            ValueError,
+            "model.norm_placement must be one of: pre, post",
+        ):
+            validate_experiment_config(config)
+
     def test_invalid_compile_warmup_steps_fails(self) -> None:
         config = make_config()
         config.run.compile_warmup_steps = -1

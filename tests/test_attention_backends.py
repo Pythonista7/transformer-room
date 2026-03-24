@@ -16,6 +16,24 @@ from src.training.metrics.plugins import get_decoder_layer_labels
 from src.training.metrics.plugins.forward_hook_metrics import ForwardHookMetricsPlugin
 
 
+class _RecorderAttention(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_q: torch.Tensor | None = None
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        *,
+        is_causal: bool,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del is_causal
+        del key_padding_mask
+        self.last_q = q.detach().clone()
+        return torch.zeros_like(q)
+
+
 def _metric_schedule(*, capture_attention_entropy: bool) -> MetricSchedule:
     return MetricSchedule(
         should_log_step_metrics=False,
@@ -104,6 +122,7 @@ class AttentionBackendSelectionTests(unittest.TestCase):
             n_heads=2,
             dropout=0.25,
             attention_impl="basic",
+            norm_placement="post"
         )
 
         self.assertFalse(hasattr(block, "attn_dropout"))
@@ -115,10 +134,76 @@ class AttentionBackendSelectionTests(unittest.TestCase):
             n_heads=2,
             dropout=0.25,
             attention_impl="sdpa",
+            norm_placement="post"
         )
 
         self.assertFalse(hasattr(block, "attn_dropout"))
         self.assertEqual(block.multi_head_attention.p, 0.25)
+
+    def test_baseline_model_adds_final_layer_norm_only_for_pre_norm(self) -> None:
+        """Validates: `BaselineModel` creates `final_ln` only for pre-norm mode.
+        Why: pre-norm requires a final normalization pass before logits; post-norm should not add this extra layer.
+        """
+        pre_model = BaselineModel(
+            vocab_size=32,
+            layers=1,
+            d_model=8,
+            n_heads=2,
+            pad_id=31,
+            norm_placement="pre",
+        )
+        post_model = BaselineModel(
+            vocab_size=32,
+            layers=1,
+            d_model=8,
+            n_heads=2,
+            pad_id=31,
+            norm_placement="post",
+        )
+
+        self.assertTrue(hasattr(pre_model, "final_ln"))
+        self.assertFalse(hasattr(post_model, "final_ln"))
+
+    def test_pre_norm_block_passes_normalized_input_to_attention(self) -> None:
+        """Validates: pre-norm path feeds `ln1(Q)` into attention, not raw `Q`.
+        Why: this is the defining behavior of pre-norm; regressions here silently change training dynamics.
+        """
+        block = SelfAttnDecoderBlock(
+            d_model=8,
+            n_heads=2,
+            norm_placement="pre",
+        )
+        recorder = _RecorderAttention()
+        block.multi_head_attention = recorder
+        q = torch.randn(2, 4, 8)
+        _ = block(q)
+
+        expected = block.ln1(q)
+        captured = recorder.last_q
+        self.assertIsNotNone(captured)
+        if captured is None:
+            self.fail("Expected attention module to receive an input tensor.")
+        self.assertTrue(torch.allclose(captured, expected))
+
+    def test_post_norm_block_passes_raw_input_to_attention(self) -> None:
+        """Validates: post-norm path feeds raw `Q` into attention.
+        Why: post-norm semantics differ from pre-norm at this exact point; this protects the intended architecture split.
+        """
+        block = SelfAttnDecoderBlock(
+            d_model=8,
+            n_heads=2,
+            norm_placement="post",
+        )
+        recorder = _RecorderAttention()
+        block.multi_head_attention = recorder
+        q = torch.randn(2, 4, 8)
+        _ = block(q)
+
+        captured = recorder.last_q
+        self.assertIsNotNone(captured)
+        if captured is None:
+            self.fail("Expected attention module to receive an input tensor.")
+        self.assertTrue(torch.allclose(captured, q))
 
 
 class BasicAttentionDropoutTests(unittest.TestCase):

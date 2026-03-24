@@ -7,6 +7,7 @@ from typing import Literal
 from .types import SpecialTokenIds
 
 AttentionImplementation = Literal["basic", "sdpa"]
+NormPlacement = Literal["pre","post"]
 
 
 @dataclass(slots=True)
@@ -69,6 +70,7 @@ class BaselineDecoderConfig:
     layers: int = 2
     dropout: float = 0.1
     attention_impl: AttentionImplementation = "basic"
+    norm_placement: NormPlacement = "post"
 
 
 @dataclass(slots=True)
@@ -367,6 +369,11 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError(
             "model.attention_impl must be one of: basic, sdpa."
         )
+    if (
+        config.model.name == "baseline_decoder"
+        and config.model.norm_placement not in {"pre", "post"}
+    ):
+        raise ValueError("model.norm_placement must be one of: pre, post.")
     if config.model.d_model % config.model.n_heads != 0:
         raise ValueError(
             "model.d_model must be divisible by model.n_heads "
