@@ -45,7 +45,7 @@ D_MODEL = 128
 N_HEADS = 8
 SHALLOW_LAYERS = 4
 DEEP_LAYERS = 20
-EFFECTIVE_BATCH_SIZE = 64
+EFFECTIVE_BATCH_SIZE = 32
 SEQ_LEN = 128
 STRIDE = 128
 EPOCHS = 1
@@ -183,6 +183,7 @@ def _build_variant_config(
             resume_from_checkpoint=False,
             checkpoint_every_n_steps=0,
             seed=SEED,
+            use_torch_compile=True
         ),
         dataset=HFTextDatasetConfig(
             dataset_name=DATASET_NAME,
