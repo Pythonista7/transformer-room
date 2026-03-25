@@ -24,7 +24,7 @@ from src.config import (
 )
 from src.core.registry import LOGGER_ADAPTERS
 from src.train import model_pipeline
-from src.training.optimizer import build_optimizer
+from src.training.optimizer import build_lr_scheduler, build_optimizer
 from src.training.metrics import BaseMetricPlugin, MicroBatchMetricsContext, StepMetricsContext
 
 
@@ -145,6 +145,8 @@ def _make_config(
     resume_from_checkpoint: bool = False,
     checkpoint_every_n_steps: int = 0,
     wandb_cfg: WandbMetricsConfig | None = None,
+    lr_warmup_steps: int = 0,
+    lr_warmup_start_factor: float = 0.0,
 ) -> ExperimentConfig:
     dataset_path, vocab_path, artifacts_root = _make_dataset(tmp_path)
     resolved_micro_batch_size = (
@@ -184,6 +186,8 @@ def _make_config(
             micro_batch_size=micro_batch_size,
             accumulation_steps=accumulation_steps,
             lr_scaling=lr_scaling,
+            lr_warmup_steps=lr_warmup_steps,
+            lr_warmup_start_factor=lr_warmup_start_factor,
             epochs=1,
             optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
             seq_len=8,
@@ -373,6 +377,68 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
                 places=12,
             )
 
+    def test_warmup_scheduler_builder_disabled_when_warmup_is_off(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+            )
+            model = torch.nn.Linear(2, 1, bias=False)
+            resolved = resolve_train_learning_rate(cfg.train)
+            optimizer = build_optimizer(
+                model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+
+            self.assertIsNone(build_lr_scheduler(optimizer, cfg))
+
+    def test_warmup_scheduler_builder_uses_torch_scheduler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+                lr_warmup_steps=4,
+                lr_warmup_start_factor=0.25,
+            )
+            model = torch.nn.Linear(2, 1, bias=False)
+            resolved = resolve_train_learning_rate(cfg.train)
+            optimizer = build_optimizer(
+                model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+
+            scheduler = build_lr_scheduler(optimizer, cfg)
+            self.assertIsNotNone(scheduler)
+            self.assertEqual(scheduler.__class__.__name__, "LinearLR")
+
+    def test_zero_start_factor_uses_lambda_scheduler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+                lr_warmup_steps=4,
+                lr_warmup_start_factor=0.0,
+            )
+            model = torch.nn.Linear(2, 1, bias=False)
+            resolved = resolve_train_learning_rate(cfg.train)
+            optimizer = build_optimizer(
+                model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+
+            scheduler = build_lr_scheduler(optimizer, cfg)
+            self.assertIsNotNone(scheduler)
+            self.assertEqual(scheduler.__class__.__name__, "LambdaLR")
+
     def test_step_zero_logs_lr_scaling_diagnostics_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = _make_config(
@@ -406,6 +472,115 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
             self.assertAlmostEqual(payload["lr_scale_factor"], 2**0.5, places=9)
             self.assertAlmostEqual(payload["lr_applied"], 1e-3 * (2**0.5), places=9)
             self.assertEqual(payload["lr_scaling_active"], 1.0)
+            self.assertIn("lr_warmup_steps", payload)
+            self.assertIn("lr_warmup_start_factor", payload)
+
+    def test_logged_lr_current_follows_warmup_progression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name="warmup-progress-run",
+                provider="wandb",
+                effective_batch_size=2,
+                lr_warmup_steps=4,
+                lr_warmup_start_factor=0.25,
+                wandb_cfg=WandbMetricsConfig(
+                    log_every_n_steps=1,
+                    diagnostics_every_n_steps=10,
+                    val_every_n_steps=0,
+                    attention_entropy_every_n_steps=10,
+                    attention_entropy_head_cap=1,
+                    attention_entropy_token_cap=8,
+                ),
+            )
+
+            model_pipeline(cfg)
+            session = self.recording_adapter.sessions[-1]
+            lr_values = [
+                payload["lr_current"]
+                for step, payload in session.logged
+                if step is not None and "lr_current" in payload
+            ]
+            self.assertGreaterEqual(len(lr_values), 4)
+            self.assertEqual(
+                [round(value, 12) for value in lr_values[:4]],
+                [
+                    round(0.00025, 12),
+                    round(0.0005, 12),
+                    round(0.00075, 12),
+                    round(0.001, 12),
+                ],
+            )
+
+    def test_warmup_scheduler_state_restores_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+                lr_warmup_steps=4,
+                lr_warmup_start_factor=0.25,
+            )
+            model = torch.nn.Linear(2, 1, bias=False)
+            restored_model = torch.nn.Linear(2, 1, bias=False)
+            resolved = resolve_train_learning_rate(cfg.train)
+
+            optimizer = build_optimizer(
+                model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+            scheduler = build_lr_scheduler(optimizer, cfg)
+            self.assertIsNotNone(scheduler)
+            optimizer.step()
+            scheduler.step()
+            optimizer.step()
+            scheduler.step()
+            saved_optimizer_state = optimizer.state_dict()
+            saved_scheduler_state = scheduler.state_dict()
+
+            restored_optimizer = build_optimizer(
+                restored_model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+            restored_scheduler = build_lr_scheduler(restored_optimizer, cfg)
+            self.assertIsNotNone(restored_scheduler)
+            restored_optimizer.load_state_dict(saved_optimizer_state)
+            restored_scheduler.load_state_dict(saved_scheduler_state)
+
+            self.assertAlmostEqual(
+                float(restored_optimizer.param_groups[0]["lr"]),
+                float(optimizer.param_groups[0]["lr"]),
+                places=12,
+            )
+            restored_optimizer.step()
+            restored_scheduler.step()
+            optimizer.step()
+            scheduler.step()
+            self.assertAlmostEqual(
+                float(restored_optimizer.param_groups[0]["lr"]),
+                float(optimizer.param_groups[0]["lr"]),
+                places=12,
+            )
+
+    def test_checkpoint_includes_scheduler_state_when_warmup_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name="warmup-checkpoint-run",
+                provider="console",
+                effective_batch_size=4,
+                lr_warmup_steps=4,
+                lr_warmup_start_factor=0.25,
+                checkpoint_every_n_steps=1,
+            )
+
+            result = model_pipeline(cfg)
+            checkpoint = torch.load(result.checkpoint_path, map_location="cpu")
+            self.assertIn("scheduler_state_dict", checkpoint)
+            self.assertIsNotNone(checkpoint["scheduler_state_dict"])
 
     def test_disabling_step_timing_avoids_sync_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

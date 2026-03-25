@@ -17,6 +17,7 @@ def _schedule() -> MetricSchedule:
     return MetricSchedule(
         should_log_step_metrics=True,
         should_log_diagnostics=True,
+        should_log_layer_grad_norms=False,
         should_log_parameter_optimizer_norms=True,
         should_log_attention_entropy=False,
         capture_activation_norms=False,

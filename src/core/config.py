@@ -112,6 +112,8 @@ class TrainConfig:
     micro_batch_size: int | None = None
     accumulation_steps: int | None = None
     lr_scaling: Literal["none", "sqrt"] = "none"
+    lr_warmup_steps: int = 0
+    lr_warmup_start_factor: float = 0.0
     seq_len: int = 128
     stride: int = 128
     data_fraction: float = 1.0
@@ -165,6 +167,7 @@ class WandbMetricsConfig:
     enable_step_time: bool = True
     enable_peak_memory: bool = True
     enable_global_grad_norm: bool = True
+    enable_layer_grad_norms: bool = False
     enable_global_param_norm: bool = False
     enable_layer_param_norms: bool = False
     enable_param_update_norm: bool = False
@@ -176,6 +179,8 @@ class WandbMetricsConfig:
     watch_model: bool = False
     log_every_n_steps: int = 10
     diagnostics_every_n_steps: int = 50
+    layer_grad_norm_stride: int = 1
+    layer_grad_norms_every_n_steps: int | None = None
     parameter_optimizer_norms_every_n_steps: int | None = None
     val_every_n_steps: int = 250
     attention_entropy_every_n_steps: int = 200
@@ -398,6 +403,10 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
     if config.train.optimizer.weight_decay < 0:
         raise ValueError("train.optimizer.weight_decay must be >= 0.")
     resolve_train_learning_rate(config.train)
+    if config.train.lr_warmup_steps < 0:
+        raise ValueError("train.lr_warmup_steps must be >= 0.")
+    if not 0.0 <= config.train.lr_warmup_start_factor <= 1.0:
+        raise ValueError("train.lr_warmup_start_factor must be in [0, 1].")
     if config.train.seq_len <= 0:
         raise ValueError("train.seq_len must be > 0.")
     if config.train.stride <= 0:
@@ -433,6 +442,15 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("logging.wandb.log_every_n_steps must be > 0.")
     if wandb_cfg.diagnostics_every_n_steps <= 0:
         raise ValueError("logging.wandb.diagnostics_every_n_steps must be > 0.")
+    if wandb_cfg.layer_grad_norm_stride <= 0:
+        raise ValueError("logging.wandb.layer_grad_norm_stride must be > 0.")
+    if (
+        wandb_cfg.layer_grad_norms_every_n_steps is not None
+        and wandb_cfg.layer_grad_norms_every_n_steps <= 0
+    ):
+        raise ValueError(
+            "logging.wandb.layer_grad_norms_every_n_steps must be > 0 when set."
+        )
     if (
         wandb_cfg.parameter_optimizer_norms_every_n_steps is not None
         and wandb_cfg.parameter_optimizer_norms_every_n_steps <= 0

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Sequence
 import torch
 from torch import optim
 from torch.nn import CrossEntropyLoss
+from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -47,6 +48,7 @@ from .training.metrics import (
     get_decoder_layer_labels,
 )
 from .training.optimizer import (
+    build_lr_scheduler,
     build_optimizer,
     move_optimizer_state_to_device,
     scale_gradients_by_token_count,
@@ -105,6 +107,7 @@ def train_loop(
     val_loader: DataLoader,
     loss_fn: CrossEntropyLoss,
     optimizer: optim.Optimizer,
+    scheduler: LRScheduler | None,
     config: ExperimentConfig,
     logger,
     device: torch.device,
@@ -164,6 +167,7 @@ def train_loop(
             "tokens_seen_train": tokens_seen_train,
             "model_state_dict": checkpoint_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": None if scheduler is None else scheduler.state_dict(),
             "config": asdict(config),
         }
         torch.save(checkpoint, run_paths["checkpoint_path"])
@@ -212,6 +216,9 @@ def train_loop(
         checkpoint_model.load_state_dict(model_state_dict)
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         move_optimizer_state_to_device(optimizer, device)
+        scheduler_state_dict = checkpoint.get("scheduler_state_dict")
+        if scheduler is not None and scheduler_state_dict is not None:
+            scheduler.load_state_dict(scheduler_state_dict)
 
         start_epoch = int(checkpoint.get("epoch", 0))
         start_batch_idx = int(checkpoint.get("batch_idx", 0))
@@ -406,9 +413,11 @@ def train_loop(
                 if should_measure_step_timing:
                     synchronize_if_cuda(device)
                     optim_start = time.perf_counter()
-                    
+                step_lr_current = float(optimizer.param_groups[0]["lr"])
                 # UPDATE WEIGHTS BASED ON CALCULATED GRADIENTS    
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
                 
                 optim_step_time_ms: float | None = None
                 step_time_ms: float | None = None
@@ -438,6 +447,7 @@ def train_loop(
                     step_time_ms=step_time_ms,
                     peak_memory_gib=peak_memory_gib,
                     peak_reserved_memory_gib=peak_reserved_memory_gib,
+                    lr_current=step_lr_current,
                 )
                 metrics_engine.after_optimizer_step(step_ctx)
 
@@ -655,6 +665,7 @@ def model_pipeline(
         config,
         learning_rate=learning_rate_cfg.applied_learning_rate,
     )
+    scheduler = build_lr_scheduler(optimizer, config)
     # We need to do reduction="sum" because we have grad-acc, if we set it to "mean" then
     # at the end of effective batch we will have (avg_loss_mb_1 + avg_loss_mb_2 ...)/num_of_mb which i wrong,
     # what we want is (loss_mb_1 + loss_mb_2 + ...)/num_of_mb hence we use reduction="sum"
@@ -701,6 +712,8 @@ def model_pipeline(
                 "lr_scale_factor": float(learning_rate_cfg.scale_factor),
                 "lr_applied": float(learning_rate_cfg.applied_learning_rate),
                 "lr_scaling_active": float(1 if learning_rate_cfg.scaling_active else 0),
+                "lr_warmup_steps": float(config.train.lr_warmup_steps),
+                "lr_warmup_start_factor": float(config.train.lr_warmup_start_factor),
             },
             step=0,
         )
@@ -715,6 +728,7 @@ def model_pipeline(
             val_loader=val_loader,
             loss_fn=loss_fn,
             optimizer=optimizer,
+            scheduler=scheduler,
             config=config,
             logger=logger,
             device=device,

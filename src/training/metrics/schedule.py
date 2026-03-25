@@ -9,6 +9,7 @@ from src.core.config import WandbMetricsConfig
 class MetricSchedule:
     should_log_step_metrics: bool
     should_log_diagnostics: bool
+    should_log_layer_grad_norms: bool
     should_log_parameter_optimizer_norms: bool
     should_log_attention_entropy: bool
     capture_activation_norms: bool
@@ -28,6 +29,11 @@ def build_metric_schedule(
     wandb_cfg: WandbMetricsConfig,
     layer_labels_available: bool,
 ) -> MetricSchedule:
+    layer_grad_norms_every_n_steps = (
+        wandb_cfg.layer_grad_norms_every_n_steps
+        if wandb_cfg.layer_grad_norms_every_n_steps is not None
+        else wandb_cfg.diagnostics_every_n_steps
+    )
     parameter_optimizer_metrics_enabled = any(
         (
             wandb_cfg.enable_global_param_norm,
@@ -47,6 +53,11 @@ def build_metric_schedule(
     )
     should_log_diagnostics = (
         wandb_enabled and should_log_every(next_global_step, wandb_cfg.diagnostics_every_n_steps)
+    )
+    should_log_layer_grad_norms = (
+        wandb_enabled
+        and wandb_cfg.enable_layer_grad_norms
+        and should_log_every(next_global_step, layer_grad_norms_every_n_steps)
     )
     should_log_parameter_optimizer_norms = (
         wandb_enabled
@@ -68,6 +79,7 @@ def build_metric_schedule(
     should_log_this_step = (
         should_log_step_metrics
         or should_log_diagnostics
+        or should_log_layer_grad_norms
         or should_log_parameter_optimizer_norms
         or should_log_attention_entropy
     )
@@ -89,6 +101,7 @@ def build_metric_schedule(
     return MetricSchedule(
         should_log_step_metrics=should_log_step_metrics,
         should_log_diagnostics=should_log_diagnostics,
+        should_log_layer_grad_norms=should_log_layer_grad_norms,
         should_log_parameter_optimizer_norms=should_log_parameter_optimizer_norms,
         should_log_attention_entropy=should_log_attention_entropy,
         capture_activation_norms=capture_activation_norms,

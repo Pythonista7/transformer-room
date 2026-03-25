@@ -26,6 +26,7 @@ class StepMetricsContext:
     include_in_perf_aggregates: bool = True
     model: object | None = None
     optimizer: object | None = None
+    lr_current: float | None = None
 
     @property
     def epoch_progress(self) -> float:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import optim
+from torch.optim.lr_scheduler import LRScheduler, LambdaLR, LinearLR
 
 from ..core.config import ExperimentConfig
 
@@ -40,6 +41,33 @@ def build_optimizer(
     raise ValueError(
         f"Unsupported train.optimizer.name '{optimizer_cfg.name}'. "
         "Expected one of: adam, adamw, sgd."
+    )
+
+
+def build_lr_scheduler(
+    optimizer: optim.Optimizer,
+    config: ExperimentConfig,
+) -> LRScheduler | None:
+    warmup_steps = int(config.train.lr_warmup_steps)
+    start_factor = float(config.train.lr_warmup_start_factor)
+    if warmup_steps <= 1 or start_factor >= 1.0:
+        return None
+
+    # The user-facing contract is that warmup step N already uses the full LR.
+    # That means we need N-1 scheduler transitions after the initial LR is set.
+    total_iters = warmup_steps - 1
+    if start_factor <= 0.0:
+        # LinearLR rejects start_factor=0, so use a scheduler-defined lambda for zero-start warmup.
+        return LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: min(float(step) / float(total_iters), 1.0),
+        )
+
+    return LinearLR(
+        optimizer,
+        start_factor=start_factor,
+        end_factor=1.0,
+        total_iters=total_iters,
     )
 
 

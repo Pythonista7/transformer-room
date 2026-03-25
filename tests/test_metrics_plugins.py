@@ -15,6 +15,11 @@ from src.training.metrics.plugins.forward_hook_metrics import (
     compute_attention_entropy_from_module_inputs,
 )
 from src.training.metrics.plugins.global_grad_norm import GlobalGradNormPlugin
+from src.training.metrics.plugins.layer_grad_norm import (
+    LayerGradNormPlugin,
+    compute_layer_grad_norms,
+    get_sampled_decoder_layer_indices,
+)
 from src.training.metrics.plugins.layernorm_grad_norm import LayerNormGradNormPlugin
 from src.training.metrics.plugins.loss_metrics import LossMetricsPlugin
 from src.training.metrics.plugins.parameter_optimizer_norms import ParameterOptimizerNormsPlugin
@@ -71,6 +76,7 @@ def _make_schedule(
     *,
     should_log_step_metrics: bool = True,
     should_log_diagnostics: bool = True,
+    should_log_layer_grad_norms: bool = False,
     should_log_parameter_optimizer_norms: bool | None = None,
     should_log_attention_entropy: bool = True,
     capture_activation_norms: bool = True,
@@ -83,6 +89,7 @@ def _make_schedule(
     return MetricSchedule(
         should_log_step_metrics=should_log_step_metrics,
         should_log_diagnostics=should_log_diagnostics,
+        should_log_layer_grad_norms=should_log_layer_grad_norms,
         should_log_parameter_optimizer_norms=should_log_parameter_optimizer_norms,
         should_log_attention_entropy=should_log_attention_entropy,
         capture_activation_norms=capture_activation_norms,
@@ -97,6 +104,7 @@ def _step_ctx(
     *,
     step_loss: float | None = 1.25,
     step_bits_per_byte: float | None = 0.5,
+    lr_current: float | None = None,
     step_time_ms: float | None = None,
     forward_pass_time_ms: float | None = None,
     backward_pass_time_ms: float | None = None,
@@ -122,6 +130,7 @@ def _step_ctx(
         peak_memory_gib=peak_memory_gib,
         peak_reserved_memory_gib=peak_reserved_memory_gib,
         include_in_perf_aggregates=include_in_perf_aggregates,
+        lr_current=lr_current,
     )
 
 
@@ -220,6 +229,23 @@ class LossMetricsPluginTests(unittest.TestCase):
         self.assertEqual(set(step_metrics.keys()), {"epoch"})
         self.assertEqual(set(periodic_metrics.keys()), {"epoch"})
         self.assertEqual(set(epoch_metrics.keys()), {"epoch", "train_loss_epoch"})
+
+    def test_lr_current_is_emitted_on_logged_steps(self) -> None:
+        plugin = LossMetricsPlugin(
+            wandb_enabled=True,
+            wandb_cfg=WandbMetricsConfig(
+                enable_train_loss_vs_tokens=False,
+                enable_val_loss_vs_tokens=False,
+                enable_perplexity=False,
+                enable_bits_per_byte=False,
+            ),
+        )
+        step_metrics = plugin.collect_step_metrics(
+            _step_ctx(_make_schedule(), lr_current=1.25e-4)
+        )
+
+        self.assertEqual(step_metrics["lr_current"], 1.25e-4)
+        self.assertEqual(set(step_metrics.keys()), {"epoch", "lr_current"})
 
 
 class StepTimingAndMemoryPluginTests(unittest.TestCase):
@@ -351,6 +377,78 @@ class GradNormPluginTests(unittest.TestCase):
         disabled.after_backward(ctx)
         disabled_metrics = disabled.collect_step_metrics(ctx)
         self.assertEqual(disabled_metrics, {})
+
+    def test_layer_grad_norm_selection_includes_stride_and_endpoints(self) -> None:
+        model = _FakeDecoderModel(layers=5)
+        selected = get_sampled_decoder_layer_indices(model, stride=4)
+        self.assertEqual(selected, (0, 2, 4))
+
+    def test_layer_grad_norm_values_match_reference_formula(self) -> None:
+        model = _FakeDecoderModel(layers=4)
+        input_tensor = torch.randn(2, 4, 8)
+        loss = model(input_tensor).pow(2).mean()
+        loss.backward()
+
+        selected = get_sampled_decoder_layer_indices(model, stride=2)
+        actual = compute_layer_grad_norms(model, selected)
+        expected: dict[str, float] = {}
+        for layer_idx in selected:
+            layer_sq: torch.Tensor | None = None
+            for param in model.dec_layers[layer_idx].parameters():
+                if param.grad is None:
+                    continue
+                term = param.grad.detach().float().pow(2).sum()
+                layer_sq = term if layer_sq is None else layer_sq + term
+            if layer_sq is not None:
+                expected[f"layer_grad_norm_layer_{layer_idx}"] = float(layer_sq.sqrt().item())
+
+        self.assertEqual(set(actual.keys()), set(expected.keys()))
+        for key, expected_value in expected.items():
+            self.assertAlmostEqual(actual[key], expected_value, places=6)
+
+    def test_layer_grad_norm_plugin_respects_enable_flag_and_schedule(self) -> None:
+        model = _FakeDecoderModel(layers=4)
+        input_tensor = torch.randn(2, 4, 8)
+        loss = model(input_tensor).pow(2).mean()
+        loss.backward()
+        enabled_ctx = _step_ctx(_make_schedule(should_log_layer_grad_norms=True))
+        disabled_ctx = _step_ctx(_make_schedule(should_log_layer_grad_norms=False))
+
+        enabled = LayerGradNormPlugin(
+            wandb_cfg=WandbMetricsConfig(
+                enable_layer_grad_norms=True,
+                layer_grad_norm_stride=2,
+            ),
+            model=model,
+        )
+        enabled.on_step_start(enabled_ctx)
+        enabled.after_backward(enabled_ctx)
+        enabled_metrics = enabled.collect_step_metrics(enabled_ctx)
+        self.assertIn("layer_grad_norm_layer_0", enabled_metrics)
+        self.assertIn("layer_grad_norm_layer_2", enabled_metrics)
+        self.assertIn("layer_grad_norm_layer_3", enabled_metrics)
+
+        disabled_by_flag = LayerGradNormPlugin(
+            wandb_cfg=WandbMetricsConfig(
+                enable_layer_grad_norms=False,
+                layer_grad_norm_stride=2,
+            ),
+            model=model,
+        )
+        disabled_by_flag.on_step_start(enabled_ctx)
+        disabled_by_flag.after_backward(enabled_ctx)
+        self.assertEqual(disabled_by_flag.collect_step_metrics(enabled_ctx), {})
+
+        disabled_by_schedule = LayerGradNormPlugin(
+            wandb_cfg=WandbMetricsConfig(
+                enable_layer_grad_norms=True,
+                layer_grad_norm_stride=2,
+            ),
+            model=model,
+        )
+        disabled_by_schedule.on_step_start(disabled_ctx)
+        disabled_by_schedule.after_backward(disabled_ctx)
+        self.assertEqual(disabled_by_schedule.collect_step_metrics(disabled_ctx), {})
 
     def test_layernorm_grad_norm_enabled_and_disabled(self) -> None:
         model = _FakeDecoderModel()

@@ -16,6 +16,7 @@ class MetricScheduleTests(unittest.TestCase):
         )
         self.assertFalse(schedule.should_log_step_metrics)
         self.assertFalse(schedule.should_log_diagnostics)
+        self.assertFalse(schedule.should_log_layer_grad_norms)
         self.assertFalse(schedule.should_log_parameter_optimizer_norms)
         self.assertFalse(schedule.should_log_attention_entropy)
         self.assertFalse(schedule.capture_activation_norms)
@@ -39,6 +40,7 @@ class MetricScheduleTests(unittest.TestCase):
         )
         self.assertTrue(schedule.should_log_step_metrics)
         self.assertTrue(schedule.should_log_diagnostics)
+        self.assertFalse(schedule.should_log_layer_grad_norms)
         self.assertTrue(schedule.should_log_parameter_optimizer_norms)
         self.assertFalse(schedule.should_log_attention_entropy)
         self.assertTrue(schedule.capture_activation_norms)
@@ -60,9 +62,40 @@ class MetricScheduleTests(unittest.TestCase):
             layer_labels_available=True,
         )
         self.assertFalse(schedule.should_log_diagnostics)
+        self.assertFalse(schedule.should_log_layer_grad_norms)
         self.assertTrue(schedule.should_log_parameter_optimizer_norms)
         self.assertFalse(schedule.should_log_attention_entropy)
         self.assertTrue(schedule.should_log_this_step)
+
+    def test_layer_grad_norm_cadence_can_override_diagnostics(self) -> None:
+        cfg = WandbMetricsConfig(
+            diagnostics_every_n_steps=6,
+            layer_grad_norms_every_n_steps=5,
+            enable_layer_grad_norms=True,
+        )
+        schedule = build_metric_schedule(
+            next_global_step=10,
+            wandb_enabled=True,
+            wandb_cfg=cfg,
+            layer_labels_available=False,
+        )
+        self.assertFalse(schedule.should_log_diagnostics)
+        self.assertTrue(schedule.should_log_layer_grad_norms)
+        self.assertTrue(schedule.should_log_this_step)
+
+    def test_layer_grad_norm_defaults_to_diagnostics_cadence(self) -> None:
+        cfg = WandbMetricsConfig(
+            diagnostics_every_n_steps=4,
+            enable_layer_grad_norms=True,
+        )
+        schedule = build_metric_schedule(
+            next_global_step=8,
+            wandb_enabled=True,
+            wandb_cfg=cfg,
+            layer_labels_available=False,
+        )
+        self.assertTrue(schedule.should_log_diagnostics)
+        self.assertTrue(schedule.should_log_layer_grad_norms)
 
     def test_periodic_val_due_requires_val_metric_enabled(self) -> None:
         cfg = WandbMetricsConfig(

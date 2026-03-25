@@ -181,6 +181,7 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_step_time=False,
                     enable_peak_memory=False,
                     enable_global_grad_norm=False,
+                    enable_layer_grad_norms=False,
                     enable_global_param_norm=False,
                     enable_layer_param_norms=False,
                     enable_param_update_norm=False,
@@ -191,6 +192,8 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_attention_entropy=False,
                     log_every_n_steps=1,
                     diagnostics_every_n_steps=1,
+                    layer_grad_norm_stride=1,
+                    layer_grad_norms_every_n_steps=1,
                     val_every_n_steps=1,
                     attention_entropy_every_n_steps=1,
                     attention_entropy_head_cap=1,
@@ -204,6 +207,7 @@ class WandbMetricGatingTests(unittest.TestCase):
 
             keys = _flatten_logged_keys(session)
             self.assertIn("train_loss_epoch", keys)
+            self.assertIn("lr_current", keys)
             self.assertNotIn("train_loss_step", keys)
             self.assertNotIn("tokens_seen_train", keys)
             self.assertNotIn("val_loss", keys)
@@ -214,6 +218,7 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertNotIn("train_bits_per_byte", keys)
             self.assertNotIn("train_bits_per_byte_epoch", keys)
             self.assertNotIn("global_grad_norm", keys)
+            self.assertNotIn("layer_grad_norm_layer_0", keys)
             self.assertNotIn("global_param_norm", keys)
             self.assertNotIn("layer_param_norm_first", keys)
             self.assertNotIn("param_update_norm", keys)
@@ -239,6 +244,7 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_step_time=True,
                     enable_peak_memory=True,
                     enable_global_grad_norm=True,
+                    enable_layer_grad_norms=True,
                     enable_global_param_norm=True,
                     enable_layer_param_norms=True,
                     enable_param_update_norm=True,
@@ -249,6 +255,8 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_attention_entropy=True,
                     log_every_n_steps=1,
                     diagnostics_every_n_steps=1,
+                    layer_grad_norm_stride=1,
+                    layer_grad_norms_every_n_steps=1,
                     val_every_n_steps=1,
                     attention_entropy_every_n_steps=1,
                     attention_entropy_head_cap=1,
@@ -263,6 +271,7 @@ class WandbMetricGatingTests(unittest.TestCase):
             keys = _flatten_logged_keys(session)
             self.assertIn("train_loss_step", keys)
             self.assertIn("train_loss_epoch", keys)
+            self.assertIn("lr_current", keys)
             self.assertIn("tokens_seen_train", keys)
             self.assertIn("val_loss", keys)
             self.assertIn("train_perplexity", keys)
@@ -273,6 +282,7 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertIn("val_bits_per_byte", keys)
             self.assertIn("step_time_ms", keys)
             self.assertIn("global_grad_norm", keys)
+            self.assertIn("layer_grad_norm_layer_0", keys)
             self.assertIn("global_param_norm", keys)
             self.assertIn("layer_param_norm_first", keys)
             self.assertIn("param_update_norm", keys)
@@ -312,6 +322,7 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_step_time=False,
                     enable_peak_memory=False,
                     enable_global_grad_norm=True,
+                    enable_layer_grad_norms=True,
                     enable_global_param_norm=True,
                     enable_layer_param_norms=True,
                     enable_param_update_norm=True,
@@ -322,6 +333,8 @@ class WandbMetricGatingTests(unittest.TestCase):
                     enable_attention_entropy=True,
                     log_every_n_steps=1,
                     diagnostics_every_n_steps=1,
+                    layer_grad_norm_stride=1,
+                    layer_grad_norms_every_n_steps=1,
                     val_every_n_steps=1,
                     attention_entropy_every_n_steps=1,
                     attention_entropy_head_cap=1,
@@ -336,11 +349,13 @@ class WandbMetricGatingTests(unittest.TestCase):
 
             expected_step_subset = {
                 "epoch",
+                "lr_current",
                 "train_loss_step",
                 "tokens_seen_train",
                 "train_perplexity",
                 "train_bits_per_byte",
                 "global_grad_norm",
+                "layer_grad_norm_layer_0",
                 "global_param_norm",
                 "layer_param_norm_first",
                 "param_update_norm",

@@ -21,10 +21,15 @@ class LossMetricsPlugin(BaseMetricPlugin):
         self._wandb_cfg = wandb_cfg
 
     def collect_step_metrics(self, ctx: StepMetricsContext) -> MetricPayload:
-        if not ctx.schedule.should_log_this_step or ctx.step_loss is None:
+        if not ctx.schedule.should_log_this_step:
             return {}
 
         metrics: MetricPayload = {"epoch": ctx.epoch_progress}
+        if ctx.lr_current is not None:
+            metrics["lr_current"] = float(ctx.lr_current)
+        if ctx.step_loss is None:
+            return metrics
+
         if self._wandb_cfg.enable_train_loss_vs_tokens:
             metrics["train_loss_step"] = float(ctx.step_loss)
             metrics["tokens_seen_train"] = float(ctx.tokens_seen_train)

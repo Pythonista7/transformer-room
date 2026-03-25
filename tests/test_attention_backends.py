@@ -38,6 +38,7 @@ def _metric_schedule(*, capture_attention_entropy: bool) -> MetricSchedule:
     return MetricSchedule(
         should_log_step_metrics=False,
         should_log_diagnostics=False,
+        should_log_layer_grad_norms=False,
         should_log_parameter_optimizer_norms=False,
         should_log_attention_entropy=capture_attention_entropy,
         capture_activation_norms=False,

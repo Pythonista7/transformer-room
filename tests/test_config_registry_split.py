@@ -79,6 +79,11 @@ class ConfigValidationTests(unittest.TestCase):
         train_cfg = TrainConfig(effective_batch_size=8)
         self.assertEqual(train_cfg.lr_scaling, "none")
 
+    def test_train_warmup_defaults_to_disabled(self) -> None:
+        train_cfg = TrainConfig(effective_batch_size=8)
+        self.assertEqual(train_cfg.lr_warmup_steps, 0)
+        self.assertEqual(train_cfg.lr_warmup_start_factor, 0.0)
+
     def test_train_lr_scaling_requires_sqrt_when_accumulating(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
@@ -103,6 +108,15 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertAlmostEqual(resolved.scale_factor, 2**0.5, places=9)
         self.assertAlmostEqual(resolved.applied_learning_rate, 1e-3 * (2**0.5), places=9)
         self.assertTrue(resolved.scaling_active)
+
+    def test_train_warmup_fields_serialize(self) -> None:
+        config = make_config()
+        config.train.lr_warmup_steps = 25
+        config.train.lr_warmup_start_factor = 0.2
+
+        payload = config.to_dict()
+        self.assertEqual(payload["train"]["lr_warmup_steps"], 25)
+        self.assertEqual(payload["train"]["lr_warmup_start_factor"], 0.2)
 
     def test_validate_experiment_config_rejects_invalid_lr_scaling_mode(self) -> None:
         config = make_config()
@@ -164,6 +178,21 @@ class ConfigValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError,
             "train.optimizer.weight_decay must be >= 0",
+        ):
+            validate_experiment_config(config)
+
+    def test_invalid_lr_warmup_steps_fails(self) -> None:
+        config = make_config()
+        config.train.lr_warmup_steps = -1
+        with self.assertRaisesRegex(ValueError, "train.lr_warmup_steps must be >= 0"):
+            validate_experiment_config(config)
+
+    def test_invalid_lr_warmup_start_factor_fails(self) -> None:
+        config = make_config()
+        config.train.lr_warmup_start_factor = 1.5
+        with self.assertRaisesRegex(
+            ValueError,
+            "train.lr_warmup_start_factor must be in \\[0, 1\\]",
         ):
             validate_experiment_config(config)
 
@@ -258,6 +287,29 @@ class ConfigValidationTests(unittest.TestCase):
             wandb=WandbMetricsConfig(val_every_n_steps=-1),
         )
         with self.assertRaisesRegex(ValueError, "val_every_n_steps must be >= 0"):
+            validate_experiment_config(config)
+
+    def test_invalid_wandb_layer_grad_norm_stride_fails(self) -> None:
+        config = make_config()
+        config.run.run_name = "wandb-validation-run"
+        config.logging = LoggingConfig(
+            provider="wandb",
+            wandb=WandbMetricsConfig(layer_grad_norm_stride=0),
+        )
+        with self.assertRaisesRegex(ValueError, "layer_grad_norm_stride must be > 0"):
+            validate_experiment_config(config)
+
+    def test_invalid_wandb_layer_grad_norms_every_n_steps_fails(self) -> None:
+        config = make_config()
+        config.run.run_name = "wandb-validation-run"
+        config.logging = LoggingConfig(
+            provider="wandb",
+            wandb=WandbMetricsConfig(layer_grad_norms_every_n_steps=0),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "layer_grad_norms_every_n_steps must be > 0",
+        ):
             validate_experiment_config(config)
 
     def test_invalid_wandb_param_optimizer_norms_every_n_steps_fails(self) -> None:

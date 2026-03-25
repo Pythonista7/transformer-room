@@ -190,6 +190,7 @@ class MemoryFrontierSummaryPluginTests(unittest.TestCase):
         schedule = MetricSchedule(
             should_log_step_metrics=True,
             should_log_diagnostics=False,
+            should_log_layer_grad_norms=False,
             should_log_parameter_optimizer_norms=False,
             should_log_attention_entropy=False,
             capture_activation_norms=False,
@@ -254,6 +255,7 @@ class MemoryFrontierSummaryPluginTests(unittest.TestCase):
         schedule = MetricSchedule(
             should_log_step_metrics=True,
             should_log_diagnostics=False,
+            should_log_layer_grad_norms=False,
             should_log_parameter_optimizer_norms=False,
             should_log_attention_entropy=False,
             capture_activation_norms=False,

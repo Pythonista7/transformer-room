@@ -257,9 +257,11 @@ class WandbLoggerAdapterTests(unittest.TestCase):
                     "train_bits_per_byte": 2.5,
                     "ln_weight_grad_norm_first": 3.0,
                     "global_grad_norm": 4.0,
+                    "layer_grad_norm_layer_0": 4.5,
                     "activation_norm_last": 5.0,
                     "attention_entropy_middle": 6.0,
                     "step_time_ms": 7.0,
+                    "lr_current": 7.5,
                     "global_param_norm": 8.0,
                     "layer_param_norm_first": 9.0,
                     "param_update_norm": 10.0,
@@ -287,9 +289,11 @@ class WandbLoggerAdapterTests(unittest.TestCase):
         self.assertIn("Bits per Byte/train_bits_per_byte", logged_metrics)
         self.assertIn("LN Norms/ln_weight_grad_norm_first", logged_metrics)
         self.assertIn("Grad Norm/global_grad_norm", logged_metrics)
+        self.assertIn("Grad Norm/layer_grad_norm_layer_0", logged_metrics)
         self.assertIn("Activation Norms/activation_norm_last", logged_metrics)
         self.assertIn("Attention Entropy/attention_entropy_middle", logged_metrics)
         self.assertIn("Timing/step_time_ms", logged_metrics)
+        self.assertIn("Learning Rate/lr_current", logged_metrics)
         self.assertIn("Param Norms/global_param_norm", logged_metrics)
         self.assertIn("Param Norms/layer_param_norm_first", logged_metrics)
         self.assertIn("Update Dynamics/param_update_norm", logged_metrics)

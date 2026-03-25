@@ -11,6 +11,7 @@ from .contracts import MetricPlugin
 from .plugins import (
     ForwardHookMetricsPlugin,
     GlobalGradNormPlugin,
+    LayerGradNormPlugin,
     LayerNormGradNormPlugin,
     LossMetricsPlugin,
     ParameterOptimizerNormsPlugin,
@@ -39,6 +40,10 @@ def build_default_metric_plugins(
             device=device,
         ),
         GlobalGradNormPlugin(
+            wandb_cfg=wandb_cfg,
+            model=checkpoint_model,
+        ),
+        LayerGradNormPlugin(
             wandb_cfg=wandb_cfg,
             model=checkpoint_model,
         ),
