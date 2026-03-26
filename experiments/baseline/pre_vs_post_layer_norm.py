@@ -36,7 +36,7 @@ from src.training.metrics.plugins.layer_grad_norm import (
 )
 
 PROJECT_NAME = "transformer-room-baseline"
-RUN_GROUP = "pre-vs-post-layer-norm"
+RUN_GROUP = "pre-vs-post-layer-norm-2"
 DATASET_NAME = "Salesforce/wikitext"
 DATASET_CONFIG = "wikitext-2-v1"
 SUMMARY_ROOT = PROJECT_ROOT / "artifacts" / "plots" / "pre_vs_post_layer_norm"
