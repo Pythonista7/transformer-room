@@ -42,9 +42,10 @@ DATASET_CONFIG = "wikitext-2-v1"
 SUMMARY_ROOT = PROJECT_ROOT / "artifacts" / "plots" / "pre_vs_post_layer_norm"
 
 D_MODEL = 128
+DEEP_D_MODEL = 512
 N_HEADS = 8
 SHALLOW_LAYERS = 4
-DEEP_LAYERS = 20
+DEEP_LAYERS = 12
 EFFECTIVE_BATCH_SIZE = 32
 SEQ_LEN = 128
 STRIDE = 128
@@ -65,6 +66,7 @@ class VariantSpec:
     config_name: str
     run_name: str
     n_layers: int
+    d_model: int
     norm_position: str
     warmup_steps: int
 
@@ -92,6 +94,7 @@ VARIANT_SPECS: tuple[VariantSpec, ...] = (
         config_name="post-ln-shallow",
         run_name="post-ln-shallow-warmup0",
         n_layers=SHALLOW_LAYERS,
+        d_model=D_MODEL,
         norm_position="post",
         warmup_steps=0,
     ),
@@ -99,6 +102,7 @@ VARIANT_SPECS: tuple[VariantSpec, ...] = (
         config_name="post-ln-shallow",
         run_name=f"post-ln-shallow-warmup{LR_WARMUP_STEPS}",
         n_layers=SHALLOW_LAYERS,
+        d_model=D_MODEL,
         norm_position="post",
         warmup_steps=LR_WARMUP_STEPS,
     ),
@@ -106,6 +110,7 @@ VARIANT_SPECS: tuple[VariantSpec, ...] = (
         config_name="post-ln-deep",
         run_name="post-ln-deep-warmup0",
         n_layers=DEEP_LAYERS,
+        d_model=DEEP_D_MODEL,
         norm_position="post",
         warmup_steps=0,
     ),
@@ -113,6 +118,7 @@ VARIANT_SPECS: tuple[VariantSpec, ...] = (
         config_name="post-ln-deep",
         run_name=f"post-ln-deep-warmup{LR_WARMUP_STEPS}",
         n_layers=DEEP_LAYERS,
+        d_model=DEEP_D_MODEL,
         norm_position="post",
         warmup_steps=LR_WARMUP_STEPS,
     ),
@@ -120,6 +126,7 @@ VARIANT_SPECS: tuple[VariantSpec, ...] = (
         config_name="pre-ln-shallow",
         run_name="pre-ln-shallow-warmup0",
         n_layers=SHALLOW_LAYERS,
+        d_model=D_MODEL,
         norm_position="pre",
         warmup_steps=0,
     ),
@@ -127,6 +134,7 @@ VARIANT_SPECS: tuple[VariantSpec, ...] = (
         config_name="pre-ln-deep",
         run_name="pre-ln-deep-warmup0",
         n_layers=DEEP_LAYERS,
+        d_model=DEEP_D_MODEL,
         norm_position="pre",
         warmup_steps=0,
     ),
@@ -197,7 +205,7 @@ def _build_variant_config(
             vocab_path=str(vocab_path),
         ),
         model=BaselineDecoderConfig(
-            d_model=D_MODEL,
+            d_model=spec.d_model,
             n_heads=N_HEADS,
             layers=spec.n_layers,
             norm_placement=spec.norm_position,
@@ -275,7 +283,8 @@ def build_variant_configs() -> list[tuple[VariantSpec, ExperimentConfig]]:
 def _variant_label(spec: VariantSpec) -> str:
     return (
         f"{spec.config_name} | warmup={spec.warmup_steps} | "
-        f"layers={spec.n_layers} | norm={spec.norm_position}"
+        f"layers={spec.n_layers} | d_model={spec.d_model} | "
+        f"norm={spec.norm_position}"
     )
 
 
@@ -324,6 +333,7 @@ def _build_trial_rows(trial_results: list[TrialResult]) -> list[dict[str, object
                 "config": trial.spec.config_name,
                 "run_name": trial.spec.run_name,
                 "n_layers": trial.spec.n_layers,
+                "d_model": trial.spec.d_model,
                 "norm_position": trial.spec.norm_position,
                 "warmup_steps": trial.spec.warmup_steps,
                 "global_step": trial.global_step,
@@ -346,6 +356,7 @@ def _build_layer_grad_rows(trial_results: list[TrialResult]) -> list[dict[str, o
                     "config": trial.spec.config_name,
                     "run_name": trial.spec.run_name,
                     "n_layers": trial.spec.n_layers,
+                    "d_model": trial.spec.d_model,
                     "norm_position": trial.spec.norm_position,
                     "warmup_steps": trial.spec.warmup_steps,
                     "step": record.step,
@@ -367,6 +378,7 @@ def _build_layer_grad_summary_rows(
                     "config": trial.spec.config_name,
                     "run_name": trial.spec.run_name,
                     "n_layers": trial.spec.n_layers,
+                    "d_model": trial.spec.d_model,
                     "norm_position": trial.spec.norm_position,
                     "warmup_steps": trial.spec.warmup_steps,
                     **summary_row,
@@ -479,6 +491,7 @@ def _log_summary_to_wandb(
                     "config",
                     "run_name",
                     "n_layers",
+                    "d_model",
                     "norm_position",
                     "warmup_steps",
                     "global_step",
@@ -493,6 +506,7 @@ def _log_summary_to_wandb(
                         "config",
                         "run_name",
                         "n_layers",
+                        "d_model",
                         "norm_position",
                         "warmup_steps",
                         "global_step",
@@ -510,6 +524,7 @@ def _log_summary_to_wandb(
                     "config",
                     "run_name",
                     "n_layers",
+                    "d_model",
                     "norm_position",
                     "warmup_steps",
                     "layer_index",
@@ -523,6 +538,7 @@ def _log_summary_to_wandb(
                         "config",
                         "run_name",
                         "n_layers",
+                        "d_model",
                         "norm_position",
                         "warmup_steps",
                         "layer_index",
@@ -555,6 +571,7 @@ def _write_summary_artifacts(trial_results: list[TrialResult]) -> Path:
             "config",
             "run_name",
             "n_layers",
+            "d_model",
             "norm_position",
             "warmup_steps",
             "global_step",
@@ -572,6 +589,7 @@ def _write_summary_artifacts(trial_results: list[TrialResult]) -> Path:
             "config",
             "run_name",
             "n_layers",
+            "d_model",
             "norm_position",
             "warmup_steps",
             "step",
@@ -586,6 +604,7 @@ def _write_summary_artifacts(trial_results: list[TrialResult]) -> Path:
             "config",
             "run_name",
             "n_layers",
+            "d_model",
             "norm_position",
             "warmup_steps",
             "layer_index",

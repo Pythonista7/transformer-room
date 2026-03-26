@@ -2,8 +2,8 @@
 Example:
   .venv/bin/python src/utils/run_and_shutdown.py \
     --log-dir runs/logs \
-    --run-name mem-bud-api-exp \
-    -- python experiments/baseline/hyperparam_sweeps/OptimAdamVsW.py
+    --run-name pre-vs-post-norm \
+    -- python experiments/baseline/pre_vs_post_layer_norm.py
 
   .venv/bin/python src/utils/run_and_shutdown.py \
     --log-dir runs/logs \
