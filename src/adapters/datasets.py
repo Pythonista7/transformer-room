@@ -88,7 +88,6 @@ class HFTextDatasetAdapter:
         load_kwargs: dict[str, Any] = {
             "path": cfg.dataset_name,
             "split": cfg.split,
-            "streaming": cfg.streaming,
         }
         if cfg.dataset_config:
             load_kwargs["name"] = cfg.dataset_config

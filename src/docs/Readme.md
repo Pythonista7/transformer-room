@@ -25,7 +25,7 @@ The main idea is:
 - `src/train.py`
   - Validates config
   - Resolves adapters from registries
-  - Builds token stream + dataloaders + model
+  - Builds materialized or streaming data pipeline + model
   - Runs train/eval/checkpoint loop
   - Writes run artifacts (`run_config.json`, `inference_config.json`)
 
@@ -35,10 +35,10 @@ The main idea is:
   - `ExperimentConfig` and section configs:
     - `RunConfig`
     - `DatasetConfig` (`LocalTextDatasetConfig`, `HFTextDatasetConfig`)
-    - `TokenizerConfig` (`BPETokenizerConfig`)
+    - `TokenizerConfig` (`BPETokenizerConfig`, `HFPretrainedTokenizerConfig`)
     - `ModelConfig` (`BaselineDecoderConfig`)
     - `TrainConfig`
-    - `SplitConfig` (`HoldoutSplitConfig`)
+    - `SplitConfig` (`HoldoutSplitConfig`, `PreSplitConfig`)
     - `LoggingConfig` (`WandbMetricsConfig`)
   - `validate_experiment_config(...)`
 
@@ -62,9 +62,9 @@ The main idea is:
 ### Built-in adapters
 
 - Dataset: `local_text`, `hf_text` in `src/adapters/datasets.py`
-- Tokenizer: `bpe` in `src/adapters/tokenizers.py`
+- Tokenizer: `bpe`, `hf_pretrained` in `src/adapters/tokenizers.py`
 - Model: `baseline_decoder` in `src/adapters/models.py`
-- Split: `holdout` in `src/adapters/splits.py`
+- Split: `holdout`, `pre_split` in `src/adapters/splits.py`
 - Logging: `console`, `wandb` in `src/adapters/loggers.py`
 
 ---
@@ -264,6 +264,10 @@ Most experiment changes should be config-only:
   - `LocalTextDatasetConfig(...)` or `HFTextDatasetConfig(...)`
 - Change tokenizer params:
   - `base_vocab_size`, `vocab_path`, `num_special_tokens`
+  - or `HFPretrainedTokenizerConfig(pretrained_name_or_path=...)`
+- Change data access mode:
+  - `TrainConfig(data_mode="materialized")`
+  - `TrainConfig(data_mode="streaming", max_steps=...)`
 - Change model params:
   - `d_model`, `n_heads`, `layers`
 - Change optimizer:
@@ -273,6 +277,18 @@ Most experiment changes should be config-only:
   - `LoggingConfig(provider="wandb", wandb=WandbMetricsConfig(...))`
 - Change split behavior:
   - `HoldoutSplitConfig(train_fraction=..., seed=..., shuffle=...)`
+  - `PreSplitConfig()` for streaming HF train/validation splits
+
+### Streaming support matrix
+
+True streaming is intentionally narrow in v1:
+
+- dataset: `hf_text`
+- tokenizer: `hf_pretrained`
+- split: `pre_split`
+- train: `data_mode="streaming"`
+
+All other combinations stay materialized.
 
 ---
 
@@ -306,6 +322,7 @@ Each run writes to a run directory inside `run.artifacts_root`:
 - `<run_dir>/<final_model_filename>` (default: `baseline_model.pt`)
 - `<run_dir>/run_config.json`
 - `<run_dir>/inference_config.json`
+- `<run_dir>/tokenizer/` for Hugging Face tokenizer runs
 
 `run_config.json` stores the full normalized experiment config.  
 `inference_config.json` stores minimal model/tokenizer fields for downstream inference utilities.

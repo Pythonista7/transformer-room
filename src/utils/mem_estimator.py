@@ -36,10 +36,20 @@ class ShapeConfig:
     attention_impl: str = "basic"
     base_vocab_size: int = 33280
     num_special_tokens: int = 3
+    vocab_size_override: int | None = None
+    pad_id: int | None = None
 
     @property
     def vocab_size(self) -> int:
+        if self.vocab_size_override is not None:
+            return int(self.vocab_size_override)
         return self.base_vocab_size + self.num_special_tokens
+
+    @property
+    def resolved_pad_id(self) -> int:
+        if self.pad_id is not None:
+            return int(self.pad_id)
+        return self.vocab_size - 2
 
 
 @dataclass(slots=True)
@@ -122,6 +132,10 @@ def load_shape_config_from_run_config(path: Path) -> ShapeConfig:
     model_cfg = _unwrap_value(payload.get("model"))
     train_cfg = _unwrap_value(payload.get("train"))
     tok_cfg = _unwrap_value(payload.get("tokenizer"))
+    inference_cfg_path = path.with_name("inference_config.json")
+    inference_cfg: dict[str, Any] = {}
+    if inference_cfg_path.exists():
+        inference_cfg = json.loads(inference_cfg_path.read_text(encoding="utf-8"))
 
     return ShapeConfig(
         batch_size=_resolve_shape_batch_size_from_train_cfg(train_cfg),
@@ -132,6 +146,16 @@ def load_shape_config_from_run_config(path: Path) -> ShapeConfig:
         attention_impl=str(model_cfg.get("attention_impl", "basic")),
         base_vocab_size=int(tok_cfg.get("base_vocab_size", 33280)),
         num_special_tokens=int(tok_cfg.get("num_special_tokens", 3)),
+        vocab_size_override=(
+            None
+            if inference_cfg.get("vocab_size") is None
+            else int(inference_cfg["vocab_size"])
+        ),
+        pad_id=(
+            None
+            if inference_cfg.get("pad_id") is None
+            else int(inference_cfg["pad_id"])
+        ),
     )
 
 
@@ -170,7 +194,7 @@ def collect_meta_records(cfg: ShapeConfig) -> list[TensorRecord]:
             d_model=cfg.d_model,
             n_heads=cfg.n_heads,
             attention_impl=cfg.attention_impl,
-            pad_id=cfg.vocab_size - 2,
+            pad_id=cfg.resolved_pad_id,
         )
 
     handles = []
@@ -272,7 +296,7 @@ def collect_param_counts(
             d_model=cfg.d_model,
             n_heads=cfg.n_heads,
             attention_impl=cfg.attention_impl,
-            pad_id=cfg.vocab_size - 2,
+            pad_id=cfg.resolved_pad_id,
         )
 
     for name, mod in model.named_modules():
@@ -636,7 +660,7 @@ def run_train_step_profile(
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
 
-    pad_id = cfg.vocab_size - 2
+    pad_id = cfg.resolved_pad_id
     model = BaselineModel(
         vocab_size=cfg.vocab_size,
         layers=cfg.layers,

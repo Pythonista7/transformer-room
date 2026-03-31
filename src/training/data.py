@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-import torch
-from torch.utils.data import DataLoader, Dataset
+import itertools
+from collections.abc import Mapping
 
+import torch
+from torch.utils.data import DataLoader, Dataset, IterableDataset
+
+from ..adapters.datasets import _infer_text_field_from_sample, _normalize_text_value
 from ..core.config import ExperimentConfig, resolve_train_batching
 from ..core.registry import get_split_adapter
 from ..core.types import TokenizedCorpus
@@ -57,6 +61,224 @@ class LMWindowDataset(Dataset):
         return input_seq, target_seq, key_padding_mask
 
 
+def _build_lm_tensors(sample: list[int], pad_id: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    sample_tensor = torch.tensor(sample, dtype=torch.long)
+    input_seq = sample_tensor[:-1]
+    target_seq = sample_tensor[1:]
+    key_padding_mask = input_seq != pad_id
+    return input_seq, target_seq, key_padding_mask
+
+
+def _resolve_load_dataset():
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise ImportError(
+            "Hugging Face dataset support requires the `datasets` package. "
+            "Install it with `pip install datasets`."
+        ) from exc
+    return load_dataset
+
+
+def _resolve_stateful_dataloader():
+    try:
+        from torchdata.stateful_dataloader import StatefulDataLoader
+    except ImportError as exc:
+        raise ImportError(
+            "Streaming checkpoint resume requires `torchdata`. "
+            "Install it with `pip install torchdata`."
+        ) from exc
+    return StatefulDataLoader
+
+
+class HFStreamingWindowDataset(IterableDataset):
+    """HF streaming dataset that tokenizes on the fly and yields LM windows."""
+
+    def __init__(
+        self,
+        *,
+        dataset_cfg,
+        split: str,
+        tokenizer,
+        seq_len: int,
+        stride: int,
+        pad_id: int,
+        eos_id: int,
+        seed: int,
+        shuffle: bool,
+    ) -> None:
+        if seq_len <= 0:
+            raise ValueError(f"seq_len must be > 0, got {seq_len}")
+        if stride <= 0:
+            raise ValueError(f"stride must be > 0, got {stride}")
+        self.dataset_cfg = dataset_cfg
+        self.split = split
+        self.tokenizer = tokenizer
+        self.seq_len = int(seq_len)
+        self.window = int(seq_len) + 1
+        self.stride = int(stride)
+        self.pad_id = int(pad_id)
+        self.eos_id = int(eos_id)
+        self.seed = int(seed)
+        self.shuffle = bool(shuffle)
+        self.epoch = 0
+        self._text_field = dataset_cfg.text_field
+        self._source_dataset = None
+        self._source_state_dict = None
+        self._buffer_tokens: list[int] = []
+        self._buffer_start = 0
+        self._next_start = 0
+        self._total_tokens_seen = 0
+        self._usable_rows_seen = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def state_dict(self) -> dict[str, object]:
+        source_state_dict = self._source_state_dict
+        if self._source_dataset is not None and hasattr(self._source_dataset, "state_dict"):
+            source_state_dict = self._source_dataset.state_dict()
+        return {
+            "epoch": int(self.epoch),
+            "text_field": self._text_field,
+            "source_state_dict": source_state_dict,
+            "buffer_tokens": list(self._buffer_tokens),
+            "buffer_start": int(self._buffer_start),
+            "next_start": int(self._next_start),
+            "total_tokens_seen": int(self._total_tokens_seen),
+            "usable_rows_seen": int(self._usable_rows_seen),
+        }
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        self.epoch = int(state_dict.get("epoch", 0))
+        self._text_field = state_dict.get("text_field")
+        self._source_state_dict = state_dict.get("source_state_dict")
+        self._buffer_tokens = [
+            int(token_id) for token_id in state_dict.get("buffer_tokens", [])
+        ]
+        self._buffer_start = int(state_dict.get("buffer_start", 0))
+        self._next_start = int(state_dict.get("next_start", 0))
+        self._total_tokens_seen = int(state_dict.get("total_tokens_seen", 0))
+        self._usable_rows_seen = int(state_dict.get("usable_rows_seen", 0))
+
+    def _reset_iteration_state(self) -> None:
+        self._source_dataset = None
+        self._source_state_dict = None
+        self._buffer_tokens = []
+        self._buffer_start = 0
+        self._next_start = 0
+        self._total_tokens_seen = 0
+        self._usable_rows_seen = 0
+
+    def _build_source_dataset(self):
+        load_dataset = _resolve_load_dataset()
+        load_kwargs = {
+            "path": self.dataset_cfg.dataset_name,
+            "split": self.split,
+            "streaming": True,
+        }
+        if self.dataset_cfg.dataset_config:
+            load_kwargs["name"] = self.dataset_cfg.dataset_config
+        dataset = load_dataset(**load_kwargs)
+        if self.shuffle:
+            dataset = dataset.shuffle(
+                seed=self.seed,
+                buffer_size=self.dataset_cfg.shuffle_buffer_size,
+            )
+        if hasattr(dataset, "set_epoch"):
+            dataset.set_epoch(self.epoch)
+        if self._source_state_dict is not None and hasattr(dataset, "load_state_dict"):
+            dataset.load_state_dict(self._source_state_dict)
+        self._source_dataset = dataset
+        return dataset
+
+    def _window_from_buffer(self, start: int) -> list[int]:
+        offset = start - self._buffer_start
+        sample = self._buffer_tokens[offset : offset + self.window]
+        if len(sample) < self.window:
+            sample = sample + [self.pad_id] * (self.window - len(sample))
+        return sample
+
+    def _maybe_trim_buffer(self) -> None:
+        trim_count = self._next_start - self._buffer_start
+        if trim_count <= 0:
+            return
+        self._buffer_tokens = self._buffer_tokens[trim_count:]
+        self._buffer_start = self._next_start
+
+    def _infer_or_validate_text_field(self, row):
+        if self._text_field is not None:
+            if self._text_field not in row:
+                available = ", ".join(row.keys())
+                raise ValueError(
+                    f"dataset.text_field '{self._text_field}' not found in rows. "
+                    f"Available fields: {available}"
+                )
+            return self._text_field
+        text_field = _infer_text_field_from_sample(row)
+        self._text_field = text_field
+        return text_field
+
+    def __iter__(self):
+        source = self._build_source_dataset()
+        iterator = iter(source)
+
+        if self._text_field is None:
+            try:
+                first_row = next(iterator)
+            except StopIteration as exc:
+                raise ValueError(
+                    f"Hugging Face dataset '{self.dataset_cfg.dataset_name}' split "
+                    f"'{self.split}' is empty."
+                ) from exc
+            if not isinstance(first_row, Mapping):
+                raise ValueError("Expected Hugging Face dataset rows to be dict-like objects.")
+            self._infer_or_validate_text_field(first_row)
+            iterator = itertools.chain([first_row], iterator)
+
+        for row in iterator:
+            if self.dataset_cfg.max_rows > 0 and self._usable_rows_seen >= self.dataset_cfg.max_rows:
+                break
+            if not isinstance(row, Mapping):
+                continue
+            text_field = self._infer_or_validate_text_field(row)
+            text = _normalize_text_value(row.get(text_field))
+            if not text:
+                continue
+            self._usable_rows_seen += 1
+
+            encoded_ids = self.tokenizer(
+                text,
+                add_special_tokens=False,
+                return_attention_mask=False,
+                return_token_type_ids=False,
+            )["input_ids"]
+            encoded_ids = [int(token_id) for token_id in encoded_ids]
+            encoded_ids.append(self.eos_id)
+            self._buffer_tokens.extend(encoded_ids)
+            self._total_tokens_seen += len(encoded_ids)
+
+            while self._next_start + self.window <= self._total_tokens_seen:
+                sample = self._window_from_buffer(self._next_start)
+                yield _build_lm_tensors(sample, self.pad_id)
+                self._next_start += self.stride
+                self._maybe_trim_buffer()
+
+        if self._total_tokens_seen <= 0:
+            raise ValueError(
+                f"No usable text found in field '{self._text_field}' for "
+                f"dataset '{self.dataset_cfg.dataset_name}' split '{self.split}'."
+            )
+
+        while self._next_start < self._total_tokens_seen:
+            sample = self._window_from_buffer(self._next_start)
+            yield _build_lm_tensors(sample, self.pad_id)
+            self._next_start += self.stride
+            self._maybe_trim_buffer()
+
+        self._reset_iteration_state()
+
+
 def truncate_stream_by_fraction_at_eos(
     token_stream: list[int], data_fraction: float, eos_id: int
 ) -> list[int]:
@@ -87,6 +309,8 @@ def build_data_loaders(
 ) -> tuple[DataLoader, DataLoader]:
     batching = resolve_train_batching(config.train)
     special = tokenized.vocab.special
+    if tokenized.token_stream is None:
+        raise ValueError("Materialized data loading requires tokenized.token_stream.")
 
     token_stream = truncate_stream_by_fraction_at_eos(
         token_stream=tokenized.token_stream,
@@ -130,5 +354,66 @@ def build_data_loaders(
         batch_size=batching.loader_batch_size,
         shuffle=False,
         pin_memory=pin_memory,
+    )
+    return train_loader, val_loader
+
+
+def build_streaming_data_loaders(
+    config: ExperimentConfig,
+    tokenized: TokenizedCorpus,
+    pin_memory: bool,
+):
+    batching = resolve_train_batching(config.train)
+    special = tokenized.vocab.special
+    StatefulDataLoader = _resolve_stateful_dataloader()
+
+    train_dataset = HFStreamingWindowDataset(
+        dataset_cfg=config.dataset,
+        split=config.dataset.split,
+        tokenizer=tokenized.tokenizer,
+        seq_len=config.train.seq_len,
+        stride=config.train.stride,
+        pad_id=special.pad_id,
+        eos_id=special.eos_id,
+        seed=config.run.seed,
+        shuffle=True,
+    )
+    train_loader = StatefulDataLoader(
+        train_dataset,
+        batch_size=batching.loader_batch_size, # This is effective batch and not micro batch
+        pin_memory=pin_memory,
+        num_workers=1,
+        prefetch_factor=2
+    )
+
+    val_loader = None
+    if config.train.run_validation:
+        val_split = config.dataset.validation_split
+        if not val_split:
+            raise ValueError(
+                "Streaming validation requires dataset.validation_split to be set."
+            )
+        val_dataset = HFStreamingWindowDataset(
+            dataset_cfg=config.dataset,
+            split=val_split,
+            tokenizer=tokenized.tokenizer,
+            seq_len=config.train.seq_len,
+            stride=config.train.stride,
+            pad_id=special.pad_id,
+            eos_id=special.eos_id,
+            seed=config.run.seed,
+            shuffle=False,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batching.loader_batch_size,
+            pin_memory=pin_memory,
+        )
+
+    print(
+        "Streaming data loaders ready: "
+        f"split={config.dataset.split} | "
+        f"validation_split={config.dataset.validation_split or '<disabled>'} | "
+        f"seq_len={config.train.seq_len} | stride={config.train.stride}"
     )
     return train_loader, val_loader

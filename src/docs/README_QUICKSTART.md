@@ -148,6 +148,7 @@ Run artifacts are written under `run.artifacts_root`, usually:
 - `src/models/<run_name>/baseline_model.pt`
 - `src/models/<run_name>/run_config.json`
 - `src/models/<run_name>/inference_config.json`
+- `src/models/<run_name>/tokenizer/` for Hugging Face tokenizer runs
 
 For `LoggingConfig(provider="wandb", ...)` runs:
 
@@ -161,6 +162,9 @@ For `LoggingConfig(provider="wandb", ...)` runs:
 - Dataset source:
   - Local text: `LocalTextDatasetConfig(...)`
   - Hugging Face text: `HFTextDatasetConfig(...)`
+- Data access mode:
+  - `TrainConfig(data_mode="materialized")`
+  - `TrainConfig(data_mode="streaming", max_steps=...)`
 - Logging:
   - `LoggingConfig(provider="console")` for local iteration
   - `LoggingConfig(provider="wandb", wandb=WandbMetricsConfig(...))` for experiment tracking
@@ -172,6 +176,38 @@ For `LoggingConfig(provider="wandb", ...)` runs:
   - When using accumulation (`effective_batch_size > micro_batch_size`), set `TrainConfig(lr_scaling="sqrt")` to enable required LR scaling.
 - Tokenizer size:
   - `base_vocab_size`
+
+## Streaming HF path
+
+Streaming is supported only with:
+
+- `HFTextDatasetConfig(...)`
+- `HFPretrainedTokenizerConfig(...)`
+- `PreSplitConfig()`
+- `TrainConfig(data_mode="streaming", max_steps=...)` or epoch-based streaming with `max_steps=None`
+
+Example:
+
+```python
+dataset=HFTextDatasetConfig(
+    dataset_name="Salesforce/wikitext",
+    dataset_config="wikitext-2-v1",
+    split="train",
+    validation_split="validation",
+    text_field="text",
+),
+tokenizer=HFPretrainedTokenizerConfig(
+    pretrained_name_or_path="gpt2",
+),
+train=TrainConfig(
+    effective_batch_size=64,
+    seq_len=1024,
+    stride=1024,
+    data_mode="streaming",
+    max_steps=2000,
+),
+split=PreSplitConfig(),
+```
 
 ## If something fails
 

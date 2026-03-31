@@ -13,6 +13,7 @@ def get_best_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        print("TORCH IS NOW USING MPS DEVICE")
         return torch.device("mps")
     return torch.device("cpu")
 

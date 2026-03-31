@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, Sequence, runtime_checkable
 
 import torch
@@ -11,25 +11,24 @@ if TYPE_CHECKING:
         ACEveryNDecoderConfig,
         BaselineDecoderConfig,
         BPETokenizerConfig,
+        HFPretrainedTokenizerConfig,
         HFTextDatasetConfig,
         HoldoutSplitConfig,
         LocalTextDatasetConfig,
         LoggingConfig,
+        PreSplitConfig,
         SACDecoderConfig,
     )
 
 
 @dataclass(slots=True)
 class SpecialTokenIds:
-    base_vocab_size: int
-    num_special_tokens: int
+    vocab_size: int
     eos_id: int
     pad_id: int
     unk_id: int | None
-
-    @property
-    def vocab_size(self) -> int:
-        return self.base_vocab_size + self.num_special_tokens
+    base_vocab_size: int | None = None
+    num_special_tokens: int = 0
 
 
 @dataclass(slots=True)
@@ -52,11 +51,16 @@ class TextCorpus:
 
 @dataclass(slots=True)
 class TokenizedCorpus:
-    token_stream: list[int]
+    token_stream: list[int] | None
     vocab: VocabInfo
     tokenizer: Any
     eos_inserted: int
     unk_replacements: int
+    token_byte_lengths: list[int] | None = None
+    tokenizer_source: str | None = None
+    tokenizer_revision: str | None = None
+    tokenizer_artifact_path: str | None = None
+    added_special_tokens: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -86,7 +90,11 @@ class DatasetAdapter(Protocol):
 
 @runtime_checkable
 class TokenizerAdapter(Protocol):
-    def build(self, corpus: TextCorpus, cfg: BPETokenizerConfig) -> TokenizedCorpus:
+    def build(
+        self,
+        corpus: TextCorpus,
+        cfg: BPETokenizerConfig | HFPretrainedTokenizerConfig,
+    ) -> TokenizedCorpus:
         """Build/load tokenizer and return tokenized corpus metadata."""
 
 
@@ -106,7 +114,7 @@ class SplitAdapter(Protocol):
     def split(
         self,
         dataset: Dataset,
-        cfg: HoldoutSplitConfig,
+        cfg: HoldoutSplitConfig | PreSplitConfig,
     ) -> tuple[Dataset, Dataset]:
         """Split a dataset into train and validation subsets."""
 

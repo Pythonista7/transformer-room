@@ -13,7 +13,7 @@ class StepMetricsContext:
     next_global_step: int
     epoch: int
     batch_idx: int
-    train_loader_len: int
+    train_loader_len: int | None
     tokens_seen_train: int
     step_loss: float | None
     step_bits_per_byte: float | None = None
@@ -30,6 +30,8 @@ class StepMetricsContext:
 
     @property
     def epoch_progress(self) -> float:
+        if self.train_loader_len is None:
+            return float(self.epoch)
         return float(self.epoch + (self.batch_idx + 1) / max(self.train_loader_len, 1))
 
 
@@ -51,12 +53,14 @@ class PeriodicValMetricsContext:
     global_step: int
     epoch: int
     batch_idx: int
-    train_loader_len: int
+    train_loader_len: int | None
     tokens_seen_train: int
     val_metrics: Mapping[str, float]
 
     @property
     def epoch_progress(self) -> float:
+        if self.train_loader_len is None:
+            return float(self.epoch)
         return float(self.epoch + (self.batch_idx + 1) / max(self.train_loader_len, 1))
 
 

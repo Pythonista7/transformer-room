@@ -4,7 +4,7 @@ import random
 
 from torch.utils.data import Dataset, Subset
 
-from src.core.config import HoldoutSplitConfig
+from src.core.config import HoldoutSplitConfig, PreSplitConfig
 from src.core.registry import register_split_adapter
 
 
@@ -29,5 +29,15 @@ class HoldoutSplitAdapter:
         return Subset(dataset, train_indices), Subset(dataset, val_indices)
 
 
+class PreSplitAdapter:
+    def split(self, dataset: Dataset, cfg: PreSplitConfig) -> tuple[Dataset, Dataset]:
+        _ = dataset
+        _ = cfg
+        raise ValueError(
+            "split.name='pre_split' is only supported by the streaming HF pipeline."
+        )
+
+
 def register_split_adapters() -> None:
     register_split_adapter("holdout", HoldoutSplitAdapter())
+    register_split_adapter("pre_split", PreSplitAdapter())

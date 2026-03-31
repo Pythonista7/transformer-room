@@ -34,6 +34,11 @@ Module style:
 python3 -m experiments.baseline.basic.wikitext2_GPT2_v1
 ```
 
+New reference entrypoints:
+
+- `experiments/baseline/basic/tiny_shakespeare_hf_tokenizer.py` for materialized local text with a pretrained HF tokenizer
+- `experiments/baseline/basic/wikitext2_hf_streaming.py` for true streaming HF dataset + HF tokenizer training
+
 ## Create a new experiment
 
 1. Add a new file under the relevant folder (for example `experiments/baseline/hyperparam_sweeps/my_experiment.py`).
@@ -119,9 +124,11 @@ if __name__ == "__main__":
 ## Common knobs to change
 
 - Dataset: `HFTextDatasetConfig` or `LocalTextDatasetConfig`
+- Tokenizer: `BPETokenizerConfig` or `HFPretrainedTokenizerConfig`
 - Model scale: `d_model`, `n_heads`, `layers`, `dropout`
 - Optimizer: `name`, `learning_rate`, `weight_decay`
 - Batching: `effective_batch_size`, `micro_batch_size`, `accumulation_steps`, `lr_scaling`
+- Streaming mode: `TrainConfig(data_mode="streaming", max_steps=...)` plus `PreSplitConfig()`
 - Logging: `LoggingConfig(provider="console" | "wandb")`
 
 ## Notes

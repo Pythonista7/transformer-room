@@ -65,6 +65,7 @@ def prepare_run_artifact_paths(config: ExperimentConfig) -> dict[str, Path]:
         "model_diagram_path": run_dir / "baseline_model_architecture",
         "run_config_path": run_dir / "run_config.json",
         "inference_config_path": run_dir / "inference_config.json",
+        "tokenizer_dir": run_dir / "tokenizer",
     }
     print(f"Run artifacts will be saved to: {run_dir}")
     return paths
@@ -89,18 +90,38 @@ def write_run_metadata(
     )
 
     special = tokenized.vocab.special
+    tokenizer_artifact_path: str | None = None
+    if hasattr(tokenized.tokenizer, "save_pretrained"):
+        tokenizer_dir = run_paths["tokenizer_dir"]
+        tokenizer_dir.mkdir(parents=True, exist_ok=True)
+        tokenized.tokenizer.save_pretrained(str(tokenizer_dir))
+        tokenizer_artifact_path = str(tokenizer_dir.resolve())
+
+    vocab_path = None
+    if hasattr(config.tokenizer, "vocab_path"):
+        raw_vocab_path = getattr(config.tokenizer, "vocab_path", "")
+        if raw_vocab_path:
+            vocab_path = str(Path(raw_vocab_path).expanduser().resolve())
+
     inference_config = {
         "model_name": config.model.name,
         "tokenizer_name": config.tokenizer.name,
+        "tokenizer_source": tokenized.tokenizer_source,
+        "tokenizer_revision": tokenized.tokenizer_revision,
+        "tokenizer_artifact_path": tokenizer_artifact_path,
+        "tokenizer_added_special_tokens": dict(tokenized.added_special_tokens),
         "base_vocab_size": special.base_vocab_size,
         "num_special_tokens": special.num_special_tokens,
         "vocab_size": special.vocab_size,
+        "pad_id": special.pad_id,
+        "eos_id": special.eos_id,
+        "unk_id": special.unk_id,
         "d_model": config.model.d_model,
         "n_heads": config.model.n_heads,
         "layers": config.model.layers,
         "attention_impl": config.model.attention_impl,
         "training_seq_len": config.train.seq_len,
-        "tokenizer_vocab_path": str(Path(config.tokenizer.vocab_path).expanduser().resolve()),
+        "tokenizer_vocab_path": vocab_path,
     }
     run_paths["inference_config_path"].write_text(
         json.dumps(inference_config, indent=2),

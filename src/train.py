@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .adapters import register_builtin_adapters
+from .adapters.tokenizers import build_hf_pretrained_tokenizer_bundle
 from .core.config import (
     ExperimentConfig,
     ResolvedTrainBatchingConfig,
@@ -35,7 +36,7 @@ from .training.artifacts import (
     resolve_wandb_lineage,
     write_run_metadata,
 )
-from .training.data import build_data_loaders
+from .training.data import build_data_loaders, build_streaming_data_loaders
 from .training.evaluate import evaluate
 from .training.metrics import (
     EpochMetricsContext,
@@ -89,6 +90,13 @@ def _build_token_byte_lengths(
     return token_byte_lengths
 
 
+def _safe_len(loader) -> int | None:
+    try:
+        return len(loader)
+    except TypeError:
+        return None
+
+
 @dataclass(slots=True)
 class TrainLoopResult:
     global_step: int
@@ -104,7 +112,7 @@ class TrainLoopResult:
 def train_loop(
     model: torch.nn.Module,
     train_loader: DataLoader,
-    val_loader: DataLoader,
+    val_loader: DataLoader | None,
     loss_fn: CrossEntropyLoss,
     optimizer: optim.Optimizer,
     scheduler: LRScheduler | None,
@@ -114,18 +122,20 @@ def train_loop(
     use_bf16: bool,
     compile_enabled: bool,
     run_paths: dict[str, Path],
-    token_byte_lengths: Sequence[int],
+    token_byte_lengths: Sequence[int] | None,
     *,
     extra_metric_plugins: Sequence[MetricPlugin] | None = None,
     metrics_debug_timing: bool = False,
 ) -> TrainLoopResult:
     checkpoint_model = get_uncompiled_model(model)
     pad_id = int(loss_fn.ignore_index)
-    token_byte_lengths_tensor = torch.tensor(
-        token_byte_lengths,
-        dtype=torch.long,
-        device=device,
-    )
+    token_byte_lengths_tensor: torch.Tensor | None = None
+    if token_byte_lengths is not None:
+        token_byte_lengths_tensor = torch.tensor(
+            token_byte_lengths,
+            dtype=torch.long,
+            device=device,
+        )
     wandb_cfg = config.logging.wandb
     wandb_enabled = config.logging.provider == "wandb"
     persist_local_artifacts = bool(config.run.persist_local_artifacts)
@@ -149,6 +159,11 @@ def train_loop(
     final_model_artifact_name = build_final_model_artifact_name(run_label)
     last_checkpoint_artifact_ref: str | None = None
     final_model_artifact_ref: str | None = None
+    train_loader_len = _safe_len(train_loader)
+    streaming_mode = config.train.data_mode == "streaming"
+    max_steps = config.train.max_steps
+    next_resume_epoch = 0
+    next_resume_batch_idx = 0
 
     def save_checkpoint(
         epoch: int,
@@ -170,6 +185,8 @@ def train_loop(
             "scheduler_state_dict": None if scheduler is None else scheduler.state_dict(),
             "config": asdict(config),
         }
+        if hasattr(train_loader, "state_dict"):
+            checkpoint["train_loader_state_dict"] = train_loader.state_dict()
         torch.save(checkpoint, run_paths["checkpoint_path"])
         if not artifact_io_enabled:
             return None
@@ -219,6 +236,20 @@ def train_loop(
         scheduler_state_dict = checkpoint.get("scheduler_state_dict")
         if scheduler is not None and scheduler_state_dict is not None:
             scheduler.load_state_dict(scheduler_state_dict)
+        train_loader_state_dict = checkpoint.get("train_loader_state_dict")
+        if train_loader_state_dict is not None:
+            if not hasattr(train_loader, "load_state_dict"):
+                raise ValueError(
+                    "Checkpoint includes train loader state, but the current loader "
+                    "does not support load_state_dict()."
+                )
+            train_loader.load_state_dict(train_loader_state_dict)
+        elif streaming_mode:
+            start_batch_idx = int(checkpoint.get("batch_idx", 0))
+            if start_batch_idx > 0:
+                raise ValueError(
+                    "Streaming checkpoint resume requires loader state, but none was found."
+                )
 
         start_epoch = int(checkpoint.get("epoch", 0))
         start_batch_idx = int(checkpoint.get("batch_idx", 0))
@@ -237,10 +268,25 @@ def train_loop(
     non_blocking = device.type == "cuda"
     batching: ResolvedTrainBatchingConfig = resolve_train_batching(config.train)
     accumulation_steps = int(batching.accumulation_steps)
-    run_validation = bool(config.train.run_validation)
-    train_loader_len = len(train_loader)
+    run_validation = bool(config.train.run_validation) and val_loader is not None
 
     start_epoch, start_batch_idx, global_step, tokens_seen_train = load_checkpoint_if_available()
+    next_resume_epoch = start_epoch
+    next_resume_batch_idx = start_batch_idx
+    stop_training = bool(max_steps is not None and global_step >= max_steps)
+    if stop_training:
+        print(
+            f"Resume step {global_step} already meets max_steps={max_steps}; "
+            "skipping additional optimizer steps."
+        )
+
+    step_bar = tqdm(
+        total=max_steps,
+        desc="Steps",
+        unit="step",
+        initial=global_step,
+        leave=True,
+    )
 
     last_avg_train_loss = 0.0
     last_train_bits_per_byte = float("nan")
@@ -255,6 +301,10 @@ def train_loop(
     try:
         metrics_engine.on_train_start()
         for epoch in tqdm(range(start_epoch, config.train.epochs), desc="Epochs"):
+            if stop_training:
+                break
+            if hasattr(train_loader, "dataset") and hasattr(train_loader.dataset, "set_epoch"):
+                train_loader.dataset.set_epoch(epoch)
             epoch_wall_start = time.perf_counter()
             epoch_train_loss_sum = 0.0
             epoch_token_count = 0
@@ -270,10 +320,149 @@ def train_loop(
             step_token_count = 0
             step_byte_count = 0
             step_last_batch_idx = 0
+            epoch_had_batches = False
+            epoch_fully_exhausted = True
 
-            for batch_idx, (input_seq, target_seq, key_padding_mask) in enumerate(train_loader):
-                if epoch == start_epoch and batch_idx < start_batch_idx:
+            def finalize_step(current_epoch: int, current_batch_idx: int) -> bool:
+                nonlocal global_step
+                nonlocal tokens_seen_train
+                nonlocal step_ctx
+                nonlocal step_loss_sum
+                nonlocal step_token_count
+                nonlocal step_byte_count
+                nonlocal step_start
+                nonlocal step_forward_pass_time_ms
+                nonlocal step_backward_pass_time_ms
+                nonlocal should_measure_step_timing
+                nonlocal micro_batches_in_step
+                nonlocal last_val_metrics
+                nonlocal last_checkpoint_artifact_ref
+                nonlocal next_resume_epoch
+                nonlocal next_resume_batch_idx
+
+                if step_ctx is None:
+                    raise RuntimeError("Step metrics context was not initialized.")
+                if step_token_count <= 0:
+                    micro_batches_in_step = 0
+                    return False
+
+                scale_gradients_by_token_count(checkpoint_model, step_token_count)
+                step_loss = step_loss_sum / step_token_count
+                step_bits_per_byte = float("nan")
+                if step_byte_count > 0:
+                    step_bits_per_byte = float(
+                        (step_loss_sum / math.log(2.0)) / float(step_byte_count)
+                    )
+                step_ctx = replace(
+                    step_ctx,
+                    batch_idx=current_batch_idx,
+                    step_loss=float(step_loss),
+                    step_bits_per_byte=step_bits_per_byte,
+                    forward_pass_time_ms=float(step_forward_pass_time_ms),
+                    backward_pass_time_ms=float(step_backward_pass_time_ms),
+                )
+                metrics_engine.after_backward(step_ctx)
+
+                optim_start = 0.0
+                if should_measure_step_timing:
+                    synchronize_if_cuda(device)
+                    optim_start = time.perf_counter()
+                step_lr_current = float(optimizer.param_groups[0]["lr"])
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+
+                optim_step_time_ms: float | None = None
+                step_time_ms: float | None = None
+                if should_measure_step_timing:
+                    synchronize_if_cuda(device)
+                    optim_step_time_ms = (time.perf_counter() - optim_start) * 1000.0
+                    step_time_ms = (time.perf_counter() - step_start) * 1000.0
+
+                peak_memory_gib: float | None = None
+                peak_reserved_memory_gib: float | None = None
+                if device.type == "cuda":
+                    peak_memory_gib = float(
+                        torch.cuda.max_memory_allocated(device) / (1024**3)
+                    )
+                    peak_reserved_memory_gib = float(
+                        torch.cuda.max_memory_reserved(device) / (1024**3)
+                    )
+
+                global_step = int(step_ctx.next_global_step)
+                step_bar.set_postfix(loss=f"{step_loss:.4f}", lr=f"{step_lr_current:.2e}")
+                step_bar.update(1)
+                tokens_seen_train += step_token_count
+                next_resume_epoch = current_epoch
+                next_resume_batch_idx = current_batch_idx + 1
+                if train_loader_len is not None and next_resume_batch_idx >= train_loader_len:
+                    next_resume_epoch += 1
+                    next_resume_batch_idx = 0
+
+                step_ctx = replace(
+                    step_ctx,
+                    batch_idx=current_batch_idx,
+                    global_step=global_step,
+                    tokens_seen_train=tokens_seen_train,
+                    optim_step_time_ms=optim_step_time_ms,
+                    step_time_ms=step_time_ms,
+                    peak_memory_gib=peak_memory_gib,
+                    peak_reserved_memory_gib=peak_reserved_memory_gib,
+                    lr_current=step_lr_current,
+                )
+                metrics_engine.after_optimizer_step(step_ctx)
+
+                if step_ctx.schedule.should_log_this_step:
+                    step_metrics = metrics_engine.collect_step_metrics(step_ctx)
+                    logger.log(step_metrics, step=global_step)
+
+                if run_validation and step_ctx.schedule.periodic_val_due:
+                    val_metrics = evaluate(
+                        model,
+                        val_loader,
+                        loss_fn,
+                        device,
+                        use_bf16=use_bf16,
+                        token_byte_lengths=token_byte_lengths,
+                    )
+                    model.train()
+                    last_val_metrics = val_metrics
+                    val_log_metrics = metrics_engine.collect_periodic_val_metrics(
+                        PeriodicValMetricsContext(
+                            schedule=step_ctx.schedule,
+                            global_step=global_step,
+                            epoch=current_epoch,
+                            batch_idx=current_batch_idx,
+                            train_loader_len=train_loader_len,
+                            tokens_seen_train=tokens_seen_train,
+                            val_metrics=val_metrics,
+                        )
+                    )
+                    logger.log(val_log_metrics, step=global_step)
+
+                if (
+                    config.run.checkpoint_every_n_steps > 0
+                    and global_step % config.run.checkpoint_every_n_steps == 0
+                ):
+                    last_checkpoint_artifact_ref = save_checkpoint(
+                        next_resume_epoch,
+                        next_resume_batch_idx,
+                        global_step,
+                        aliases=("latest",),
+                    )
+
+                micro_batches_in_step = 0
+                return bool(max_steps is not None and global_step >= max_steps)
+
+            epoch_batch_start = start_batch_idx if epoch == start_epoch else 0
+            iterator = enumerate(
+                train_loader,
+                start=epoch_batch_start if train_loader_len is None else 0,
+            )
+            for batch_idx, (input_seq, target_seq, key_padding_mask) in iterator:
+                if epoch == start_epoch and train_loader_len is not None and batch_idx < start_batch_idx:
                     continue
+                epoch_had_batches = True
 
                 if micro_batches_in_step == 0:
                     next_global_step = global_step + 1
@@ -346,10 +535,12 @@ def train_loop(
                 valid_tokens = int((target_seq != pad_id).sum().item())
                 if valid_tokens > 0:
                     valid_target_mask = target_seq != pad_id
-                    valid_target_ids = target_seq[valid_target_mask]
-                    valid_bytes = int(
-                        token_byte_lengths_tensor[valid_target_ids].sum().item()
-                    )
+                    valid_bytes = 0
+                    if token_byte_lengths_tensor is not None:
+                        valid_target_ids = target_seq[valid_target_mask]
+                        valid_bytes = int(
+                            token_byte_lengths_tensor[valid_target_ids].sum().item()
+                        )
                     step_token_count += valid_tokens
                     step_byte_count += valid_bytes
                     step_loss_sum += loss_sum.item()
@@ -380,123 +571,35 @@ def train_loop(
                     )
 
                 micro_batches_in_step += 1
-                is_last_batch_in_epoch = batch_idx + 1 >= train_loader_len
+                is_last_batch_in_epoch = (
+                    train_loader_len is not None and batch_idx + 1 >= train_loader_len
+                )
                 if (
                     micro_batches_in_step < accumulation_steps
                     and not is_last_batch_in_epoch
                 ):
                     continue
 
-                if step_token_count <= 0:
-                    micro_batches_in_step = 0
-                    continue
-                
-                # SCALE GRADs BY TOKEN COUNT
-                scale_gradients_by_token_count(checkpoint_model, step_token_count)
-                step_loss = step_loss_sum / step_token_count
-                step_bits_per_byte = float("nan")
-                if step_byte_count > 0:
-                    step_bits_per_byte = float(
-                        (step_loss_sum / math.log(2.0)) / float(step_byte_count)
-                    )
-                step_ctx = replace(
-                    step_ctx,
-                    batch_idx=step_last_batch_idx,
-                    step_loss=float(step_loss),
-                    step_bits_per_byte=step_bits_per_byte,
-                    forward_pass_time_ms=float(step_forward_pass_time_ms),
-                    backward_pass_time_ms=float(step_backward_pass_time_ms),
-                )
-                metrics_engine.after_backward(step_ctx)
+                if finalize_step(epoch, step_last_batch_idx):
+                    epoch_fully_exhausted = False
+                    stop_training = True
+                    break
 
-                optim_start = 0.0
-                if should_measure_step_timing:
-                    synchronize_if_cuda(device)
-                    optim_start = time.perf_counter()
-                step_lr_current = float(optimizer.param_groups[0]["lr"])
-                # UPDATE WEIGHTS BASED ON CALCULATED GRADIENTS    
-                optimizer.step()
-                if scheduler is not None:
-                    scheduler.step()
-                
-                optim_step_time_ms: float | None = None
-                step_time_ms: float | None = None
-                if should_measure_step_timing:
-                    synchronize_if_cuda(device)
-                    optim_step_time_ms = (time.perf_counter() - optim_start) * 1000.0
-                    step_time_ms = (time.perf_counter() - step_start) * 1000.0
+            if not stop_training and micro_batches_in_step > 0:
+                if finalize_step(epoch, step_last_batch_idx):
+                    epoch_fully_exhausted = False
+                    stop_training = True
 
-                peak_memory_gib: float | None = None
-                peak_reserved_memory_gib: float | None = None
-                if device.type == "cuda":
-                    peak_memory_gib = float(
-                        torch.cuda.max_memory_allocated(device) / (1024**3)
-                    )
-                    peak_reserved_memory_gib = float(
-                        torch.cuda.max_memory_reserved(device) / (1024**3)
-                    )
+            start_batch_idx = 0
+            if not epoch_had_batches and streaming_mode and next_resume_batch_idx > 0:
+                next_resume_epoch = epoch + 1
+                next_resume_batch_idx = 0
+                continue
 
-                global_step = int(step_ctx.next_global_step)
-                tokens_seen_train += step_token_count
-                step_ctx = replace(
-                    step_ctx,
-                    batch_idx=step_last_batch_idx,
-                    global_step=global_step,
-                    tokens_seen_train=tokens_seen_train,
-                    optim_step_time_ms=optim_step_time_ms,
-                    step_time_ms=step_time_ms,
-                    peak_memory_gib=peak_memory_gib,
-                    peak_reserved_memory_gib=peak_reserved_memory_gib,
-                    lr_current=step_lr_current,
-                )
-                metrics_engine.after_optimizer_step(step_ctx)
-
-                if step_ctx.schedule.should_log_this_step:
-                    step_metrics = metrics_engine.collect_step_metrics(step_ctx)
-                    logger.log(step_metrics, step=global_step)
-
-                if run_validation and step_ctx.schedule.periodic_val_due:
-                    val_metrics = evaluate(
-                        model,
-                        val_loader,
-                        loss_fn,
-                        device,
-                        use_bf16=use_bf16,
-                        token_byte_lengths=token_byte_lengths,
-                    )
-                    model.train()
-                    last_val_metrics = val_metrics
-                    val_log_metrics = metrics_engine.collect_periodic_val_metrics(
-                        PeriodicValMetricsContext(
-                            schedule=step_ctx.schedule,
-                            global_step=global_step,
-                            epoch=epoch,
-                            batch_idx=step_last_batch_idx,
-                            train_loader_len=train_loader_len,
-                            tokens_seen_train=tokens_seen_train,
-                            val_metrics=val_metrics,
-                        )
-                    )
-                    logger.log(val_log_metrics, step=global_step)
-
-                if (
-                    config.run.checkpoint_every_n_steps > 0
-                    and global_step % config.run.checkpoint_every_n_steps == 0
-                ):
-                    next_epoch = epoch
-                    next_batch_idx = step_last_batch_idx + 1
-                    if next_batch_idx >= train_loader_len:
-                        next_epoch += 1
-                        next_batch_idx = 0
-
-                    last_checkpoint_artifact_ref = save_checkpoint(
-                        next_epoch,
-                        next_batch_idx,
-                        global_step,
-                        aliases=("latest",),
-                    )
-
-                micro_batches_in_step = 0
+            if epoch_token_count <= 0:
+                if stop_training:
+                    break
+                continue
 
             avg_train_loss = epoch_train_loss_sum / max(epoch_token_count, 1)
             train_bits_per_byte_epoch = float("nan")
@@ -504,10 +607,13 @@ def train_loop(
                 train_bits_per_byte_epoch = float(
                     (epoch_train_loss_sum / math.log(2.0)) / float(epoch_byte_count)
                 )
-            completed_epochs = int(epoch + 1)
+            if epoch_fully_exhausted:
+                completed_epochs = int(epoch + 1)
+                next_resume_epoch = epoch + 1
+                next_resume_batch_idx = 0
             epoch_time_s = time.perf_counter() - epoch_wall_start
             val_metrics = last_val_metrics
-            if run_validation:
+            if run_validation and epoch_fully_exhausted:
                 val_metrics = evaluate(
                     model,
                     val_loader,
@@ -532,7 +638,7 @@ def train_loop(
             )
             logger.log(epoch_metrics, step=global_step)
 
-            if run_validation:
+            if run_validation and epoch_fully_exhausted:
                 print(
                     f"Epoch {epoch + 1}/{config.train.epochs} | "
                     f"train_loss={avg_train_loss:.4f} | "
@@ -548,12 +654,15 @@ def train_loop(
 
             last_avg_train_loss = float(avg_train_loss)
             last_train_bits_per_byte = float(train_bits_per_byte_epoch)
+            if stop_training:
+                break
     finally:
+        step_bar.close()
         metrics_engine.on_train_end()
 
     last_checkpoint_artifact_ref = save_checkpoint(
-        config.train.epochs,
-        0,
+        next_resume_epoch,
+        next_resume_batch_idx,
         global_step,
         aliases=("latest", "final"),
     )
@@ -630,24 +739,40 @@ def model_pipeline(
     )
 
     run_paths = prepare_run_artifact_paths(config)
+    if config.train.data_mode == "streaming":
+        if config.tokenizer.name != "hf_pretrained":
+            raise ValueError(
+                "Streaming mode requires tokenizer.name='hf_pretrained'."
+            )
+        tokenized = build_hf_pretrained_tokenizer_bundle(config.tokenizer)
+        write_run_metadata(config=config, tokenized=tokenized, run_paths=run_paths)
+        train_loader, val_loader = build_streaming_data_loaders(
+            config=config,
+            tokenized=tokenized,
+            pin_memory=device.type == "cuda",
+        )
+    else:
+        dataset_adapter = get_dataset_adapter(config.dataset.name)
+        corpus = dataset_adapter.load(config.dataset)
 
-    dataset_adapter = get_dataset_adapter(config.dataset.name)
-    corpus = dataset_adapter.load(config.dataset)
+        tokenizer_adapter = get_tokenizer_adapter(config.tokenizer.name)
+        tokenized = tokenizer_adapter.build(corpus=corpus, cfg=config.tokenizer)
+        write_run_metadata(config=config, tokenized=tokenized, run_paths=run_paths)
+        train_loader, val_loader = build_data_loaders(
+            config=config,
+            tokenized=tokenized,
+            pin_memory=device.type == "cuda",
+        )
 
-    tokenizer_adapter = get_tokenizer_adapter(config.tokenizer.name)
-    tokenized = tokenizer_adapter.build(corpus=corpus, cfg=config.tokenizer)
-    token_byte_lengths = _build_token_byte_lengths(
-        id_to_token=tokenized.vocab.id_to_token,
-        base_vocab_size=tokenized.vocab.special.base_vocab_size,
-    )
-
-    write_run_metadata(config=config, tokenized=tokenized, run_paths=run_paths)
-
-    train_loader, val_loader = build_data_loaders(
-        config=config,
-        tokenized=tokenized,
-        pin_memory=device.type == "cuda",
-    )
+    token_byte_lengths = None
+    if config.tokenizer.name == "bpe":
+        base_vocab_size = tokenized.vocab.special.base_vocab_size
+        if base_vocab_size is None:
+            raise ValueError("BPE tokenization expects base_vocab_size to be set.")
+        token_byte_lengths = _build_token_byte_lengths(
+            id_to_token=tokenized.vocab.id_to_token,
+            base_vocab_size=base_vocab_size,
+        )
 
     model_adapter = get_model_adapter(config.model.name)
     model = model_adapter.build(
@@ -741,6 +866,19 @@ def model_pipeline(
         )
     finally:
         logger.close()
+        if train_loader.multiprocessing_context is not None:
+            for achild in train_loader.multiprocessing_context.active_children():
+                print(f'waiting for child process: {achild.name} | {achild.pid} to finish...')
+                achild.join()
+                print(f'child process: {achild.name} | {achild.pid} finished with exit code {achild.exitcode}')
+        else:
+            print('No child processes to wait for in `train_loader.multiprocessing_context`')
+        
+        if val_loader is not None:
+            del val_loader
+            
+        import gc 
+        gc.collect()
 
     return RunResult(
         model=model,

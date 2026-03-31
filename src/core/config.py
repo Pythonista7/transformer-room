@@ -8,6 +8,7 @@ from .types import SpecialTokenIds
 
 AttentionImplementation = Literal["basic", "sdpa"]
 NormPlacement = Literal["pre","post"]
+DataMode = Literal["materialized", "streaming"]
 
 
 @dataclass(slots=True)
@@ -18,7 +19,7 @@ class RunConfig:
     artifacts_root: str = "src/models"
     persist_local_artifacts: bool = True
     resume_from_checkpoint: bool = True
-    checkpoint_every_n_steps: int = 250
+    checkpoint_every_n_steps: int = 10_000
     checkpoint_filename: str = "baseline_checkpoint.pt"
     final_model_filename: str = "baseline_model.pt"
     use_torch_compile: bool = False
@@ -26,7 +27,7 @@ class RunConfig:
     torch_compile_fullgraph: bool = False
     torch_compile_dynamic: bool = False
     activation_memory_budget: float | None = None
-    compile_warmup_steps: int = 0
+    compile_warmup_steps: int = 3 if use_torch_compile else 0
     seed: int = 42
 
 
@@ -43,8 +44,9 @@ class HFTextDatasetConfig:
     dataset_name: str = ""
     dataset_config: str | None = None
     split: str = "train"
+    validation_split: str | None = None
     text_field: str | None = None
-    streaming: bool = False
+    shuffle_buffer_size: int = 10_000
     max_rows: int = 0
 
 
@@ -59,7 +61,16 @@ class BPETokenizerConfig:
     vocab_path: str = ""
 
 
-TokenizerConfig = BPETokenizerConfig
+@dataclass(slots=True)
+class HFPretrainedTokenizerConfig:
+    name: Literal["hf_pretrained"] = "hf_pretrained"
+    pretrained_name_or_path: str = ""
+    use_fast: bool = True
+    revision: str | None = None
+    trust_remote_code: bool = False
+
+
+TokenizerConfig = BPETokenizerConfig | HFPretrainedTokenizerConfig
 
 
 @dataclass(slots=True)
@@ -117,6 +128,8 @@ class TrainConfig:
     seq_len: int = 128
     stride: int = 128
     data_fraction: float = 1.0
+    data_mode: DataMode = "materialized"
+    max_steps: int | None = None
     run_validation: bool = True
 
     def __post_init__(self) -> None:
@@ -155,7 +168,12 @@ class HoldoutSplitConfig:
     shuffle: bool = False
 
 
-SplitConfig = HoldoutSplitConfig
+@dataclass(slots=True)
+class PreSplitConfig:
+    name: Literal["pre_split"] = "pre_split"
+
+
+SplitConfig = HoldoutSplitConfig | PreSplitConfig
 
 
 @dataclass(slots=True)
@@ -295,11 +313,12 @@ def resolve_special_token_ids(tokenizer_cfg: BPETokenizerConfig) -> SpecialToken
     pad_id = base_vocab_size + 1
     unk_id = base_vocab_size + 2 if num_special_tokens >= 3 else None
     return SpecialTokenIds(
-        base_vocab_size=base_vocab_size,
-        num_special_tokens=num_special_tokens,
+        vocab_size=base_vocab_size + num_special_tokens,
         eos_id=eos_id,
         pad_id=pad_id,
         unk_id=unk_id,
+        base_vocab_size=base_vocab_size,
+        num_special_tokens=num_special_tokens,
     )
 
 
@@ -339,19 +358,35 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             raise ValueError("dataset.max_rows must be >= 0.")
         if not config.dataset.split.strip():
             raise ValueError("dataset.split must be non-empty for hf_text dataset.")
+        if (
+            config.dataset.validation_split is not None
+            and not config.dataset.validation_split.strip()
+        ):
+            raise ValueError(
+                "dataset.validation_split must be non-empty when provided."
+            )
+        if config.dataset.shuffle_buffer_size <= 0:
+            raise ValueError("dataset.shuffle_buffer_size must be > 0.")
     else:
         raise ValueError(
             f"Unsupported dataset.name '{config.dataset.name}'. "
             "Expected one of: local_text, hf_text."
         )
 
-    if config.tokenizer.name != "bpe":
+    if config.tokenizer.name == "bpe":
+        if not config.tokenizer.vocab_path.strip():
+            raise ValueError("tokenizer.vocab_path must be non-empty.")
+        resolve_special_token_ids(config.tokenizer)
+    elif config.tokenizer.name == "hf_pretrained":
+        if not config.tokenizer.pretrained_name_or_path.strip():
+            raise ValueError(
+                "tokenizer.pretrained_name_or_path must be non-empty for hf_pretrained."
+            )
+    else:
         raise ValueError(
-            f"Unsupported tokenizer.name '{config.tokenizer.name}'. Expected: bpe."
+            "Unsupported tokenizer.name "
+            f"'{config.tokenizer.name}'. Expected: bpe, hf_pretrained."
         )
-    if not config.tokenizer.vocab_path.strip():
-        raise ValueError("tokenizer.vocab_path must be non-empty.")
-    resolve_special_token_ids(config.tokenizer)
 
     if config.model.name not in {
         "baseline_decoder",
@@ -411,17 +446,51 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("train.seq_len must be > 0.")
     if config.train.stride <= 0:
         raise ValueError("train.stride must be > 0.")
+    if config.train.data_mode not in {"materialized", "streaming"}:
+        raise ValueError("train.data_mode must be one of: materialized, streaming.")
     if not 0 < config.train.data_fraction <= 1:
         raise ValueError("train.data_fraction must be in (0, 1].")
+    if config.train.max_steps is not None and config.train.max_steps <= 0:
+        raise ValueError("train.max_steps must be > 0 when provided.")
+    if config.train.max_steps is not None and config.train.data_mode != "streaming":
+        raise ValueError("train.max_steps is only supported in streaming mode.")
     if not isinstance(config.train.run_validation, bool):
         raise ValueError("train.run_validation must be a bool.")
 
-    if config.split.name != "holdout":
+    if config.split.name == "holdout":
+        if not 0 < config.split.train_fraction < 1:
+            raise ValueError("split.train_fraction must be in (0, 1).")
+    elif config.split.name != "pre_split":
         raise ValueError(
-            f"Unsupported split.name '{config.split.name}'. Expected: holdout."
+            f"Unsupported split.name '{config.split.name}'. "
+            "Expected: holdout, pre_split."
         )
-    if not 0 < config.split.train_fraction < 1:
-        raise ValueError("split.train_fraction must be in (0, 1).")
+
+    if config.train.data_mode == "streaming":
+        if config.dataset.name != "hf_text":
+            raise ValueError(
+                "train.data_mode='streaming' requires dataset.name='hf_text'."
+            )
+        if config.tokenizer.name != "hf_pretrained":
+            raise ValueError(
+                "train.data_mode='streaming' requires tokenizer.name='hf_pretrained'."
+            )
+        if config.split.name != "pre_split":
+            raise ValueError(
+                "train.data_mode='streaming' requires split.name='pre_split'."
+            )
+        if config.train.data_fraction != 1.0:
+            raise ValueError(
+                "train.data_fraction is not supported in streaming mode; use max_steps."
+            )
+        if config.train.run_validation and not config.dataset.validation_split:
+            raise ValueError(
+                "Streaming validation requires dataset.validation_split to be set."
+            )
+    elif config.split.name != "holdout":
+        raise ValueError(
+            "split.name='pre_split' is only supported when train.data_mode='streaming'."
+        )
 
     if config.logging.provider not in {"console", "wandb"}:
         raise ValueError(
