@@ -102,6 +102,13 @@ def _parse_env_assignment(value: str) -> tuple[str, str]:
     return key, raw_value
 
 
+def _prepend_env_path(existing_value: str, entry: str) -> str:
+    parts = [part for part in existing_value.split(os.pathsep) if part]
+    if entry in parts:
+        parts = [part for part in parts if part != entry]
+    return os.pathsep.join([entry, *parts])
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -191,6 +198,7 @@ def _prepare_child_env(
 
     env_summary: dict[str, Any] = {
         "extra_env_keys": sorted(extra_env_keys),
+        "pythonpath_injected_project_root": False,
         "pytorch_alloc_conf_source": None,
         "pytorch_alloc_conf": None,
         "wandb_api_key_set": False,
@@ -200,6 +208,12 @@ def _prepare_child_env(
         "vast_instance_id": None,
         "vast_instance_id_source": None,
     }
+
+    env["PYTHONPATH"] = _prepend_env_path(
+        env.get("PYTHONPATH", ""),
+        str(PROJECT_ROOT),
+    )
+    env_summary["pythonpath_injected_project_root"] = True
 
     alloc_conf = env.get("PYTORCH_ALLOC_CONF", "").strip()
     if alloc_conf:

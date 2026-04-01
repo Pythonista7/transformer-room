@@ -1,10 +1,12 @@
-
-from pathlib import Path
 import sys
+from pathlib import Path
 
-from src.core.config import BPETokenizerConfig, BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFTextDatasetConfig, HoldoutSplitConfig, LRSchedulerChainConfig, LRSchedulerStageConfig, LoggingConfig, OptimizerConfig, PreSplitConfig, RunConfig, TrainConfig, WandbMetricsConfig
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.core.config import BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFTextDatasetConfig, HoldoutSplitConfig, LRSchedulerChainConfig, LRSchedulerStageConfig, LoggingConfig, OptimizerConfig, PreSplitConfig, RunConfig, TrainConfig, WandbMetricsConfig
 from src.train import model_pipeline
-from src.training import wikitext as training_wikitext
 
 """
 This is going to be a GPT-2 size model but with pre-norms and only a decay lr-schedule (thanks to pre-norm).
@@ -13,10 +15,6 @@ This is going to be a GPT-2 size model but with pre-norms and only a decay lr-sc
 WANDB_PROJECT_NAME = "transformer-room-baseline"
 WANDB_GROUP_NAME = "phase1/stage-1"
 WANDB_RUN_NAME = "baseline-gpt-2-124M"
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 SEED = 47
 

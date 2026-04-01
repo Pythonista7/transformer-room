@@ -83,8 +83,19 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
         unset_env_keys: list[str] | None = None,
         inject_dummy_wandb: bool = True,
         pythonpath_entries: list[Path],
+        wrapper_cwd: Path | None = None,
+        child_command: list[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         child_script = f"{child_code}\nimport sys\nsys.exit({child_exit_code})\n"
+        command = (
+            child_command
+            if child_command is not None
+            else [
+                sys.executable,
+                "-c",
+                child_script,
+            ]
+        )
         cmd = [
             sys.executable,
             str(WRAPPER_PATH),
@@ -93,9 +104,7 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             "--run-name",
             "wrapper-test",
             "--",
-            sys.executable,
-            "-c",
-            child_script,
+            *command,
         ]
         env = dict(os.environ)
         if unset_env_keys:
@@ -117,6 +126,7 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            cwd=wrapper_cwd,
             env=env,
         )
 
@@ -330,6 +340,42 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(metadata["env"]["pytorch_alloc_conf"], "expandable_segments:True")
             self.assertEqual(metadata["env"]["pytorch_alloc_conf_source"], "defaulted")
+
+    def test_project_root_is_injected_into_child_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            child_script_path = tmp_path / "nested" / "child_imports_src.py"
+            _write_requests_stub(stub_dir)
+            child_script_path.parent.mkdir(parents=True, exist_ok=True)
+            child_script_path.write_text(
+                "from src.utils.vast import resolve_vast_api_key\n"
+                "print('src-import-ok')\n",
+                encoding="utf-8",
+            )
+
+            result = self._run_wrapper(
+                child_code="print('unused')",
+                child_exit_code=0,
+                child_command=[sys.executable, str(child_script_path)],
+                log_dir=log_dir,
+                wrapper_cwd=tmp_path,
+                wrapper_env={
+                    "CONTAINER_ID": "12345",
+                    "CONTAINER_API_KEY": "vast-test-key",
+                },
+                pythonpath_entries=[stub_dir],
+            )
+
+            self.assertEqual(result.returncode, 0)
+            log_path = _single_file(log_dir, "*.log")
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("src-import-ok", log_text)
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertTrue(metadata["env"]["pythonpath_injected_project_root"])
 
     def test_missing_wandb_api_key_fails_without_interactive_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
