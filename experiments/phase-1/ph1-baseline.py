@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 
 from src.core.config import BPETokenizerConfig, BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFTextDatasetConfig, HoldoutSplitConfig, LRSchedulerChainConfig, LRSchedulerStageConfig, LoggingConfig, OptimizerConfig, PreSplitConfig, RunConfig, TrainConfig, WandbMetricsConfig
+from src.train import model_pipeline
 from src.training import wikitext as training_wikitext
 
 """
@@ -153,3 +154,20 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             ),
         ),
 )
+
+
+def main() -> int:
+    result = model_pipeline(PHASE_1_STAGE_1_BAELINE_CONFIG)
+    print(
+        "Training complete | "
+        f"run_dir={result.run_artifact_dir} | "
+        f"checkpoint={result.checkpoint_path} | "
+        f"final_model={result.final_model_path}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    result = main()
+    import os
+    os._exit(result)
