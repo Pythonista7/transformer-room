@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import asdict, dataclass, replace
+from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
@@ -190,6 +191,7 @@ def train_loop(
     train_loader_len = _safe_len(train_loader)
     streaming_mode = config.train.data_mode == "streaming"
     max_steps = config.train.max_steps
+    total_epochs = config.train.epochs
     next_resume_epoch = 0
     next_resume_batch_idx = 0
 
@@ -328,7 +330,14 @@ def train_loop(
 
     try:
         metrics_engine.on_train_start()
-        for epoch in tqdm(range(start_epoch, config.train.epochs), desc="Epochs"):
+        epoch_iterator = (
+            range(start_epoch, total_epochs)
+            if total_epochs is not None
+            else count(start_epoch)
+        )
+        epoch_label_total = "?" if total_epochs is None else str(total_epochs)
+
+        for epoch in tqdm(epoch_iterator, desc="Epochs"):
             if stop_training:
                 break
             if hasattr(train_loader, "dataset") and hasattr(train_loader.dataset, "set_epoch"):
@@ -683,7 +692,7 @@ def train_loop(
 
             if run_validation and epoch_fully_exhausted:
                 print(
-                    f"Epoch {epoch + 1}/{config.train.epochs} | "
+                    f"Epoch {epoch + 1}/{epoch_label_total} | "
                     f"train_loss={avg_train_loss:.4f} | "
                     f"val_loss={val_metrics['val_loss']:.4f} | "
                     f"val_perplexity={val_metrics['val_perplexity']:.4f} | "
@@ -691,7 +700,7 @@ def train_loop(
                 )
             else:
                 print(
-                    f"Epoch {epoch + 1}/{config.train.epochs} | "
+                    f"Epoch {epoch + 1}/{epoch_label_total} | "
                     f"train_loss={avg_train_loss:.4f}"
                 )
 

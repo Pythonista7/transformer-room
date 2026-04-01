@@ -203,6 +203,21 @@ class ConfigValidationTests(unittest.TestCase):
             config.tokenizer.bpb_mode = mode
             validate_experiment_config(config)
 
+    def test_streaming_max_steps_allows_epochless_training(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.train.epochs = None
+        validate_experiment_config(config)
+
+    def test_missing_epochs_requires_max_steps(self) -> None:
+        config = make_config()
+        config.train.epochs = None
+        config.train.max_steps = None
+        with self.assertRaisesRegex(
+            ValueError,
+            "train.epochs must be set when train.max_steps is not provided",
+        ):
+            validate_experiment_config(config)
+
     def test_hf_bpb_mode_rejects_unknown_value(self) -> None:
         config = self._make_streaming_hf_config()
         config.tokenizer.bpb_mode = "invalid"  # type: ignore[assignment]

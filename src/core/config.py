@@ -217,7 +217,7 @@ class TrainConfig:
 
     Parameters:
     - `effective_batch_size`: optimizer-step batch size target.
-    - `epochs`: epoch budget.
+    - `epochs`: epoch budget. Optional only when `max_steps` is set.
     - `optimizer`: optimizer settings.
     - `micro_batch_size`: per-microbatch loader batch size. Auto-resolved when omitted.
     - `accumulation_steps`: gradient accumulation factor. Auto-resolved when omitted.
@@ -238,7 +238,7 @@ class TrainConfig:
     - `effective_batch_size == micro_batch_size * accumulation_steps` is enforced.
     """
     effective_batch_size: int
-    epochs: int = 3
+    epochs: int | None = 3
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     micro_batch_size: int | None = None
     accumulation_steps: int | None = None
@@ -648,8 +648,12 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
     ):
         raise ValueError("model.checkpoint_every_n_layers must be > 0.")
 
-    if config.train.epochs <= 0:
-        raise ValueError("train.epochs must be > 0.")
+    if config.train.epochs is None and config.train.max_steps is None:
+        raise ValueError(
+            "train.epochs must be set when train.max_steps is not provided."
+        )
+    if config.train.epochs is not None and config.train.epochs <= 0:
+        raise ValueError("train.epochs must be > 0 when provided.")
     supported_optimizers = {"adam", "adamw", "sgd"}
     if config.train.optimizer.name not in supported_optimizers:
         raise ValueError(
