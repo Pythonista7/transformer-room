@@ -2,14 +2,16 @@
 from pathlib import Path
 import sys
 
-from src.core.config import BPETokenizerConfig, BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFTextDatasetConfig, HoldoutSplitConfig, LoggingConfig, OptimizerConfig, RunConfig, TrainConfig, WandbMetricsConfig
+from src.core.config import BPETokenizerConfig, BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFTextDatasetConfig, HoldoutSplitConfig, LoggingConfig, OptimizerConfig, PreSplitConfig, RunConfig, TrainConfig, WandbMetricsConfig
 from src.training import wikitext as training_wikitext
 
 """
 This is going to be a GPT-2 size model but with pre-norms and only a decay lr-schedule (thanks to pre-norm).
 """
 
-PROJECT_NAME = "transformer-room-Phase-1"
+WANDB_PROJECT_NAME = "transformer-room-baseline"
+WANDB_GROUP_NAME = "phase1/stage-1"
+WANDB_RUN_NAME = "baseline-gpt-2-124M"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -28,10 +30,11 @@ N_LAYERS = 12
 
 
 # Training Params
-EPOCHS = 1
-EFFECTIVE_BATCH_SZ = 64
+# EPOCHS = 1 we will use MAX_TRAIN_STEPS instead since the dataset is huge.
+EFFECTIVE_BATCH_SZ = 128
 MICRO_BATCH_SZ = 32
-LEARNING_RATE = 3e-4
+LEARNING_RATE = 1e-3
+FINAL_LEARNING_RATE = 3e-4
 SEQ_LEN = 1024
 STRIDE = SEQ_LEN
 
@@ -40,7 +43,6 @@ STRIDE = SEQ_LEN
 
 # We are using a 10B Token dataset, with a batch-sz of 64 & seq_len 1024 toks
 # which comes to 65,536 per step
-
 DATASET_NAME = "HuggingFaceFW/fineweb"
 DATASET_CONFIG = "sample-10BT"
 
@@ -52,22 +54,24 @@ MAX_TRAIN_STEPS = 100_000
 
 PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
         run=RunConfig(
-            project_name=PROJECT_NAME,
-            run_name="base",
-            group_name="ph1-s1",
+            project_name=WANDB_PROJECT_NAME,
+            group_name=WANDB_GROUP_NAME,
+            run_name=WANDB_RUN_NAME,
             artifacts_root=str(PROJECT_ROOT / "artifacts" / "models"),
             resume_from_checkpoint=True,
             persist_local_artifacts=True,
-            checkpoint_every_n_steps=25_000, # TODO: Make this a % value of total steps given we know the dataset size.
+            checkpoint_every_n_steps=30_000, # TODO: Make this a % value of total steps given we know the dataset size.
             seed=SEED,
             use_torch_compile=True,
             activation_memory_budget=0.75,
+            compile_warmup_steps=3,
         ),
         dataset=HFTextDatasetConfig(
             dataset_name=DATASET_NAME,
             dataset_config=DATASET_CONFIG,
             split="train",
             text_field="text",
+            shuffle_buffer_size=5_000,
         ),
         tokenizer=HFPretrainedTokenizerConfig(
             pretrained_name_or_path="gpt2",
@@ -78,10 +82,11 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             n_heads=N_HEADS,
             layers=N_LAYERS,
             norm_placement="pre",
-            attention_impl="sdpa"
+            attention_impl="sdpa",
+            enable_weight_tying=True,
         ),
         train=TrainConfig(
-            epochs=EPOCHS,
+            epochs=None, # We will use MAX_TRAIN_STEPS instead.
             optimizer=OptimizerConfig(
                 name="adamw", 
                 learning_rate=LEARNING_RATE,
@@ -97,11 +102,7 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             max_steps= MAX_TRAIN_STEPS,
             run_validation=False
         ),
-        split=HoldoutSplitConfig(
-            train_fraction=0.9,
-            seed=SEED,
-            shuffle=False,
-        ),
+        split=PreSplitConfig(),
         logging=LoggingConfig(
             provider="wandb",
             enable_artifact_io=True,
@@ -114,6 +115,7 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
                 enable_peak_memory=True,
                 enable_global_grad_norm=False,
                 enable_layer_grad_norms=False,
+                # what is included in diagonistic_every_n_steps? 
             ),
         ),
 )
