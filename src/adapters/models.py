@@ -29,7 +29,8 @@ class BaselineDecoderModelAdapter:
             dropout=cfg.dropout,
             attention_impl=cfg.attention_impl,
             pad_id=special.pad_id,
-            norm_placement=cfg.norm_placement
+            norm_placement=cfg.norm_placement,
+            enable_weight_tying=cfg.enable_weight_tying,
         )
 
 

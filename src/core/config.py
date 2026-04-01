@@ -82,7 +82,7 @@ class BaselineDecoderConfig:
     dropout: float = 0.1
     attention_impl: AttentionImplementation = "basic"
     norm_placement: NormPlacement = "post"
-
+    enable_weight_tying: bool = False
 
 @dataclass(slots=True)
 class ACEveryNDecoderConfig:

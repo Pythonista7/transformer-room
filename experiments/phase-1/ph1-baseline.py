@@ -2,9 +2,12 @@
 from pathlib import Path
 import sys
 
-from src.core.config import BPETokenizerConfig, BaselineDecoderConfig, ExperimentConfig, HFTextDatasetConfig, HoldoutSplitConfig, LoggingConfig, OptimizerConfig, RunConfig, TrainConfig, WandbMetricsConfig
+from src.core.config import BPETokenizerConfig, BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFTextDatasetConfig, HoldoutSplitConfig, LoggingConfig, OptimizerConfig, RunConfig, TrainConfig, WandbMetricsConfig
 from src.training import wikitext as training_wikitext
 
+"""
+This is going to be a GPT-2 size model but with pre-norms and only a decay lr-schedule (thanks to pre-norm).
+"""
 
 PROJECT_NAME = "transformer-room-Phase-1"
 
@@ -14,22 +17,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 SEED = "1345"
 
-# Dataset
-DATASET_NAME = "Salesforce/wikitext"
-DATASET_CONFIG = "wikitext-2-v1"
 
-vocab_path = PROJECT_ROOT / "src" / "vocabs" / "wikitext2_v1_hf_vocab_bpe.txt"
-
-BASE_VOCAB_SZ = training_wikitext.ensure_wikitext_vocab_file(
-        dataset_name=DATASET_NAME,
-        dataset_config=DATASET_CONFIG,
-        vocab_path=vocab_path,
-    )
 
 # Model Params
+# Using the gpt-2 tokenizer we get around 50k vocab size
+# And this model will have around 124M params ( see src/utils/simple_calc.py )
 D_MODEL = 768
 N_HEADS = 12
 N_LAYERS = 12
+
 
 # Training Params
 EPOCHS = 1
@@ -38,7 +34,21 @@ MICRO_BATCH_SZ = 32
 LEARNING_RATE = 3e-4
 SEQ_LEN = 1024
 STRIDE = SEQ_LEN
-TRAINING_DATA_FRACTION = 0.9
+
+
+# Dataset
+
+# We are using a 10B Token dataset, with a batch-sz of 64 & seq_len 1024 toks
+# which comes to 65,536 per step
+
+DATASET_NAME = "HuggingFaceFW/fineweb"
+DATASET_CONFIG = "sample-10BT"
+
+
+# for 100k steps, we shouldve seen around 6,553,600,000 ~ 6.5B tokens
+MAX_TRAIN_STEPS = 100_000
+
+
 
 PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
         run=RunConfig(
@@ -48,7 +58,7 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             artifacts_root=str(PROJECT_ROOT / "artifacts" / "models"),
             resume_from_checkpoint=True,
             persist_local_artifacts=True,
-            checkpoint_every_n_steps=10_000, # TODO: Make this a % value of total steps given we know the dataset size.
+            checkpoint_every_n_steps=25_000, # TODO: Make this a % value of total steps given we know the dataset size.
             seed=SEED,
             use_torch_compile=True,
             activation_memory_budget=0.75,
@@ -59,10 +69,9 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             split="train",
             text_field="text",
         ),
-        tokenizer=BPETokenizerConfig(
-            base_vocab_size=BASE_VOCAB_SZ,
-            num_special_tokens=3,
-            vocab_path=str(vocab_path),
+        tokenizer=HFPretrainedTokenizerConfig(
+            pretrained_name_or_path="gpt2",
+            use_fast=True,
         ),
         model=BaselineDecoderConfig(
             d_model=D_MODEL,
@@ -76,15 +85,17 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             optimizer=OptimizerConfig(
                 name="adamw", 
                 learning_rate=LEARNING_RATE,
-                weight_decay= 0.01
+                weight_decay= 0.01,
             ),
             effective_batch_size=EFFECTIVE_BATCH_SZ,
             micro_batch_size= MICRO_BATCH_SZ,
             accumulation_steps= EFFECTIVE_BATCH_SZ/MICRO_BATCH_SZ,
+            lr_scaling= "none" if EFFECTIVE_BATCH_SZ/MICRO_BATCH_SZ == 1 else "sqrt",
             seq_len=SEQ_LEN,
             stride=STRIDE,
-            data_fraction=TRAINING_DATA_FRACTION,
-            run_validation=True
+            data_mode="streaming",
+            max_steps= MAX_TRAIN_STEPS,
+            run_validation=False
         ),
         split=HoldoutSplitConfig(
             train_fraction=0.9,

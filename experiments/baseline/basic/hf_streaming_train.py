@@ -30,7 +30,7 @@ def build_config() -> ExperimentConfig:
             artifacts_root=str(project_root / "artifacts" / "models"),
             run_name="wikitext2_hf_streaming_v1",
             resume_from_checkpoint=True,
-            checkpoint_every_n_steps=None,
+            checkpoint_every_n_steps=100_000,
             use_torch_compile=True
         ),
         dataset=HFTextDatasetConfig(
@@ -49,6 +49,7 @@ def build_config() -> ExperimentConfig:
             d_model=128,
             n_heads=4,
             layers=2,
+            enable_weight_tying=False
         ),
         train=TrainConfig(
             epochs=3,

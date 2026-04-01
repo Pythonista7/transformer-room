@@ -20,9 +20,11 @@ class BaselineModel(nn.Module):
         dropout=0.1,
         attention_impl: str = "basic",
         norm_placement: NormPlacement = "post",
+        enable_weight_tying: bool = False, # Save params for small/med models but is counter-productive on larger scales.
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.enable_weight_tying = enable_weight_tying
         self.norm_placement = norm_placement
         if self.norm_placement not in {"pre", "post"}:
             raise ValueError(
@@ -52,7 +54,11 @@ class BaselineModel(nn.Module):
                 for _ in range(self.layer_count)
             ]
         )
-        self.output_proj = LinearLayer(d_model, vocab_size) # Projecting back to vocab size for prediction.
+        
+        # Projecting back to vocab size for prediction.
+        # Incase of weight tying the embedding table will be reused.
+        self.output_proj = None if self.enable_weight_tying else LinearLayer(d_model, vocab_size) 
+        
         if self.norm_placement == "pre":
             self.final_ln = LayerNorm(d_model)
         
@@ -72,6 +78,9 @@ class BaselineModel(nn.Module):
             x = self.final_ln(x)
         # Final output of shape [batch,tokens,d_model]
         # Now project back the d_model output to the vocab size for prediction. This can be done with a linear layer.
-        out = self.output_proj(x)
+        if self.enable_weight_tying:
+            out = x @ self.embedding_layer.embedding_table.T
+        else:
+            out = self.output_proj(x)
         
         return out
