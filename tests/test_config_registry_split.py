@@ -11,6 +11,8 @@ from src.config import (
     BaselineDecoderConfig,
     ExperimentConfig,
     HoldoutSplitConfig,
+    LRSchedulerChainConfig,
+    LRSchedulerStageConfig,
     LocalTextDatasetConfig,
     LoggingConfig,
     OptimizerConfig,
@@ -79,10 +81,9 @@ class ConfigValidationTests(unittest.TestCase):
         train_cfg = TrainConfig(effective_batch_size=8)
         self.assertEqual(train_cfg.lr_scaling, "none")
 
-    def test_train_warmup_defaults_to_disabled(self) -> None:
+    def test_train_lr_scheduler_defaults_to_disabled(self) -> None:
         train_cfg = TrainConfig(effective_batch_size=8)
-        self.assertEqual(train_cfg.lr_warmup_steps, 0)
-        self.assertEqual(train_cfg.lr_warmup_start_factor, 0.0)
+        self.assertIsNone(train_cfg.lr_scheduler)
 
     def test_train_lr_scaling_requires_sqrt_when_accumulating(self) -> None:
         with self.assertRaisesRegex(
@@ -109,14 +110,25 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertAlmostEqual(resolved.applied_learning_rate, 1e-3 * (2**0.5), places=9)
         self.assertTrue(resolved.scaling_active)
 
-    def test_train_warmup_fields_serialize(self) -> None:
+    def test_train_lr_scheduler_fields_serialize(self) -> None:
         config = make_config()
-        config.train.lr_warmup_steps = 25
-        config.train.lr_warmup_start_factor = 0.2
+        config.train.lr_scheduler = LRSchedulerChainConfig(
+            stages=[
+                LRSchedulerStageConfig(
+                    type="linear",
+                    start_factor=0.2,
+                    end_factor=1.0,
+                    steps=25,
+                )
+            ]
+        )
 
         payload = config.to_dict()
-        self.assertEqual(payload["train"]["lr_warmup_steps"], 25)
-        self.assertEqual(payload["train"]["lr_warmup_start_factor"], 0.2)
+        self.assertEqual(payload["train"]["lr_scheduler"]["stages"][0]["steps"], 25)
+        self.assertEqual(
+            payload["train"]["lr_scheduler"]["stages"][0]["start_factor"],
+            0.2,
+        )
 
     def test_validate_experiment_config_rejects_invalid_lr_scaling_mode(self) -> None:
         config = make_config()
@@ -181,18 +193,44 @@ class ConfigValidationTests(unittest.TestCase):
         ):
             validate_experiment_config(config)
 
-    def test_invalid_lr_warmup_steps_fails(self) -> None:
+    def test_invalid_lr_scheduler_nonfinal_none_steps_fails(self) -> None:
         config = make_config()
-        config.train.lr_warmup_steps = -1
-        with self.assertRaisesRegex(ValueError, "train.lr_warmup_steps must be >= 0"):
-            validate_experiment_config(config)
-
-    def test_invalid_lr_warmup_start_factor_fails(self) -> None:
-        config = make_config()
-        config.train.lr_warmup_start_factor = 1.5
+        config.train.lr_scheduler = LRSchedulerChainConfig(
+            stages=[
+                LRSchedulerStageConfig(
+                    type="linear",
+                    start_factor=0.2,
+                    end_factor=0.6,
+                    steps=None,
+                ),
+                LRSchedulerStageConfig(
+                    type="cosine",
+                    end_factor=0.1,
+                    steps=10,
+                ),
+            ]
+        )
         with self.assertRaisesRegex(
             ValueError,
-            "train.lr_warmup_start_factor must be in \\[0, 1\\]",
+            "can be None only for the final stage",
+        ):
+            validate_experiment_config(config)
+
+    def test_invalid_lr_scheduler_start_factor_fails(self) -> None:
+        config = make_config()
+        config.train.lr_scheduler = LRSchedulerChainConfig(
+            stages=[
+                LRSchedulerStageConfig(
+                    type="linear",
+                    start_factor=1.5,
+                    end_factor=1.0,
+                    steps=10,
+                )
+            ]
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "start_factor must be in \\[0, 1\\]",
         ):
             validate_experiment_config(config)
 

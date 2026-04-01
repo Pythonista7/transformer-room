@@ -8,47 +8,65 @@ import experiments.baseline.pre_vs_post_layer_norm as layer_norm_exp
 
 
 class PreVsPostLayerNormExperimentTests(unittest.TestCase):
-    def test_build_configs_emits_four_wandb_variants(self) -> None:
+    def test_build_variant_configs_emits_expected_variants(self) -> None:
         with mock.patch.object(
             layer_norm_exp.training_wikitext,
             "ensure_wikitext_vocab_file",
             return_value=128,
         ):
-            configs = layer_norm_exp.build_configs()
+            pairs = layer_norm_exp.build_variant_configs()
+        configs = {
+            spec.run_name: config
+            for spec, config in pairs
+        }
 
         self.assertEqual(
-            set(configs.keys()),
+            set(configs),
             {
-                "pre_no_warmup",
-                "pre_warmup",
-                "post_no_warmup",
-                "post_warmup",
+                "post-ln-shallow-warmup0",
+                f"post-ln-shallow-warmup{layer_norm_exp.LR_WARMUP_STEPS}",
+                "post-ln-deep-warmup0",
+                f"post-ln-deep-warmup{layer_norm_exp.LR_WARMUP_STEPS}",
+                "pre-ln-shallow-warmup0",
+                "pre-ln-deep-warmup0",
             },
         )
-        self.assertEqual(configs["pre_no_warmup"].model.norm_placement, "pre")
-        self.assertEqual(configs["post_warmup"].model.norm_placement, "post")
-        self.assertEqual(configs["pre_no_warmup"].train.lr_warmup_steps, 0)
+        self.assertEqual(configs["pre-ln-shallow-warmup0"].model.norm_placement, "pre")
+        self.assertEqual(configs["post-ln-deep-warmup0"].model.norm_placement, "post")
+        self.assertIsNone(configs["pre-ln-shallow-warmup0"].train.lr_scheduler)
+        warmup_cfg = configs[f"post-ln-shallow-warmup{layer_norm_exp.LR_WARMUP_STEPS}"]
+        self.assertIsNotNone(warmup_cfg.train.lr_scheduler)
+        self.assertEqual(len(warmup_cfg.train.lr_scheduler.stages), 1)
+        stage = warmup_cfg.train.lr_scheduler.stages[0]
+        self.assertEqual(stage.type, "linear")
         self.assertEqual(
-            configs["pre_warmup"].train.lr_warmup_steps,
+            stage.steps,
             layer_norm_exp.LR_WARMUP_STEPS,
         )
         self.assertEqual(
-            configs["pre_warmup"].train.lr_warmup_start_factor,
+            stage.start_factor,
             layer_norm_exp.LR_WARMUP_START_FACTOR,
         )
-        self.assertEqual(configs["post_warmup"].logging.provider, "wandb")
-        self.assertTrue(configs["post_warmup"].logging.wandb.enable_layer_grad_norms)
+        self.assertEqual(stage.end_factor, 1.0)
+        self.assertEqual(warmup_cfg.logging.provider, "wandb")
+        self.assertTrue(warmup_cfg.logging.wandb.enable_layer_grad_norms)
         self.assertEqual(
-            configs["post_warmup"].logging.wandb.layer_grad_norm_stride,
+            warmup_cfg.logging.wandb.layer_grad_norm_stride,
             layer_norm_exp.LAYER_GRAD_STRIDE,
         )
         self.assertEqual(
-            configs["post_warmup"].logging.wandb.layer_grad_norms_every_n_steps,
+            warmup_cfg.logging.wandb.layer_grad_norms_every_n_steps,
             layer_norm_exp.LAYER_GRAD_EVERY_N_STEPS,
         )
 
     def test_main_runs_all_variants(self) -> None:
-        fake_result = SimpleNamespace(run_artifact_dir="/tmp/run-dir")
+        fake_result = SimpleNamespace(
+            run_artifact_dir="/tmp/run-dir",
+            global_step=10,
+            final_train_loss=1.0,
+            final_val_loss=1.1,
+            final_val_perplexity=3.0,
+        )
         with (
             mock.patch.object(
                 layer_norm_exp.training_wikitext,
@@ -60,11 +78,16 @@ class PreVsPostLayerNormExperimentTests(unittest.TestCase):
                 "model_pipeline",
                 return_value=fake_result,
             ) as pipeline_mock,
+            mock.patch.object(
+                layer_norm_exp,
+                "_write_summary_artifacts",
+                return_value=layer_norm_exp.SUMMARY_ROOT / "fake-summary",
+            ),
         ):
             exit_code = layer_norm_exp.main()
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(pipeline_mock.call_count, 4)
+        self.assertEqual(pipeline_mock.call_count, len(layer_norm_exp.VARIANT_SPECS))
 
 
 if __name__ == "__main__":

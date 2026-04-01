@@ -62,6 +62,8 @@ from src.config import (
     ExperimentConfig,
     HFTextDatasetConfig,
     HoldoutSplitConfig,
+    LRSchedulerChainConfig,
+    LRSchedulerStageConfig,
     LoggingConfig,
     OptimizerConfig,
     RunConfig,
@@ -102,6 +104,21 @@ def build_config() -> ExperimentConfig:
             epochs=1,
             optimizer=OptimizerConfig(name="adam", learning_rate=1e-3),
             effective_batch_size=64,
+            lr_scheduler=LRSchedulerChainConfig(
+                stages=[
+                    LRSchedulerStageConfig(
+                        type="linear",
+                        start_factor=0.1,
+                        end_factor=1.0,
+                        steps=200,
+                    ),
+                    LRSchedulerStageConfig(
+                        type="cosine",
+                        end_factor=0.05,
+                        steps=None,
+                    ),
+                ]
+            ),
             seq_len=128,
             stride=128,
             data_fraction=1.0,
@@ -128,6 +145,8 @@ if __name__ == "__main__":
 - Model scale: `d_model`, `n_heads`, `layers`, `dropout`
 - Optimizer: `name`, `learning_rate`, `weight_decay`
 - Batching: `effective_batch_size`, `micro_batch_size`, `accumulation_steps`, `lr_scaling`
+- LR scheduler: `lr_scheduler=LRSchedulerChainConfig(stages=[...])`
+  `start_factor` / `end_factor` are multipliers on optimizer LR (not absolute LR values).
 - Streaming mode: `TrainConfig(data_mode="streaming", max_steps=...)` plus `PreSplitConfig()`
 - Logging: `LoggingConfig(provider="console" | "wandb")`
 

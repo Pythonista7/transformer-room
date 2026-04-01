@@ -790,7 +790,27 @@ def model_pipeline(
         config,
         learning_rate=learning_rate_cfg.applied_learning_rate,
     )
-    scheduler = build_lr_scheduler(optimizer, config)
+    train_loader_len_for_scheduler = _safe_len(train_loader)
+    total_optimizer_steps: int | None
+    if config.train.max_steps is not None:
+        total_optimizer_steps = int(config.train.max_steps)
+    elif train_loader_len_for_scheduler is not None:
+        total_optimizer_steps = int(
+            config.train.epochs
+            * math.ceil(
+                # steps_per_epoch = ceil(num_micro_batches / accumulation_steps)
+                float(train_loader_len_for_scheduler)
+                / float(max(1, batching.accumulation_steps))
+            )
+        )
+    else:
+        total_optimizer_steps = None
+
+    scheduler = build_lr_scheduler(
+        optimizer,
+        config,
+        total_optimizer_steps=total_optimizer_steps,
+    )
     # We need to do reduction="sum" because we have grad-acc, if we set it to "mean" then
     # at the end of effective batch we will have (avg_loss_mb_1 + avg_loss_mb_2 ...)/num_of_mb which i wrong,
     # what we want is (loss_mb_1 + loss_mb_2 + ...)/num_of_mb hence we use reduction="sum"
@@ -837,8 +857,19 @@ def model_pipeline(
                 "lr_scale_factor": float(learning_rate_cfg.scale_factor),
                 "lr_applied": float(learning_rate_cfg.applied_learning_rate),
                 "lr_scaling_active": float(1 if learning_rate_cfg.scaling_active else 0),
-                "lr_warmup_steps": float(config.train.lr_warmup_steps),
-                "lr_warmup_start_factor": float(config.train.lr_warmup_start_factor),
+                "lr_scheduler_enabled": float(
+                    1 if config.train.lr_scheduler is not None else 0
+                ),
+                "lr_scheduler_stage_count": float(
+                    0
+                    if config.train.lr_scheduler is None
+                    else len(config.train.lr_scheduler.stages)
+                ),
+                "lr_scheduler_total_optimizer_steps": float(
+                    -1
+                    if total_optimizer_steps is None
+                    else total_optimizer_steps
+                ),
             },
             step=0,
         )

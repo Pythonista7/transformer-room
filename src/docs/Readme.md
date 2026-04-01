@@ -121,6 +121,8 @@ from src.config import (
     LocalTextDatasetConfig,
     BPETokenizerConfig,
     BaselineDecoderConfig,
+    LRSchedulerChainConfig,
+    LRSchedulerStageConfig,
     OptimizerConfig,
     TrainConfig,
     HoldoutSplitConfig,
@@ -253,6 +255,35 @@ Learning-rate scaling under accumulation is explicit:
 - If `effective_batch_size > micro_batch_size`, `lr_scaling="sqrt"` is required.
 - Applied LR is:
   - `applied_lr = base_lr * sqrt(effective_batch_size / micro_batch_size)`
+
+Learning-rate scheduler chains are configured with `TrainConfig.lr_scheduler`.
+
+```python
+TrainConfig(
+    ...,
+    lr_scheduler=LRSchedulerChainConfig(
+        stages=[
+            LRSchedulerStageConfig(
+                type="linear",
+                start_factor=0.1,
+                end_factor=1.0,
+                steps=500,
+            ),
+            LRSchedulerStageConfig(
+                type="cosine",
+                end_factor=0.05,
+                steps=None,  # only valid for final stage when total steps are known
+            ),
+        ]
+    ),
+)
+```
+
+- Scheduler cadence is optimizer-step based.
+- `start_factor` and `end_factor` are multiplicative factors, not absolute LR targets.
+  Effective LR at any step is `optimizer_lr * factor` (where `optimizer_lr` is already LR-scaled if `lr_scaling` is active).
+- For unknown total-step runs (for example streaming with `max_steps=None`), every stage must set explicit `steps`.
+- If training runs longer than explicit stages, the final stage LR factor is held constant.
 
 ---
 

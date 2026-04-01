@@ -20,6 +20,8 @@ from src.config import (
     ExperimentConfig,
     HFTextDatasetConfig,
     HoldoutSplitConfig,
+    LRSchedulerChainConfig,
+    LRSchedulerStageConfig,
     LoggingConfig,
     OptimizerConfig,
     RunConfig,
@@ -56,7 +58,7 @@ SEED = 42
 
 LEARNING_RATE = 1e-3
 LR_WARMUP_STEPS = 500
-LR_WARMUP_START_FACTOR = 1e-4
+LR_WARMUP_START_FACTOR = 0.1
 LAYER_GRAD_STRIDE = 1
 LAYER_GRAD_EVERY_N_STEPS = 10
 
@@ -178,9 +180,18 @@ def _build_variant_config(
     vocab_path: Path,
     spec: VariantSpec,
 ) -> ExperimentConfig:
-    warmup_start_factor = (
-        LR_WARMUP_START_FACTOR if spec.warmup_steps > 0 else 0.0
-    )
+    scheduler_cfg = None
+    if spec.warmup_steps > 0:
+        scheduler_cfg = LRSchedulerChainConfig(
+            stages=[
+                LRSchedulerStageConfig(
+                    type="linear",
+                    steps=spec.warmup_steps,
+                    start_factor=LR_WARMUP_START_FACTOR,
+                    end_factor=1.0,
+                )
+            ]
+        )
     return ExperimentConfig(
         run=RunConfig(
             project_name=PROJECT_NAME,
@@ -218,8 +229,7 @@ def _build_variant_config(
             seq_len=SEQ_LEN,
             stride=STRIDE,
             data_fraction=DATA_FRACTION,
-            lr_warmup_steps=spec.warmup_steps,
-            lr_warmup_start_factor=warmup_start_factor,
+            lr_scheduler=scheduler_cfg,
         ),
         split=HoldoutSplitConfig(
             train_fraction=TRAIN_FRACTION,

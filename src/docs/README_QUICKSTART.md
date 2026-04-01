@@ -21,6 +21,8 @@ from src.config import (
     LocalTextDatasetConfig,
     BPETokenizerConfig,
     BaselineDecoderConfig,
+    LRSchedulerChainConfig,
+    LRSchedulerStageConfig,
     OptimizerConfig,
     TrainConfig,
     HoldoutSplitConfig,
@@ -126,6 +128,39 @@ TrainConfig(
 `train.batch_size` was removed. Any legacy `batch_size=...` usage now fails at constructor time.
 When accumulation is active (`effective_batch_size > micro_batch_size`), `lr_scaling="sqrt"` is required.
 
+## LR Scheduler Chains
+
+`TrainConfig.lr_scheduler` supports chained stage schedules with optimizer-step cadence.
+
+```python
+TrainConfig(
+    ...,
+    lr_scheduler=LRSchedulerChainConfig(
+        stages=[
+            LRSchedulerStageConfig(
+                type="linear",
+                start_factor=0.1,
+                end_factor=1.0,
+                steps=500,
+            ),
+            LRSchedulerStageConfig(
+                type="cosine",
+                end_factor=0.05,
+                steps=None,  # only valid for final stage with known total steps
+            ),
+        ]
+    ),
+)
+```
+
+Notes:
+
+- Schedulers advance once per optimizer step (never per micro-batch).
+- `start_factor` and `end_factor` are multipliers, not absolute LRs.
+  Effective LR at a step is `optimizer_lr * factor` (and `optimizer_lr` already includes `lr_scaling` when enabled).
+- For unknown total-step runs (for example streaming with `max_steps=None`), every stage must set explicit `steps`.
+- If training outlives explicit stages, the final stage LR factor is held constant.
+
 ## 2) Run it
 
 Script path style (from repo root):
@@ -174,6 +209,9 @@ For `LoggingConfig(provider="wandb", ...)` runs:
 - Optimizer:
   - `OptimizerConfig(name="adam" | "adamw" | "sgd", learning_rate=..., weight_decay=...)`
   - When using accumulation (`effective_batch_size > micro_batch_size`), set `TrainConfig(lr_scaling="sqrt")` to enable required LR scaling.
+- LR scheduler:
+  - `TrainConfig(lr_scheduler=LRSchedulerChainConfig(stages=[...]))`
+  - Stage types: `"linear"` and `"cosine"`
 - Tokenizer size:
   - `base_vocab_size`
 

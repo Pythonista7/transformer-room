@@ -9,6 +9,7 @@ from .types import SpecialTokenIds
 AttentionImplementation = Literal["basic", "sdpa"]
 NormPlacement = Literal["pre","post"]
 DataMode = Literal["materialized", "streaming"]
+LRSchedulerStageType = Literal["linear", "cosine"]
 
 
 @dataclass(slots=True)
@@ -116,6 +117,20 @@ class OptimizerConfig:
 
 
 @dataclass(slots=True)
+class LRSchedulerStageConfig:
+    """One scheduler stage defined by LR factors relative to optimizer base LR."""
+    type: LRSchedulerStageType
+    end_factor: float
+    steps: int | None = None
+    start_factor: float | None = None
+
+
+@dataclass(slots=True)
+class LRSchedulerChainConfig:
+    stages: list[LRSchedulerStageConfig] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class TrainConfig:
     effective_batch_size: int
     epochs: int = 3
@@ -123,8 +138,7 @@ class TrainConfig:
     micro_batch_size: int | None = None
     accumulation_steps: int | None = None
     lr_scaling: Literal["none", "sqrt"] = "none"
-    lr_warmup_steps: int = 0
-    lr_warmup_start_factor: float = 0.0
+    lr_scheduler: LRSchedulerChainConfig | None = None
     seq_len: int = 128
     stride: int = 128
     data_fraction: float = 1.0
@@ -138,6 +152,7 @@ class TrainConfig:
         self.micro_batch_size = resolved.micro_batch_size
         self.accumulation_steps = resolved.accumulation_steps
         resolve_train_learning_rate(self)
+        validate_train_lr_scheduler_config(self.lr_scheduler)
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +313,41 @@ def resolve_train_learning_rate(
     )
 
 
+def validate_train_lr_scheduler_config(
+    scheduler_cfg: LRSchedulerChainConfig | None,
+) -> None:
+    if scheduler_cfg is None:
+        return
+
+    stages = scheduler_cfg.stages
+    if len(stages) == 0:
+        raise ValueError(
+            "train.lr_scheduler.stages must contain at least one stage when set."
+        )
+
+    for idx, stage in enumerate(stages):
+        if stage.type not in {"linear", "cosine"}:
+            raise ValueError(
+                "train.lr_scheduler.stages[].type must be one of: linear, cosine."
+            )
+        if not 0.0 <= float(stage.end_factor) <= 1.0:
+            raise ValueError(
+                "train.lr_scheduler.stages[].end_factor must be in [0, 1]."
+            )
+        if stage.start_factor is not None and not 0.0 <= float(stage.start_factor) <= 1.0:
+            raise ValueError(
+                "train.lr_scheduler.stages[].start_factor must be in [0, 1] when set."
+            )
+        if stage.steps is None:
+            if idx != len(stages) - 1:
+                raise ValueError(
+                    "train.lr_scheduler.stages[].steps can be None only for the final stage."
+                )
+            continue
+        if int(stage.steps) <= 0:
+            raise ValueError("train.lr_scheduler.stages[].steps must be > 0 when set.")
+
+
 def resolve_special_token_ids(tokenizer_cfg: BPETokenizerConfig) -> SpecialTokenIds:
     base_vocab_size = int(tokenizer_cfg.base_vocab_size)
     num_special_tokens = int(tokenizer_cfg.num_special_tokens)
@@ -438,10 +488,7 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
     if config.train.optimizer.weight_decay < 0:
         raise ValueError("train.optimizer.weight_decay must be >= 0.")
     resolve_train_learning_rate(config.train)
-    if config.train.lr_warmup_steps < 0:
-        raise ValueError("train.lr_warmup_steps must be >= 0.")
-    if not 0.0 <= config.train.lr_warmup_start_factor <= 1.0:
-        raise ValueError("train.lr_warmup_start_factor must be in [0, 1].")
+    validate_train_lr_scheduler_config(config.train.lr_scheduler)
     if config.train.seq_len <= 0:
         raise ValueError("train.seq_len must be > 0.")
     if config.train.stride <= 0:

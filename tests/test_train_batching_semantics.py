@@ -14,6 +14,8 @@ from src.config import (
     BaselineDecoderConfig,
     ExperimentConfig,
     HoldoutSplitConfig,
+    LRSchedulerChainConfig,
+    LRSchedulerStageConfig,
     LocalTextDatasetConfig,
     LoggingConfig,
     OptimizerConfig,
@@ -145,8 +147,7 @@ def _make_config(
     resume_from_checkpoint: bool = False,
     checkpoint_every_n_steps: int = 0,
     wandb_cfg: WandbMetricsConfig | None = None,
-    lr_warmup_steps: int = 0,
-    lr_warmup_start_factor: float = 0.0,
+    lr_scheduler: LRSchedulerChainConfig | None = None,
 ) -> ExperimentConfig:
     dataset_path, vocab_path, artifacts_root = _make_dataset(tmp_path)
     resolved_micro_batch_size = (
@@ -186,8 +187,7 @@ def _make_config(
             micro_batch_size=micro_batch_size,
             accumulation_steps=accumulation_steps,
             lr_scaling=lr_scaling,
-            lr_warmup_steps=lr_warmup_steps,
-            lr_warmup_start_factor=lr_warmup_start_factor,
+            lr_scheduler=lr_scheduler,
             epochs=1,
             optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
             seq_len=8,
@@ -377,7 +377,7 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
                 places=12,
             )
 
-    def test_warmup_scheduler_builder_disabled_when_warmup_is_off(self) -> None:
+    def test_scheduler_builder_disabled_when_scheduler_is_off(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = _make_config(
                 tmp_path=Path(tmpdir),
@@ -393,17 +393,31 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
                 learning_rate=resolved.applied_learning_rate,
             )
 
-            self.assertIsNone(build_lr_scheduler(optimizer, cfg))
+            self.assertIsNone(
+                build_lr_scheduler(
+                    optimizer,
+                    cfg,
+                    total_optimizer_steps=100,
+                )
+            )
 
-    def test_warmup_scheduler_builder_uses_torch_scheduler(self) -> None:
+    def test_scheduler_builder_emits_lambda_scheduler_for_linear_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = _make_config(
                 tmp_path=Path(tmpdir),
                 run_name=None,
                 provider="console",
                 effective_batch_size=4,
-                lr_warmup_steps=4,
-                lr_warmup_start_factor=0.25,
+                lr_scheduler=LRSchedulerChainConfig(
+                    stages=[
+                        LRSchedulerStageConfig(
+                            type="linear",
+                            start_factor=0.25,
+                            end_factor=1.0,
+                            steps=4,
+                        )
+                    ]
+                ),
             )
             model = torch.nn.Linear(2, 1, bias=False)
             resolved = resolve_train_learning_rate(cfg.train)
@@ -413,31 +427,171 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
                 learning_rate=resolved.applied_learning_rate,
             )
 
-            scheduler = build_lr_scheduler(optimizer, cfg)
-            self.assertIsNotNone(scheduler)
-            self.assertEqual(scheduler.__class__.__name__, "LinearLR")
-
-    def test_zero_start_factor_uses_lambda_scheduler(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg = _make_config(
-                tmp_path=Path(tmpdir),
-                run_name=None,
-                provider="console",
-                effective_batch_size=4,
-                lr_warmup_steps=4,
-                lr_warmup_start_factor=0.0,
-            )
-            model = torch.nn.Linear(2, 1, bias=False)
-            resolved = resolve_train_learning_rate(cfg.train)
-            optimizer = build_optimizer(
-                model,
+            scheduler = build_lr_scheduler(
+                optimizer,
                 cfg,
-                learning_rate=resolved.applied_learning_rate,
+                total_optimizer_steps=100,
             )
-
-            scheduler = build_lr_scheduler(optimizer, cfg)
             self.assertIsNotNone(scheduler)
             self.assertEqual(scheduler.__class__.__name__, "LambdaLR")
+
+    def test_remainder_stage_requires_known_total_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+                lr_scheduler=LRSchedulerChainConfig(
+                    stages=[
+                        LRSchedulerStageConfig(
+                            type="linear",
+                            start_factor=0.1,
+                            end_factor=0.5,
+                            steps=2,
+                        ),
+                        LRSchedulerStageConfig(
+                            type="cosine",
+                            end_factor=0.05,
+                            steps=None,
+                        ),
+                    ]
+                ),
+            )
+            model = torch.nn.Linear(2, 1, bias=False)
+            resolved = resolve_train_learning_rate(cfg.train)
+            optimizer = build_optimizer(
+                model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires known total optimizer steps",
+            ):
+                build_lr_scheduler(optimizer, cfg, total_optimizer_steps=None)
+
+    def test_known_total_allows_remainder_final_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+                lr_scheduler=LRSchedulerChainConfig(
+                    stages=[
+                        LRSchedulerStageConfig(
+                            type="linear",
+                            start_factor=0.1,
+                            end_factor=1.0,
+                            steps=2,
+                        ),
+                        LRSchedulerStageConfig(
+                            type="cosine",
+                            end_factor=0.01,
+                            steps=None,
+                        ),
+                    ]
+                ),
+            )
+            model = torch.nn.Linear(2, 1, bias=False)
+            resolved = resolve_train_learning_rate(cfg.train)
+            optimizer = build_optimizer(
+                model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+
+            scheduler = build_lr_scheduler(
+                optimizer,
+                cfg,
+                total_optimizer_steps=6,
+            )
+            self.assertIsNotNone(scheduler)
+            self.assertEqual(scheduler.__class__.__name__, "LambdaLR")
+
+    def test_cosine_stage_progression_descends_to_end_factor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+                lr_scheduler=LRSchedulerChainConfig(
+                    stages=[
+                        LRSchedulerStageConfig(
+                            type="cosine",
+                            start_factor=1.0,
+                            end_factor=0.0,
+                            steps=5,
+                        )
+                    ]
+                ),
+            )
+            model = torch.nn.Linear(2, 1, bias=False)
+            resolved = resolve_train_learning_rate(cfg.train)
+            optimizer = build_optimizer(
+                model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+            scheduler = build_lr_scheduler(optimizer, cfg, total_optimizer_steps=None)
+            self.assertIsNotNone(scheduler)
+
+            lrs: list[float] = []
+            for _ in range(5):
+                lrs.append(float(optimizer.param_groups[0]["lr"]))
+                optimizer.step()
+                scheduler.step()
+
+            self.assertAlmostEqual(lrs[0], 1e-3, places=12)
+            self.assertAlmostEqual(lrs[-1], 0.0, places=12)
+            self.assertTrue(all(curr <= prev for prev, curr in zip(lrs, lrs[1:])))
+
+    def test_scheduler_holds_final_factor_after_explicit_stage_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name=None,
+                provider="console",
+                effective_batch_size=4,
+                lr_scheduler=LRSchedulerChainConfig(
+                    stages=[
+                        LRSchedulerStageConfig(
+                            type="linear",
+                            start_factor=0.5,
+                            end_factor=1.0,
+                            steps=2,
+                        )
+                    ]
+                ),
+            )
+            model = torch.nn.Linear(2, 1, bias=False)
+            resolved = resolve_train_learning_rate(cfg.train)
+            optimizer = build_optimizer(
+                model,
+                cfg,
+                learning_rate=resolved.applied_learning_rate,
+            )
+            scheduler = build_lr_scheduler(optimizer, cfg, total_optimizer_steps=None)
+            self.assertIsNotNone(scheduler)
+
+            observed: list[float] = []
+            for _ in range(4):
+                observed.append(float(optimizer.param_groups[0]["lr"]))
+                optimizer.step()
+                scheduler.step()
+
+            self.assertEqual(
+                [round(value, 12) for value in observed],
+                [
+                    round(0.0005, 12),
+                    round(0.001, 12),
+                    round(0.001, 12),
+                    round(0.001, 12),
+                ],
+            )
 
     def test_step_zero_logs_lr_scaling_diagnostics_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -472,18 +626,27 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
             self.assertAlmostEqual(payload["lr_scale_factor"], 2**0.5, places=9)
             self.assertAlmostEqual(payload["lr_applied"], 1e-3 * (2**0.5), places=9)
             self.assertEqual(payload["lr_scaling_active"], 1.0)
-            self.assertIn("lr_warmup_steps", payload)
-            self.assertIn("lr_warmup_start_factor", payload)
+            self.assertIn("lr_scheduler_enabled", payload)
+            self.assertIn("lr_scheduler_stage_count", payload)
+            self.assertIn("lr_scheduler_total_optimizer_steps", payload)
 
-    def test_logged_lr_current_follows_warmup_progression(self) -> None:
+    def test_logged_lr_current_follows_linear_scheduler_progression(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = _make_config(
                 tmp_path=Path(tmpdir),
-                run_name="warmup-progress-run",
+                run_name="scheduler-progress-run",
                 provider="wandb",
                 effective_batch_size=2,
-                lr_warmup_steps=4,
-                lr_warmup_start_factor=0.25,
+                lr_scheduler=LRSchedulerChainConfig(
+                    stages=[
+                        LRSchedulerStageConfig(
+                            type="linear",
+                            start_factor=0.25,
+                            end_factor=1.0,
+                            steps=4,
+                        )
+                    ]
+                ),
                 wandb_cfg=WandbMetricsConfig(
                     log_every_n_steps=1,
                     diagnostics_every_n_steps=10,
@@ -512,15 +675,23 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
                 ],
             )
 
-    def test_warmup_scheduler_state_restores_progress(self) -> None:
+    def test_scheduler_state_restores_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = _make_config(
                 tmp_path=Path(tmpdir),
                 run_name=None,
                 provider="console",
                 effective_batch_size=4,
-                lr_warmup_steps=4,
-                lr_warmup_start_factor=0.25,
+                lr_scheduler=LRSchedulerChainConfig(
+                    stages=[
+                        LRSchedulerStageConfig(
+                            type="linear",
+                            start_factor=0.25,
+                            end_factor=1.0,
+                            steps=4,
+                        )
+                    ]
+                ),
             )
             model = torch.nn.Linear(2, 1, bias=False)
             restored_model = torch.nn.Linear(2, 1, bias=False)
@@ -531,7 +702,11 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
                 cfg,
                 learning_rate=resolved.applied_learning_rate,
             )
-            scheduler = build_lr_scheduler(optimizer, cfg)
+            scheduler = build_lr_scheduler(
+                optimizer,
+                cfg,
+                total_optimizer_steps=10,
+            )
             self.assertIsNotNone(scheduler)
             optimizer.step()
             scheduler.step()
@@ -545,7 +720,11 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
                 cfg,
                 learning_rate=resolved.applied_learning_rate,
             )
-            restored_scheduler = build_lr_scheduler(restored_optimizer, cfg)
+            restored_scheduler = build_lr_scheduler(
+                restored_optimizer,
+                cfg,
+                total_optimizer_steps=10,
+            )
             self.assertIsNotNone(restored_scheduler)
             restored_optimizer.load_state_dict(saved_optimizer_state)
             restored_scheduler.load_state_dict(saved_scheduler_state)
@@ -565,15 +744,23 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
                 places=12,
             )
 
-    def test_checkpoint_includes_scheduler_state_when_warmup_enabled(self) -> None:
+    def test_checkpoint_includes_scheduler_state_when_scheduler_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = _make_config(
                 tmp_path=Path(tmpdir),
-                run_name="warmup-checkpoint-run",
+                run_name="scheduler-checkpoint-run",
                 provider="console",
                 effective_batch_size=4,
-                lr_warmup_steps=4,
-                lr_warmup_start_factor=0.25,
+                lr_scheduler=LRSchedulerChainConfig(
+                    stages=[
+                        LRSchedulerStageConfig(
+                            type="linear",
+                            start_factor=0.25,
+                            end_factor=1.0,
+                            steps=4,
+                        )
+                    ]
+                ),
                 checkpoint_every_n_steps=1,
             )
 

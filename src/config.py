@@ -13,6 +13,9 @@ from .core.config import (
     HoldoutSplitConfig,
     LocalTextDatasetConfig,
     LoggingConfig,
+    LRSchedulerChainConfig,
+    LRSchedulerStageConfig,
+    LRSchedulerStageType,
     ModelConfig,
     OptimizerConfig,
     PreSplitConfig,
@@ -27,6 +30,7 @@ from .core.config import (
     resolve_train_batching,
     resolve_train_learning_rate,
     resolve_special_token_ids,
+    validate_train_lr_scheduler_config,
     validate_experiment_config,
 )
 
@@ -43,6 +47,9 @@ __all__ = [
     "HoldoutSplitConfig",
     "LocalTextDatasetConfig",
     "LoggingConfig",
+    "LRSchedulerChainConfig",
+    "LRSchedulerStageConfig",
+    "LRSchedulerStageType",
     "ModelConfig",
     "OptimizerConfig",
     "PreSplitConfig",
@@ -57,5 +64,6 @@ __all__ = [
     "resolve_train_batching",
     "resolve_train_learning_rate",
     "resolve_special_token_ids",
+    "validate_train_lr_scheduler_config",
     "validate_experiment_config",
 ]
