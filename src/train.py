@@ -97,6 +97,34 @@ def _safe_len(loader) -> int | None:
         return None
 
 
+def _read_peak_cuda_memory_gib(
+    *,
+    device: torch.device,
+    should_capture: bool,
+) -> tuple[float | None, float | None]:
+    if (not should_capture) or device.type != "cuda":
+        return None, None
+    return (
+        float(torch.cuda.max_memory_allocated(device) / (1024**3)),
+        float(torch.cuda.max_memory_reserved(device) / (1024**3)),
+    )
+
+
+def _unpack_batch_tensors(
+    batch: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if len(batch) == 3:
+        input_seq, target_seq, key_padding_mask = batch
+        return input_seq, target_seq, key_padding_mask, None
+    if len(batch) == 4:
+        input_seq, target_seq, key_padding_mask, target_byte_lengths = batch
+        return input_seq, target_seq, key_padding_mask, target_byte_lengths
+    raise ValueError(
+        "Expected batch with 3 or 4 tensors: "
+        "(input_seq, target_seq, key_padding_mask[, target_byte_lengths])."
+    )
+
+
 @dataclass(slots=True)
 class TrainLoopResult:
     global_step: int
@@ -379,15 +407,15 @@ def train_loop(
                     optim_step_time_ms = (time.perf_counter() - optim_start) * 1000.0
                     step_time_ms = (time.perf_counter() - step_start) * 1000.0
 
-                peak_memory_gib: float | None = None
-                peak_reserved_memory_gib: float | None = None
-                if device.type == "cuda":
-                    peak_memory_gib = float(
-                        torch.cuda.max_memory_allocated(device) / (1024**3)
-                    )
-                    peak_reserved_memory_gib = float(
-                        torch.cuda.max_memory_reserved(device) / (1024**3)
-                    )
+                should_capture_peak_memory = (
+                    wandb_enabled
+                    and wandb_cfg.enable_peak_memory
+                    and step_ctx.schedule.should_log_step_metrics
+                )
+                peak_memory_gib, peak_reserved_memory_gib = _read_peak_cuda_memory_gib(
+                    device=device,
+                    should_capture=should_capture_peak_memory,
+                )
 
                 global_step = int(step_ctx.next_global_step)
                 step_bar.set_postfix(loss=f"{step_loss:.4f}", lr=f"{step_lr_current:.2e}")
@@ -459,10 +487,16 @@ def train_loop(
                 train_loader,
                 start=epoch_batch_start if train_loader_len is None else 0,
             )
-            for batch_idx, (input_seq, target_seq, key_padding_mask) in iterator:
+            for batch_idx, batch in iterator:
                 if epoch == start_epoch and train_loader_len is not None and batch_idx < start_batch_idx:
                     continue
                 epoch_had_batches = True
+                (
+                    input_seq,
+                    target_seq,
+                    key_padding_mask,
+                    target_byte_lengths,
+                ) = _unpack_batch_tensors(batch)
 
                 if micro_batches_in_step == 0:
                     next_global_step = global_step + 1
@@ -513,6 +547,11 @@ def train_loop(
                 input_seq = input_seq.to(device, non_blocking=non_blocking)
                 target_seq = target_seq.to(device, non_blocking=non_blocking)
                 key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
+                if target_byte_lengths is not None:
+                    target_byte_lengths = target_byte_lengths.to(
+                        device,
+                        non_blocking=non_blocking,
+                    )
 
                 forward_start = 0.0
                 if should_measure_step_timing:
@@ -536,7 +575,11 @@ def train_loop(
                 if valid_tokens > 0:
                     valid_target_mask = target_seq != pad_id
                     valid_bytes = 0
-                    if token_byte_lengths_tensor is not None:
+                    if target_byte_lengths is not None:
+                        valid_bytes = int(
+                            target_byte_lengths[valid_target_mask].sum().item()
+                        )
+                    elif token_byte_lengths_tensor is not None:
                         valid_target_ids = target_seq[valid_target_mask]
                         valid_bytes = int(
                             token_byte_lengths_tensor[valid_target_ids].sum().item()
@@ -744,7 +787,14 @@ def model_pipeline(
             raise ValueError(
                 "Streaming mode requires tokenizer.name='hf_pretrained'."
             )
-        tokenized = build_hf_pretrained_tokenizer_bundle(config.tokenizer)
+        bpb_metrics_enabled = (
+            config.logging.provider == "wandb"
+            and config.logging.wandb.enable_bits_per_byte
+        )
+        tokenized = build_hf_pretrained_tokenizer_bundle(
+            config.tokenizer,
+            bpb_metrics_enabled=bpb_metrics_enabled,
+        )
         write_run_metadata(config=config, tokenized=tokenized, run_paths=run_paths)
         train_loader, val_loader = build_streaming_data_loaders(
             config=config,
@@ -764,8 +814,8 @@ def model_pipeline(
             pin_memory=device.type == "cuda",
         )
 
-    token_byte_lengths = None
-    if config.tokenizer.name == "bpe":
+    token_byte_lengths = tokenized.token_byte_lengths
+    if token_byte_lengths is None and config.tokenizer.name == "bpe":
         base_vocab_size = tokenized.vocab.special.base_vocab_size
         if base_vocab_size is None:
             raise ValueError("BPE tokenization expects base_vocab_size to be set.")

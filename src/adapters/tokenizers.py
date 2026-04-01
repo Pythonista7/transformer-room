@@ -74,8 +74,26 @@ def _build_vocab_info_from_hf_tokenizer(tokenizer) -> VocabInfo:
     )
 
 
+def _build_approx_token_byte_lengths(tokenizer, *, vocab_size: int) -> list[int]:
+    special_ids = set(int(token_id) for token_id in tokenizer.all_special_ids)
+    token_byte_lengths: list[int] = [0] * vocab_size
+    for token_id in range(vocab_size):
+        if token_id in special_ids:
+            token_byte_lengths[token_id] = 0
+            continue
+        decoded = tokenizer.decode(
+            [token_id],
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        token_byte_lengths[token_id] = len(decoded.encode("utf-8"))
+    return token_byte_lengths
+
+
 def build_hf_pretrained_tokenizer_bundle(
     cfg: HFPretrainedTokenizerConfig,
+    *,
+    bpb_metrics_enabled: bool = False,
 ) -> TokenizedCorpus:
     AutoTokenizer = _resolve_auto_tokenizer()
     tokenizer = AutoTokenizer.from_pretrained(
@@ -86,6 +104,20 @@ def build_hf_pretrained_tokenizer_bundle(
     )
     added_special_tokens = _normalize_hf_tokenizer_specials(tokenizer)
     vocab_info = _build_vocab_info_from_hf_tokenizer(tokenizer)
+    if bpb_metrics_enabled and cfg.bpb_mode == "exact":
+        backend_tokenizer = getattr(tokenizer, "backend_tokenizer", None)
+        if not cfg.use_fast or backend_tokenizer is None:
+            raise ValueError(
+                "tokenizer.bpb_mode='exact' requires an HF fast tokenizer backend. "
+                "Set tokenizer.use_fast=True and choose a tokenizer with offsets support."
+            )
+
+    approx_token_byte_lengths: list[int] | None = None
+    if bpb_metrics_enabled and cfg.bpb_mode == "approx":
+        approx_token_byte_lengths = _build_approx_token_byte_lengths(
+            tokenizer,
+            vocab_size=vocab_info.vocab_size,
+        )
     print(
         "Loaded Hugging Face tokenizer: "
         f"{cfg.pretrained_name_or_path} | vocab_size={vocab_info.vocab_size}"
@@ -96,6 +128,7 @@ def build_hf_pretrained_tokenizer_bundle(
         tokenizer=tokenizer,
         eos_inserted=0,
         unk_replacements=0,
+        token_byte_lengths=approx_token_byte_lengths,
         tokenizer_source=cfg.pretrained_name_or_path,
         tokenizer_revision=cfg.revision,
         added_special_tokens=added_special_tokens,

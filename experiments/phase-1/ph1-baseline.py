@@ -2,7 +2,7 @@
 from pathlib import Path
 import sys
 
-from src.core.config import BPETokenizerConfig, BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFTextDatasetConfig, HoldoutSplitConfig, LoggingConfig, OptimizerConfig, PreSplitConfig, RunConfig, TrainConfig, WandbMetricsConfig
+from src.core.config import BPETokenizerConfig, BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFTextDatasetConfig, HoldoutSplitConfig, LRSchedulerChainConfig, LRSchedulerStageConfig, LoggingConfig, OptimizerConfig, PreSplitConfig, RunConfig, TrainConfig, WandbMetricsConfig
 from src.training import wikitext as training_wikitext
 
 """
@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-SEED = "1345"
+SEED = 47
 
 
 
@@ -33,8 +33,10 @@ N_LAYERS = 12
 # EPOCHS = 1 we will use MAX_TRAIN_STEPS instead since the dataset is huge.
 EFFECTIVE_BATCH_SZ = 128
 MICRO_BATCH_SZ = 32
+TORCH_COMPILE_MEM_BUDGET = 0.75
 LEARNING_RATE = 1e-3
-FINAL_LEARNING_RATE = 3e-4
+LR_END_FACTOR = 0.1 
+
 SEQ_LEN = 1024
 STRIDE = SEQ_LEN
 
@@ -48,7 +50,7 @@ DATASET_CONFIG = "sample-10BT"
 
 
 # for 100k steps, we shouldve seen around 6,553,600,000 ~ 6.5B tokens
-MAX_TRAIN_STEPS = 100_000
+MAX_TRAIN_STEPS = 1_000 # Will first test it for 1k before 100_000
 
 
 
@@ -63,7 +65,7 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             checkpoint_every_n_steps=30_000, # TODO: Make this a % value of total steps given we know the dataset size.
             seed=SEED,
             use_torch_compile=True,
-            activation_memory_budget=0.75,
+            activation_memory_budget=TORCH_COMPILE_MEM_BUDGET,
             compile_warmup_steps=3,
         ),
         dataset=HFTextDatasetConfig(
@@ -76,11 +78,13 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
         tokenizer=HFPretrainedTokenizerConfig(
             pretrained_name_or_path="gpt2",
             use_fast=True,
+            bpb_mode="exact", # might incur overhead in streaming mode dataloader
         ),
         model=BaselineDecoderConfig(
             d_model=D_MODEL,
             n_heads=N_HEADS,
             layers=N_LAYERS,
+            dropout=0,
             norm_placement="pre",
             attention_impl="sdpa",
             enable_weight_tying=True,
@@ -90,7 +94,17 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             optimizer=OptimizerConfig(
                 name="adamw", 
                 learning_rate=LEARNING_RATE,
-                weight_decay= 0.01,
+                weight_decay= 0.1,
+            ),
+            lr_scheduler= LRSchedulerChainConfig(
+                stages=[
+                    LRSchedulerStageConfig(
+                        type="cosine",
+                        start_factor=1,
+                        end_factor=LR_END_FACTOR,
+                        steps=None, # this should automatically apply this for the entire run
+                    )
+                ]
             ),
             effective_batch_size=EFFECTIVE_BATCH_SZ,
             micro_batch_size= MICRO_BATCH_SZ,
@@ -107,15 +121,35 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             provider="wandb",
             enable_artifact_io=True,
             wandb=WandbMetricsConfig(
+                # Step metrics
                 enable_train_loss_vs_tokens=True,
-                enable_val_loss_vs_tokens=True,
+                enable_val_loss_vs_tokens=False, # No val set
                 enable_perplexity=True,
                 enable_bits_per_byte=True,
                 enable_step_time=True,
                 enable_peak_memory=True,
-                enable_global_grad_norm=False,
-                enable_layer_grad_norms=False,
-                # what is included in diagonistic_every_n_steps? 
+                
+                # Diagnostics
+                enable_update_to_weight_ratio=True, # Should tell me if lr is in right range.
+                enable_global_param_norm=True,
+                enable_global_grad_norm=True,
+                enable_activation_norms=True,
+                
+                enable_layer_grad_norms=True,
+                layer_grad_norm_stride=4, # 12 layers, stride 4 => start,mid,end metrics
+                                
+                # Attention entropy
+                enable_attention_entropy=True,
+                attention_entropy_head_cap= 4, # no of heads is 12, so sampling only 1/4th here for now.
+                attention_entropy_token_cap= 256, # SEQ_LEN 1024 // 4
+                
+                # Cadances
+                log_every_n_steps= 25, # for step metrics
+                diagnostics_every_n_steps= 100, # default for diagnostics
+                layer_grad_norms_every_n_steps= 500,
+                parameter_optimizer_norms_every_n_steps=500, # for update/weight ratio freq
+                attention_entropy_every_n_steps=250,
+
             ),
         ),
 )

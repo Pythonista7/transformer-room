@@ -41,6 +41,7 @@ class StepTimingAndMemoryPlugin(BaseMetricPlugin):
     def on_step_start(self, ctx: StepMetricsContext) -> None:
         if (
             self._wandb_cfg.enable_peak_memory
+            and ctx.schedule.should_log_step_metrics
             and self._device.type == "cuda"
         ):
             torch.cuda.reset_peak_memory_stats(self._device)

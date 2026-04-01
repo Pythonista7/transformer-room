@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest import mock
 
 import torch
 
@@ -348,6 +349,31 @@ class StepTimingAndMemoryPluginTests(unittest.TestCase):
         self.assertEqual(epoch_metrics["avg_forward_pass_time_ms_epoch"], 9.0)
         self.assertEqual(epoch_metrics["avg_backward_pass_time_ms_epoch"], 7.0)
         self.assertEqual(epoch_metrics["avg_optim_step_time_ms_epoch"], 4.0)
+
+    def test_peak_memory_reset_only_runs_on_step_metric_cadence(self) -> None:
+        plugin = StepTimingAndMemoryPlugin(
+            wandb_cfg=WandbMetricsConfig(enable_step_time=False, enable_peak_memory=True),
+            device=torch.device("cuda"),
+        )
+        due_ctx = _step_ctx(
+            _make_schedule(
+                should_log_step_metrics=True,
+                should_log_this_step=True,
+            )
+        )
+        not_due_ctx = _step_ctx(
+            _make_schedule(
+                should_log_step_metrics=False,
+                should_log_this_step=True,
+            )
+        )
+
+        with mock.patch("torch.cuda.reset_peak_memory_stats") as reset_mock:
+            plugin.on_step_start(not_due_ctx)
+            reset_mock.assert_not_called()
+
+            plugin.on_step_start(due_ctx)
+            reset_mock.assert_called_once_with(torch.device("cuda"))
 
 
 class GradNormPluginTests(unittest.TestCase):

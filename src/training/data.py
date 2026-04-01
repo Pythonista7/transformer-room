@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Mapping
+from typing import Literal
 
 import torch
 from torch.utils.data import DataLoader, Dataset, IterableDataset
@@ -61,12 +62,48 @@ class LMWindowDataset(Dataset):
         return input_seq, target_seq, key_padding_mask
 
 
-def _build_lm_tensors(sample: list[int], pad_id: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _build_lm_tensors(
+    sample: list[int],
+    pad_id: int,
+    sample_byte_lengths: list[int] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     sample_tensor = torch.tensor(sample, dtype=torch.long)
     input_seq = sample_tensor[:-1]
     target_seq = sample_tensor[1:]
     key_padding_mask = input_seq != pad_id
-    return input_seq, target_seq, key_padding_mask
+    if sample_byte_lengths is None:
+        return input_seq, target_seq, key_padding_mask
+    sample_byte_lengths_tensor = torch.tensor(sample_byte_lengths, dtype=torch.long)
+    target_byte_lengths = sample_byte_lengths_tensor[1:]
+    return input_seq, target_seq, key_padding_mask, target_byte_lengths
+
+
+def _utf8_char_byte_prefix(text: str) -> list[int]:
+    prefix = [0]
+    total = 0
+    for ch in text:
+        total += len(ch.encode("utf-8"))
+        prefix.append(total)
+    return prefix
+
+
+def _bytes_from_offsets(
+    offsets: list[tuple[int, int]],
+    char_byte_prefix: list[int],
+) -> list[int]:
+    byte_lengths: list[int] = []
+    max_char_idx = len(char_byte_prefix) - 1
+    for start, end in offsets:
+        if start < 0 or end < 0 or end < start or end > max_char_idx:
+            byte_lengths.append(0)
+            continue
+        byte_lengths.append(char_byte_prefix[end] - char_byte_prefix[start])
+    return byte_lengths
 
 
 def _resolve_load_dataset():
@@ -106,6 +143,8 @@ class HFStreamingWindowDataset(IterableDataset):
         eos_id: int,
         seed: int,
         shuffle: bool,
+        bpb_mode: Literal["off", "approx", "exact"] = "off",
+        approx_token_byte_lengths: list[int] | None = None,
     ) -> None:
         if seq_len <= 0:
             raise ValueError(f"seq_len must be > 0, got {seq_len}")
@@ -121,11 +160,14 @@ class HFStreamingWindowDataset(IterableDataset):
         self.eos_id = int(eos_id)
         self.seed = int(seed)
         self.shuffle = bool(shuffle)
+        self.bpb_mode: Literal["off", "approx", "exact"] = bpb_mode
+        self.approx_token_byte_lengths = approx_token_byte_lengths
         self.epoch = 0
         self._text_field = dataset_cfg.text_field
         self._source_dataset = None
         self._source_state_dict = None
         self._buffer_tokens: list[int] = []
+        self._buffer_byte_lengths: list[int] = []
         self._buffer_start = 0
         self._next_start = 0
         self._total_tokens_seen = 0
@@ -143,6 +185,7 @@ class HFStreamingWindowDataset(IterableDataset):
             "text_field": self._text_field,
             "source_state_dict": source_state_dict,
             "buffer_tokens": list(self._buffer_tokens),
+            "buffer_byte_lengths": list(self._buffer_byte_lengths),
             "buffer_start": int(self._buffer_start),
             "next_start": int(self._next_start),
             "total_tokens_seen": int(self._total_tokens_seen),
@@ -156,6 +199,9 @@ class HFStreamingWindowDataset(IterableDataset):
         self._buffer_tokens = [
             int(token_id) for token_id in state_dict.get("buffer_tokens", [])
         ]
+        self._buffer_byte_lengths = [
+            int(byte_len) for byte_len in state_dict.get("buffer_byte_lengths", [])
+        ]
         self._buffer_start = int(state_dict.get("buffer_start", 0))
         self._next_start = int(state_dict.get("next_start", 0))
         self._total_tokens_seen = int(state_dict.get("total_tokens_seen", 0))
@@ -165,6 +211,7 @@ class HFStreamingWindowDataset(IterableDataset):
         self._source_dataset = None
         self._source_state_dict = None
         self._buffer_tokens = []
+        self._buffer_byte_lengths = []
         self._buffer_start = 0
         self._next_start = 0
         self._total_tokens_seen = 0
@@ -192,18 +239,22 @@ class HFStreamingWindowDataset(IterableDataset):
         self._source_dataset = dataset
         return dataset
 
-    def _window_from_buffer(self, start: int) -> list[int]:
+    def _window_from_buffer(self, start: int) -> tuple[list[int], list[int]]:
         offset = start - self._buffer_start
         sample = self._buffer_tokens[offset : offset + self.window]
+        sample_byte_lengths = self._buffer_byte_lengths[offset : offset + self.window]
         if len(sample) < self.window:
-            sample = sample + [self.pad_id] * (self.window - len(sample))
-        return sample
+            pad = self.window - len(sample)
+            sample = sample + [self.pad_id] * pad
+            sample_byte_lengths = sample_byte_lengths + [0] * pad
+        return sample, sample_byte_lengths
 
     def _maybe_trim_buffer(self) -> None:
         trim_count = self._next_start - self._buffer_start
         if trim_count <= 0:
             return
         self._buffer_tokens = self._buffer_tokens[trim_count:]
+        self._buffer_byte_lengths = self._buffer_byte_lengths[trim_count:]
         self._buffer_start = self._next_start
 
     def _infer_or_validate_text_field(self, row):
@@ -247,20 +298,57 @@ class HFStreamingWindowDataset(IterableDataset):
                 continue
             self._usable_rows_seen += 1
 
-            encoded_ids = self.tokenizer(
-                text,
-                add_special_tokens=False,
-                return_attention_mask=False,
-                return_token_type_ids=False,
-            )["input_ids"]
-            encoded_ids = [int(token_id) for token_id in encoded_ids]
+            tokenizer_kwargs = {
+                "add_special_tokens": False,
+                "return_attention_mask": False,
+                "return_token_type_ids": False,
+            }
+            if self.bpb_mode == "exact":
+                tokenizer_kwargs["return_offsets_mapping"] = True
+            tokenized = self.tokenizer(text, **tokenizer_kwargs)
+            encoded_ids = [int(token_id) for token_id in tokenized["input_ids"]]
+            encoded_byte_lengths: list[int]
+            if self.bpb_mode == "off":
+                encoded_byte_lengths = [0] * len(encoded_ids)
+            elif self.bpb_mode == "approx":
+                if self.approx_token_byte_lengths is None:
+                    raise ValueError(
+                        "HF streaming bpb_mode='approx' requires token byte lookup table."
+                    )
+                encoded_byte_lengths = [
+                    int(self.approx_token_byte_lengths[token_id])
+                    if 0 <= int(token_id) < len(self.approx_token_byte_lengths)
+                    else 0
+                    for token_id in encoded_ids
+                ]
+            else:
+                offsets = tokenized.get("offset_mapping")
+                if offsets is None:
+                    raise ValueError(
+                        "HF tokenizer did not provide offsets for bpb_mode='exact'. "
+                        "Use tokenizer.use_fast=True and a tokenizer with offset mapping support."
+                    )
+                normalized_offsets = [
+                    (int(start), int(end))
+                    for start, end in offsets
+                ]
+                encoded_byte_lengths = _bytes_from_offsets(
+                    normalized_offsets,
+                    _utf8_char_byte_prefix(text),
+                )
             encoded_ids.append(self.eos_id)
+            encoded_byte_lengths.append(0)
             self._buffer_tokens.extend(encoded_ids)
+            self._buffer_byte_lengths.extend(encoded_byte_lengths)
             self._total_tokens_seen += len(encoded_ids)
 
             while self._next_start + self.window <= self._total_tokens_seen:
-                sample = self._window_from_buffer(self._next_start)
-                yield _build_lm_tensors(sample, self.pad_id)
+                sample, sample_byte_lengths = self._window_from_buffer(self._next_start)
+                yield _build_lm_tensors(
+                    sample,
+                    self.pad_id,
+                    sample_byte_lengths,
+                )
                 self._next_start += self.stride
                 self._maybe_trim_buffer()
 
@@ -271,8 +359,12 @@ class HFStreamingWindowDataset(IterableDataset):
             )
 
         while self._next_start < self._total_tokens_seen:
-            sample = self._window_from_buffer(self._next_start)
-            yield _build_lm_tensors(sample, self.pad_id)
+            sample, sample_byte_lengths = self._window_from_buffer(self._next_start)
+            yield _build_lm_tensors(
+                sample,
+                self.pad_id,
+                sample_byte_lengths,
+            )
             self._next_start += self.stride
             self._maybe_trim_buffer()
 
@@ -367,6 +459,17 @@ def build_streaming_data_loaders(
     special = tokenized.vocab.special
     StatefulDataLoader = _resolve_stateful_dataloader()
 
+    bpb_metrics_enabled = (
+        config.logging.provider == "wandb"
+        and config.logging.wandb.enable_bits_per_byte
+    )
+    bpb_mode: Literal["off", "approx", "exact"] = "off"
+    approx_token_byte_lengths: list[int] | None = None
+    if bpb_metrics_enabled and config.tokenizer.name == "hf_pretrained":
+        bpb_mode = config.tokenizer.bpb_mode
+        if bpb_mode == "approx":
+            approx_token_byte_lengths = tokenized.token_byte_lengths
+
     train_dataset = HFStreamingWindowDataset(
         dataset_cfg=config.dataset,
         split=config.dataset.split,
@@ -377,6 +480,8 @@ def build_streaming_data_loaders(
         eos_id=special.eos_id,
         seed=config.run.seed,
         shuffle=True,
+        bpb_mode=bpb_mode,
+        approx_token_byte_lengths=approx_token_byte_lengths,
     )
     train_loader = StatefulDataLoader(
         train_dataset,
@@ -403,6 +508,8 @@ def build_streaming_data_loaders(
             eos_id=special.eos_id,
             seed=config.run.seed,
             shuffle=False,
+            bpb_mode=bpb_mode,
+            approx_token_byte_lengths=approx_token_byte_lengths,
         )
         val_loader = DataLoader(
             val_dataset,

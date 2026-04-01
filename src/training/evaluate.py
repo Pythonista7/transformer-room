@@ -10,6 +10,21 @@ from torch.utils.data import DataLoader
 from .runtime import get_autocast_context
 
 
+def _unpack_batch_tensors(
+    batch: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if len(batch) == 3:
+        input_seq, target_seq, key_padding_mask = batch
+        return input_seq, target_seq, key_padding_mask, None
+    if len(batch) == 4:
+        input_seq, target_seq, key_padding_mask, target_byte_lengths = batch
+        return input_seq, target_seq, key_padding_mask, target_byte_lengths
+    raise ValueError(
+        "Expected batch with 3 or 4 tensors: "
+        "(input_seq, target_seq, key_padding_mask[, target_byte_lengths])."
+    )
+
+
 def evaluate(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -33,10 +48,21 @@ def evaluate(
         )
 
     with torch.no_grad():
-        for input_seq, target_seq, key_padding_mask in loader:
+        for batch in loader:
+            (
+                input_seq,
+                target_seq,
+                key_padding_mask,
+                target_byte_lengths,
+            ) = _unpack_batch_tensors(batch)
             input_seq = input_seq.to(device, non_blocking=non_blocking)
             target_seq = target_seq.to(device, non_blocking=non_blocking)
             key_padding_mask = key_padding_mask.to(device, non_blocking=non_blocking)
+            if target_byte_lengths is not None:
+                target_byte_lengths = target_byte_lengths.to(
+                    device,
+                    non_blocking=non_blocking,
+                )
 
             with get_autocast_context(device=device, use_bf16=use_bf16):
                 output = model(input_seq, key_padding_mask=key_padding_mask)
@@ -50,7 +76,12 @@ def evaluate(
             if tokens == 0:
                 continue
 
-            if token_byte_lengths_tensor is not None:
+            if target_byte_lengths is not None:
+                batch_bytes = int(
+                    target_byte_lengths[valid_target_mask].sum().item()
+                )
+                total_bytes += batch_bytes
+            elif token_byte_lengths_tensor is not None:
                 valid_target_ids = target_seq[valid_target_mask]
                 batch_bytes = int(
                     token_byte_lengths_tensor[valid_target_ids].sum().item()

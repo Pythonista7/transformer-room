@@ -10,12 +10,15 @@ from src.config import (
     BPETokenizerConfig,
     BaselineDecoderConfig,
     ExperimentConfig,
+    HFPretrainedTokenizerConfig,
+    HFTextDatasetConfig,
     HoldoutSplitConfig,
     LRSchedulerChainConfig,
     LRSchedulerStageConfig,
     LocalTextDatasetConfig,
     LoggingConfig,
     OptimizerConfig,
+    PreSplitConfig,
     RunConfig,
     SACDecoderConfig,
     TrainConfig,
@@ -161,6 +164,71 @@ class ConfigValidationTests(unittest.TestCase):
     def test_train_config_rejects_legacy_batch_size_keyword(self) -> None:
         with self.assertRaises(TypeError):
             TrainConfig(batch_size=8)  # type: ignore[call-arg]
+
+    def _make_streaming_hf_config(self) -> ExperimentConfig:
+        return ExperimentConfig(
+            run=RunConfig(
+                project_name="test-project",
+                run_name="streaming-hf-config-test",
+                artifacts_root="/tmp/artifacts",
+            ),
+            dataset=HFTextDatasetConfig(
+                dataset_name="dummy/dataset",
+                split="train",
+                validation_split="validation",
+            ),
+            tokenizer=HFPretrainedTokenizerConfig(
+                pretrained_name_or_path="dummy-tokenizer",
+                use_fast=True,
+                bpb_mode="off",
+            ),
+            model=BaselineDecoderConfig(d_model=32, n_heads=4, layers=1),
+            train=TrainConfig(
+                epochs=1,
+                optimizer=OptimizerConfig(learning_rate=1e-3, weight_decay=0.0),
+                effective_batch_size=4,
+                seq_len=16,
+                stride=16,
+                data_mode="streaming",
+                max_steps=10,
+                run_validation=False,
+            ),
+            split=PreSplitConfig(),
+            logging=LoggingConfig(provider="wandb", wandb=WandbMetricsConfig()),
+        )
+
+    def test_hf_bpb_mode_accepts_supported_values(self) -> None:
+        for mode in ("off", "approx", "exact"):
+            config = self._make_streaming_hf_config()
+            config.tokenizer.bpb_mode = mode
+            validate_experiment_config(config)
+
+    def test_hf_bpb_mode_rejects_unknown_value(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.tokenizer.bpb_mode = "invalid"  # type: ignore[assignment]
+        with self.assertRaisesRegex(
+            ValueError,
+            "tokenizer.bpb_mode must be one of: off, approx, exact",
+        ):
+            validate_experiment_config(config)
+
+    def test_hf_bpb_exact_requires_fast_tokenizer_when_bpb_enabled(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.tokenizer.bpb_mode = "exact"
+        config.tokenizer.use_fast = False
+        config.logging.wandb.enable_bits_per_byte = True
+        with self.assertRaisesRegex(
+            ValueError,
+            "bpb_mode='exact' requires tokenizer.use_fast=True",
+        ):
+            validate_experiment_config(config)
+
+    def test_hf_bpb_exact_allows_slow_tokenizer_when_bpb_disabled(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.tokenizer.bpb_mode = "exact"
+        config.tokenizer.use_fast = False
+        config.logging.wandb.enable_bits_per_byte = False
+        validate_experiment_config(config)
 
     def test_validate_experiment_config_rechecks_mutated_batching(self) -> None:
         config = make_config()

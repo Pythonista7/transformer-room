@@ -10,10 +10,33 @@ AttentionImplementation = Literal["basic", "sdpa"]
 NormPlacement = Literal["pre","post"]
 DataMode = Literal["materialized", "streaming"]
 LRSchedulerStageType = Literal["linear", "cosine"]
+HFPretrainedBpbMode = Literal["off", "approx", "exact"]
 
 
 @dataclass(slots=True)
 class RunConfig:
+    """Run identity, artifact behavior, and compile/runtime controls.
+
+    Parameters:
+    - `project_name`: logger project namespace.
+    - `run_name`: stable run identifier. Required for `logging.provider="wandb"`.
+    - `group_name`: optional grouping label (for example, sweep or phase group).
+    - `artifacts_root`: local directory root for checkpoints/models/metadata.
+    - `persist_local_artifacts`: when `False`, skip local checkpoint/final-model writes.
+    - `resume_from_checkpoint`: attempt startup restore from local/remote checkpoint.
+    - `checkpoint_every_n_steps`: in-loop checkpoint cadence; `0` disables periodic saves.
+    - `checkpoint_filename`: local checkpoint filename under run artifact dir.
+    - `final_model_filename`: local final model filename under run artifact dir.
+    - `use_torch_compile`: enable `torch.compile` when supported.
+    - `torch_compile_mode`: compile mode string passed to `torch.compile(...)`.
+    - `torch_compile_fullgraph`: forward `fullgraph` flag to `torch.compile(...)`.
+    - `torch_compile_dynamic`: forward `dynamic` flag to `torch.compile(...)`.
+    - `activation_memory_budget`: optional Torch functorch activation memory budget in
+      `[0, 1]`; applied only when supported by the installed torch build.
+    - `compile_warmup_steps`: number of initial compiled steps excluded from perf
+      aggregate metrics (helps avoid compile warmup skew).
+    - `seed`: global RNG seed.
+    """
     project_name: str
     run_name: str | None = None
     group_name: str | None = None
@@ -41,6 +64,18 @@ class LocalTextDatasetConfig:
 
 @dataclass(slots=True)
 class HFTextDatasetConfig:
+    """Hugging Face dataset selection and row-to-text extraction options.
+
+    Parameters:
+    - `dataset_name`: HF dataset path/name passed to `load_dataset`.
+    - `dataset_config`: optional HF config/subset name.
+    - `split`: training split name.
+    - `validation_split`: optional validation split name.
+      Required when `train.run_validation=True` in streaming mode.
+    - `text_field`: row field containing text. If `None`, inferred from sample rows.
+    - `shuffle_buffer_size`: streaming shuffle buffer size.
+    - `max_rows`: optional row cap. `0` means "no cap".
+    """
     name: Literal["hf_text"] = "hf_text"
     dataset_name: str = ""
     dataset_config: str | None = None
@@ -56,6 +91,14 @@ DatasetConfig = LocalTextDatasetConfig | HFTextDatasetConfig
 
 @dataclass(slots=True)
 class BPETokenizerConfig:
+    """Local BPE tokenizer config.
+
+    Parameters:
+    - `base_vocab_size`: learned non-special vocab size.
+    - `num_special_tokens`: special-token count appended after base vocab.
+      Must be at least 2 (EOS + PAD); 3 enables UNK.
+    - `vocab_path`: path used for tokenizer vocab persistence/loading.
+    """
     name: Literal["bpe"] = "bpe"
     base_vocab_size: int = 10_000
     num_special_tokens: int = 3
@@ -64,9 +107,29 @@ class BPETokenizerConfig:
 
 @dataclass(slots=True)
 class HFPretrainedTokenizerConfig:
+    """Hugging Face tokenizer options, including BPB behavior for streaming.
+
+    Parameters:
+    - `pretrained_name_or_path`: tokenizer model id or local path.
+    - `use_fast`: request Rust-backed fast tokenizer implementation.
+    - `bpb_mode`: byte-accounting mode used by HF streaming datasets when
+      `logging.wandb.enable_bits_per_byte=True`.
+      - `"off"`: no byte accounting from tokenizer outputs; streaming BPB metrics
+        will typically be `NaN`.
+      - `"approx"`: estimate bytes via token byte-length lookup table.
+      - `"exact"`: exact bytes via offset mapping from tokenizer outputs.
+        Requires `use_fast=True` and tokenizer offset support.
+      This setting is currently used by the HF streaming data path. In the
+      materialized HF path, BPB may still be `NaN` because token byte lengths are
+      not currently precomputed there.
+    - `revision`: optional HF revision/tag/commit.
+    - `trust_remote_code`: allow execution of remote tokenizer code from HF repos.
+      Enable only for trusted sources.
+    """
     name: Literal["hf_pretrained"] = "hf_pretrained"
     pretrained_name_or_path: str = ""
     use_fast: bool = True
+    bpb_mode: HFPretrainedBpbMode = "off"
     revision: str | None = None
     trust_remote_code: bool = False
 
@@ -76,6 +139,12 @@ TokenizerConfig = BPETokenizerConfig | HFPretrainedTokenizerConfig
 
 @dataclass(slots=True)
 class BaselineDecoderConfig:
+    """Baseline decoder architecture flags.
+
+    Notes:
+    - `norm_placement` selects pre-norm vs post-norm block layout.
+    - `enable_weight_tying` ties output projection weights to token embeddings.
+    """
     name: Literal["baseline_decoder"] = "baseline_decoder"
     d_model: int = 128
     n_heads: int = 8
@@ -87,6 +156,12 @@ class BaselineDecoderConfig:
 
 @dataclass(slots=True)
 class ACEveryNDecoderConfig:
+    """Activation-checkpointed decoder variant.
+
+    Notes:
+    - `checkpoint_every_n_layers` sets checkpointing stride across decoder layers.
+      Lower values reduce activation memory but increase compute overhead.
+    """
     name: Literal["ac_every_n_decoder"] = "ac_every_n_decoder"
     d_model: int = 128
     n_heads: int = 8
@@ -118,7 +193,12 @@ class OptimizerConfig:
 
 @dataclass(slots=True)
 class LRSchedulerStageConfig:
-    """One scheduler stage defined by LR factors relative to optimizer base LR."""
+    """One scheduler stage defined by LR factors relative to base LR.
+
+    Notes:
+    - `steps=None` is only allowed for the final stage in the chain.
+    - `start_factor=None` means "continue from previous stage end".
+    """
     type: LRSchedulerStageType
     end_factor: float
     steps: int | None = None
@@ -127,11 +207,36 @@ class LRSchedulerStageConfig:
 
 @dataclass(slots=True)
 class LRSchedulerChainConfig:
+    """Sequential LR scheduler stages applied in order."""
     stages: list[LRSchedulerStageConfig] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class TrainConfig:
+    """Training loop controls for batching, scheduling, and data iteration.
+
+    Parameters:
+    - `effective_batch_size`: optimizer-step batch size target.
+    - `epochs`: epoch budget.
+    - `optimizer`: optimizer settings.
+    - `micro_batch_size`: per-microbatch loader batch size. Auto-resolved when omitted.
+    - `accumulation_steps`: gradient accumulation factor. Auto-resolved when omitted.
+    - `lr_scaling`: LR scaling mode. Must be `"sqrt"` when accumulation is active.
+    - `lr_scheduler`: optional chained LR scheduler config.
+    - `seq_len`: language-model context length.
+    - `stride`: window stride for dataset chunking.
+    - `data_fraction`: fraction of materialized dataset to use.
+      Not supported in streaming mode (must be `1.0`).
+    - `data_mode`: `"materialized"` or `"streaming"`.
+      Streaming requires `dataset.name="hf_text"`,
+      `tokenizer.name="hf_pretrained"`, and `split.name="pre_split"`.
+    - `max_steps`: optional optimizer-step cap. Supported only in streaming mode.
+    - `run_validation`: enable validation. Streaming validation additionally requires
+      `dataset.validation_split`.
+
+    Behavior:
+    - `effective_batch_size == micro_batch_size * accumulation_steps` is enforced.
+    """
     effective_batch_size: int
     epochs: int = 3
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
@@ -177,6 +282,13 @@ class ResolvedTrainLearningRateConfig:
 
 @dataclass(slots=True)
 class HoldoutSplitConfig:
+    """Random holdout split generated from one dataset source.
+
+    Parameters:
+    - `train_fraction`: fraction of examples routed to train set.
+    - `seed`: split RNG seed.
+    - `shuffle`: whether to shuffle before splitting.
+    """
     name: Literal["holdout"] = "holdout"
     train_fraction: float = 0.9
     seed: int = 42
@@ -185,6 +297,11 @@ class HoldoutSplitConfig:
 
 @dataclass(slots=True)
 class PreSplitConfig:
+    """Use dataset-provided train/validation splits (no random split step).
+
+    Note:
+    - Supported only when `train.data_mode="streaming"`.
+    """
     name: Literal["pre_split"] = "pre_split"
 
 
@@ -193,6 +310,48 @@ SplitConfig = HoldoutSplitConfig | PreSplitConfig
 
 @dataclass(slots=True)
 class WandbMetricsConfig:
+    """W&B metric toggles, cadences, and sampling controls.
+
+    Metric toggles:
+    - `enable_train_loss_vs_tokens`: log step/epoch train loss with `tokens_seen_train`.
+    - `enable_val_loss_vs_tokens`: log periodic/epoch val loss with `tokens_seen_train`.
+    - `enable_perplexity`: log train/val perplexity metrics.
+    - `enable_bits_per_byte`: log train/val BPB metrics.
+      For HF streaming runs, meaningful BPB additionally requires
+      `tokenizer.bpb_mode` to be `"approx"` or `"exact"`; `"off"` typically yields `NaN`.
+      In general, BPB is meaningful only when byte lengths are available in the
+      batch/runtime path (for example BPE materialized or HF streaming with BPB mode).
+    - `enable_step_time`: log step and pass timing metrics.
+    - `enable_peak_memory`: log CUDA peak allocated/reserved memory metrics.
+    - `enable_global_grad_norm`: log `global_grad_norm` on diagnostics cadence.
+    - `enable_layer_grad_norms`: log sampled per-layer gradient norms.
+    - `enable_global_param_norm`: log global parameter L2 norm.
+    - `enable_layer_param_norms`: log first/middle/last layer parameter norms.
+    - `enable_param_update_norm`: log parameter update norm per optimizer step.
+    - `enable_update_to_weight_ratio`: log update-to-weight ratio.
+    - `enable_optimizer_state_norms`: log Adam/AdamW moment and variance norms.
+    - `enable_activation_norms`: log activation norms for first/middle/last decoder layers.
+    - `enable_ln_grad_norms`: log LayerNorm weight/bias grad norms for first/middle/last.
+    - `enable_attention_entropy`: log sampled attention entropy metrics.
+    - `watch_model`: enable `wandb.watch(...)` model tracking.
+
+    Cadence controls:
+    - `log_every_n_steps`: cadence for step metrics (loss/tokens/perplexity/BPB/time/memory).
+    - `diagnostics_every_n_steps`: general diagnostics cadence (`should_log_diagnostics`),
+      gating global grad norm, activation norms, and LayerNorm grad norms.
+    - `layer_grad_norms_every_n_steps`: optional cadence override for layer grad norms.
+      Defaults to `diagnostics_every_n_steps` when `None`.
+    - `parameter_optimizer_norms_every_n_steps`: optional cadence override for
+      parameter/optimizer norms. Defaults to `diagnostics_every_n_steps` when `None`.
+    - `val_every_n_steps`: periodic validation cadence. `0` disables periodic val
+      (epoch-end validation still depends on `train.run_validation`).
+    - `attention_entropy_every_n_steps`: attention entropy cadence.
+
+    Sampling controls:
+    - `layer_grad_norm_stride`: layer-index stride used when sampling layer grad norms.
+    - `attention_entropy_head_cap`: number of attention heads sampled.
+    - `attention_entropy_token_cap`: token cap per axis for entropy computation.
+    """
     enable_train_loss_vs_tokens: bool = True
     enable_val_loss_vs_tokens: bool = True
     enable_perplexity: bool = True
@@ -206,13 +365,13 @@ class WandbMetricsConfig:
     enable_param_update_norm: bool = False
     enable_update_to_weight_ratio: bool = False
     enable_optimizer_state_norms: bool = False
-    enable_activation_norms: bool = True
-    enable_ln_grad_norms: bool = True
-    enable_attention_entropy: bool = True
+    enable_activation_norms: bool = False
+    enable_ln_grad_norms: bool = False
+    enable_attention_entropy: bool = False
     watch_model: bool = False
-    log_every_n_steps: int = 10
-    diagnostics_every_n_steps: int = 50
-    layer_grad_norm_stride: int = 1
+    log_every_n_steps: int = 25
+    diagnostics_every_n_steps: int = 25
+    layer_grad_norm_stride: int = 4
     layer_grad_norms_every_n_steps: int | None = None
     parameter_optimizer_norms_every_n_steps: int | None = None
     val_every_n_steps: int = 250
@@ -223,6 +382,18 @@ class WandbMetricsConfig:
 
 @dataclass(slots=True)
 class LoggingConfig:
+    """Logger backend and artifact I/O controls.
+
+    Parameters:
+    - `provider`: logging backend.
+    - `enable_artifact_io`: enables remote artifact save/restore.
+    - `wandb`: W&B metric toggles/cadences.
+
+    Behavior:
+    - `provider="wandb"` requires `run.run_name` to be set.
+    - `enable_artifact_io=False` disables remote artifact save/restore operations.
+      Local file writes still depend on `run.persist_local_artifacts`.
+    """
     provider: Literal["console", "wandb"] = "console"
     enable_artifact_io: bool = True
     wandb: WandbMetricsConfig = field(default_factory=WandbMetricsConfig)
@@ -432,6 +603,8 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             raise ValueError(
                 "tokenizer.pretrained_name_or_path must be non-empty for hf_pretrained."
             )
+        if config.tokenizer.bpb_mode not in {"off", "approx", "exact"}:
+            raise ValueError("tokenizer.bpb_mode must be one of: off, approx, exact.")
     else:
         raise ValueError(
             "Unsupported tokenizer.name "
@@ -554,6 +727,9 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         )
 
     wandb_cfg = config.logging.wandb
+    bpb_metrics_enabled = (
+        config.logging.provider == "wandb" and wandb_cfg.enable_bits_per_byte
+    )
     if wandb_cfg.log_every_n_steps <= 0:
         raise ValueError("logging.wandb.log_every_n_steps must be > 0.")
     if wandb_cfg.diagnostics_every_n_steps <= 0:
@@ -582,3 +758,13 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("logging.wandb.attention_entropy_head_cap must be > 0.")
     if wandb_cfg.attention_entropy_token_cap <= 0:
         raise ValueError("logging.wandb.attention_entropy_token_cap must be > 0.")
+    if (
+        bpb_metrics_enabled
+        and config.tokenizer.name == "hf_pretrained"
+        and config.tokenizer.bpb_mode == "exact"
+        and not config.tokenizer.use_fast
+    ):
+        raise ValueError(
+            "tokenizer.bpb_mode='exact' requires tokenizer.use_fast=True when "
+            "logging.wandb.enable_bits_per_byte is enabled."
+        )
