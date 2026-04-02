@@ -1,14 +1,16 @@
 """
 Example:
   .venv/bin/python src/utils/run_and_shutdown.py \
+    --provider vast \
     --log-dir runs/logs \
     --run-name pre-vs-post-norm-2 \
     -- python experiments/baseline/pre_vs_post_layer_norm.py
 
   .venv/bin/python src/utils/run_and_shutdown.py \
+    --provider thunder \
     --log-dir runs/logs \
-    --run-name mem-bud-api-exp \
-    -- python -m experiments.baseline.hyperparam_sweeps.OptimAdamVsW
+    --run-name ph1-baseline \
+    -- python experiments/phase-1/ph1-baseline.py
 """
 
 from __future__ import annotations
@@ -36,6 +38,11 @@ from src.utils.vast import (
     resolve_vast_api_key,
     resolve_vast_instance_id,
     stop_vast_instance,
+)
+from src.utils.thunder import (
+    resolve_thunder_api_key,
+    resolve_thunder_instance_id,
+    snapshot_and_delete_thunder_instance,
 )
 
 
@@ -113,8 +120,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run an experiment command, tee stdout/stderr to a log file, "
-            "persist metadata, then stop the current Vast instance."
+            "persist metadata, then shut down the current cloud instance."
         )
+    )
+    parser.add_argument(
+        "--provider",
+        choices=("vast", "thunder"),
+        required=True,
+        help=(
+            "Cloud provider for post-run instance shutdown. "
+            "vast: calls Vast.ai stop API. "
+            "thunder: triggers Thunder Compute snapshot then deletes the instance."
+        ),
     )
     parser.add_argument(
         "--log-dir",
@@ -187,6 +204,7 @@ def _prompt_for_secret(*, env_key: str, tee: _Tee) -> str:
 
 def _prepare_child_env(
     *,
+    provider: str,
     extra_env: list[tuple[str, str]],
     tee: _Tee,
 ) -> tuple[dict[str, str], dict[str, Any]]:
@@ -203,10 +221,6 @@ def _prepare_child_env(
         "pytorch_alloc_conf": None,
         "wandb_api_key_set": False,
         "wandb_api_key_source": None,
-        "vast_api_key_set": False,
-        "vast_api_key_source": None,
-        "vast_instance_id": None,
-        "vast_instance_id_source": None,
     }
 
     env["PYTHONPATH"] = _prepend_env_path(
@@ -236,36 +250,75 @@ def _prepare_child_env(
         env_summary["wandb_api_key_set"] = True
         env_summary["wandb_api_key_source"] = "prompted"
 
-    try:
-        vast_instance_id, vast_instance_id_source = resolve_vast_instance_id(env)
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
+    if provider == "vast":
+        env_summary.update(
+            {
+                "vast_api_key_set": False,
+                "vast_api_key_source": None,
+                "vast_instance_id": None,
+                "vast_instance_id_source": None,
+            }
+        )
+        try:
+            vast_instance_id, vast_instance_id_source = resolve_vast_instance_id(env)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
 
-    env_summary["vast_instance_id"] = vast_instance_id
-    env_summary["vast_instance_id_source"] = vast_instance_id_source
-    if vast_instance_id is not None and "CONTAINER_ID" not in env:
-        env["CONTAINER_ID"] = str(vast_instance_id)
+        env_summary["vast_instance_id"] = vast_instance_id
+        env_summary["vast_instance_id_source"] = vast_instance_id_source
+        if vast_instance_id is not None and "CONTAINER_ID" not in env:
+            env["CONTAINER_ID"] = str(vast_instance_id)
 
-    if vast_instance_id is None:
+        if vast_instance_id is None:
+            raise RuntimeError(
+                "CONTAINER_ID/VAST_CONTAINERLABEL is not set, so the Vast instance cannot be stopped."
+            )
+
+        vast_api_key, vast_api_key_source = resolve_vast_api_key(env)
+        if not vast_api_key:
+            vast_api_key = _prompt_for_secret(env_key="VAST_API_KEY", tee=tee)
+            env["VAST_API_KEY"] = vast_api_key
+            vast_api_key_source = "prompted"
+
+        env_summary["vast_api_key_set"] = True
+        env_summary["vast_api_key_source"] = (
+            "cli" if vast_api_key_source in extra_env_keys else vast_api_key_source
+        )
+        return env, env_summary
+
+    env_summary.update(
+        {
+            "thunder_api_key_set": False,
+            "thunder_api_key_source": None,
+            "thunder_instance_id": None,
+            "thunder_instance_id_source": None,
+        }
+    )
+
+    thunder_instance_id, thunder_instance_id_source = resolve_thunder_instance_id(env)
+    env_summary["thunder_instance_id"] = thunder_instance_id
+    env_summary["thunder_instance_id_source"] = thunder_instance_id_source
+    if thunder_instance_id is None:
         raise RuntimeError(
-            "CONTAINER_ID/VAST_CONTAINERLABEL is not set, so the Vast instance cannot be stopped."
+            "TNR_INSTANCE_ID is not set, so the Thunder instance cannot be stopped."
         )
 
-    vast_api_key, vast_api_key_source = resolve_vast_api_key(env)
-    if not vast_api_key:
-        vast_api_key = _prompt_for_secret(env_key="VAST_API_KEY", tee=tee)
-        env["VAST_API_KEY"] = vast_api_key
-        vast_api_key_source = "prompted"
+    thunder_api_key, thunder_api_key_source = resolve_thunder_api_key(env)
+    if not thunder_api_key:
+        thunder_api_key = _prompt_for_secret(env_key="TNR_API_TOKEN", tee=tee)
+        env["TNR_API_TOKEN"] = thunder_api_key
+        thunder_api_key_source = "prompted"
 
-    env_summary["vast_api_key_set"] = True
-    env_summary["vast_api_key_source"] = (
-        "cli" if vast_api_key_source in extra_env_keys else vast_api_key_source
+    env_summary["thunder_api_key_set"] = True
+    env_summary["thunder_api_key_source"] = (
+        "cli" if thunder_api_key_source in extra_env_keys else thunder_api_key_source
     )
     return env, env_summary
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(sys.argv[1:] if argv is None else argv))
+    provider = args.provider
 
     start_time = _utc_now()
     command = list(args.command)
@@ -294,17 +347,31 @@ def main(argv: list[str] | None = None) -> int:
         "metadata_file": str(metadata_path.resolve()),
         "received_signals": [],
         "env": {},
-        "shutdown": {
-            "provider": "vast_api",
-            "attempted": False,
-            "start_time_utc": None,
-            "end_time_utc": None,
-            "duration_sec": None,
-            "return_code": None,
-            "error": None,
-            "response": None,
-            "vast_instance_id": None,
-        },
+        "shutdown": (
+            {
+                "provider": "vast_api",
+                "attempted": False,
+                "start_time_utc": None,
+                "end_time_utc": None,
+                "duration_sec": None,
+                "return_code": None,
+                "error": None,
+                "response": None,
+                "vast_instance_id": None,
+            }
+            if provider == "vast"
+            else {
+                "provider": "thunder_api",
+                "attempted": False,
+                "start_time_utc": None,
+                "end_time_utc": None,
+                "duration_sec": None,
+                "return_code": None,
+                "error": None,
+                "response": None,
+                "thunder_instance_id": None,
+            }
+        ),
     }
 
     child: subprocess.Popen[str] | None = None
@@ -330,17 +397,28 @@ def main(argv: list[str] | None = None) -> int:
 
             try:
                 child_env, env_summary = _prepare_child_env(
+                    provider=provider,
                     extra_env=list(args.set_env),
                     tee=tee,
                 )
                 metadata["env"] = env_summary
-                metadata["shutdown"]["vast_instance_id"] = env_summary["vast_instance_id"]
+                if provider == "vast":
+                    metadata["shutdown"]["vast_instance_id"] = env_summary["vast_instance_id"]
+                    instance_id_msg = f"vast_instance_id={env_summary['vast_instance_id']}"
+                else:
+                    metadata["shutdown"]["thunder_instance_id"] = env_summary[
+                        "thunder_instance_id"
+                    ]
+                    instance_id_msg = (
+                        f"thunder_instance_id={env_summary['thunder_instance_id']}"
+                    )
                 tee.write_message(
                     "[wrapper] env prepared | "
+                    f"provider={provider} | "
                     f"PYTORCH_ALLOC_CONF={env_summary['pytorch_alloc_conf']} "
                     f"({env_summary['pytorch_alloc_conf_source']}) | "
                     f"WANDB_API_KEY source={env_summary['wandb_api_key_source']} | "
-                    f"vast_instance_id={env_summary['vast_instance_id']}"
+                    f"{instance_id_msg}"
                 )
             except RuntimeError as exc:
                 metadata["env"] = {"error": str(exc)}
@@ -398,26 +476,46 @@ def main(argv: list[str] | None = None) -> int:
                 shutdown_meta["attempted"] = True
                 shutdown_start = _utc_now()
                 shutdown_meta["start_time_utc"] = _utc_iso(shutdown_start)
-                tee.write_message("[wrapper] running shutdown step")
-                tee.write_message(
-                    f"[wrapper] vast_instance_id={shutdown_meta['vast_instance_id']}"
-                )
+                tee.write_message(f"[wrapper] running shutdown step | provider={provider}")
+                if provider == "vast":
+                    tee.write_message(
+                        f"[wrapper] vast_instance_id={shutdown_meta['vast_instance_id']}"
+                    )
+                else:
+                    tee.write_message(
+                        "[wrapper] "
+                        f"thunder_instance_id={shutdown_meta['thunder_instance_id']}"
+                    )
 
                 try:
-                    response = stop_vast_instance(
-                        instance_id=int(shutdown_meta["vast_instance_id"]),
-                        api_key=str(
-                            child_env.get("CONTAINER_API_KEY")
-                            or child_env.get("VAST_API_KEY")
-                            or ""
-                        ),
-                    )
+                    if provider == "vast":
+                        response = stop_vast_instance(
+                            instance_id=int(shutdown_meta["vast_instance_id"]),
+                            api_key=str(
+                                child_env.get("CONTAINER_API_KEY")
+                                or child_env.get("VAST_API_KEY")
+                                or ""
+                            ),
+                        )
+                    else:
+                        response = snapshot_and_delete_thunder_instance(
+                            instance_id=str(shutdown_meta["thunder_instance_id"]),
+                            api_key=str(child_env.get("TNR_API_TOKEN") or ""),
+                        )
                     shutdown_meta["return_code"] = 0
                     shutdown_meta["response"] = response
-                    tee.write_message("[wrapper] Vast stop_instance completed")
-                    tee.write_message(
-                        "[shutdown][vast] " + json.dumps(response, sort_keys=True)
-                    )
+                    if provider == "vast":
+                        tee.write_message("[wrapper] Vast stop_instance completed")
+                        tee.write_message(
+                            "[shutdown][vast] " + json.dumps(response, sort_keys=True)
+                        )
+                    else:
+                        tee.write_message(
+                            "[wrapper] Thunder snapshot_and_delete completed"
+                        )
+                        tee.write_message(
+                            "[shutdown][thunder] " + json.dumps(response, sort_keys=True)
+                        )
                 except Exception as exc:  # pragma: no cover - defensive path.
                     shutdown_meta["error"] = str(exc)
                     tee.write_message(f"[wrapper] shutdown step raised: {exc}")

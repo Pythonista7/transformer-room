@@ -72,10 +72,83 @@ def put(url, *, headers, json, timeout):
     (stub_dir / "requests.py").write_text(body, encoding="utf-8")
 
 
+def _write_thunder_requests_stub(
+    stub_dir: Path,
+    *,
+    snapshot_status_code: int = 202,
+    delete_status_code: int = 200,
+    should_fail: bool = False,
+) -> None:
+    stub_dir.mkdir(parents=True, exist_ok=True)
+    if should_fail:
+        body = """class RequestException(Exception):
+    pass
+
+class Response:
+    def __init__(self, *, status_code, payload, text):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+def post(url, *, headers, json, timeout):
+    raise RequestException("network down")
+"""
+    else:
+        body = f"""import json as json_module
+import os
+from pathlib import Path
+
+class RequestException(Exception):
+    pass
+
+class Response:
+    def __init__(self, *, status_code, payload, text):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+def post(url, *, headers, json, timeout):
+    marker_path = os.environ.get("THUNDER_TEST_MARKER", "").strip()
+    if url.endswith("/snapshots/create"):
+        payload = {{"accepted": {str(snapshot_status_code < 400)}}}
+        if marker_path:
+            Path(marker_path).write_text(
+                json_module.dumps([{{"url": url, "headers": headers, "json": json}}]),
+                encoding="utf-8",
+            )
+        return Response(
+            status_code={snapshot_status_code},
+            payload=payload,
+            text=json_module.dumps(payload),
+        )
+
+    payload = {{"deleted": {str(delete_status_code < 400)}}}
+    existing = []
+    if marker_path and Path(marker_path).exists():
+        existing = json_module.loads(Path(marker_path).read_text(encoding="utf-8"))
+    existing.append({{"url": url, "headers": headers, "json": json}})
+    if marker_path:
+        Path(marker_path).write_text(json_module.dumps(existing), encoding="utf-8")
+    return Response(
+        status_code={delete_status_code},
+        payload=payload,
+        text=json_module.dumps(payload),
+    )
+"""
+    (stub_dir / "requests.py").write_text(body, encoding="utf-8")
+
+
 class RunAndShutdownWrapperTests(unittest.TestCase):
     def _run_wrapper(
         self,
         *,
+        provider: str = "vast",
         child_code: str,
         child_exit_code: int,
         log_dir: Path,
@@ -99,6 +172,8 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
         cmd = [
             sys.executable,
             str(WRAPPER_PATH),
+            "--provider",
+            provider,
             "--log-dir",
             str(log_dir),
             "--run-name",
@@ -306,11 +381,30 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
         cmd = [
             sys.executable,
             str(WRAPPER_PATH),
+            "--provider",
+            "vast",
             "--",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 2)
         self.assertIn("missing command after '--'", result.stderr)
+
+    def test_missing_provider_returns_argument_error(self) -> None:
+        cmd = [
+            sys.executable,
+            str(WRAPPER_PATH),
+            "--log-dir",
+            "runs/logs",
+            "--run-name",
+            "wrapper-test",
+            "--",
+            sys.executable,
+            "-c",
+            "print('unused')",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("the following arguments are required: --provider", result.stderr)
 
     def test_default_pytorch_alloc_conf_is_set_before_experiment(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -481,6 +575,245 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(metadata["child_return_code"], 2)
             self.assertIn("CONTAINER_ID/VAST_CONTAINERLABEL is not set", metadata["env"]["error"])
+
+    def test_thunder_shutdown_runs_after_success_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            marker_path = tmp_path / "thunder_stop.json"
+            _write_thunder_requests_stub(stub_dir)
+
+            result = self._run_wrapper(
+                provider="thunder",
+                child_code="print('done')",
+                child_exit_code=0,
+                log_dir=log_dir,
+                wrapper_env={
+                    "TNR_INSTANCE_ID": "550e8400-e29b-41d4-a716-446655440000",
+                    "TNR_API_TOKEN": "thunder-test-key",
+                    "THUNDER_TEST_MARKER": str(marker_path),
+                },
+                pythonpath_entries=[stub_dir],
+            )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(marker_path.exists())
+
+            requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(requests_payload), 2)
+            self.assertTrue(requests_payload[0]["url"].endswith("/snapshots/create"))
+            self.assertEqual(
+                requests_payload[0]["json"]["instanceId"],
+                "550e8400-e29b-41d4-a716-446655440000",
+            )
+            self.assertTrue(
+                requests_payload[1]["url"].endswith(
+                    "/instances/550e8400-e29b-41d4-a716-446655440000/delete"
+                )
+            )
+            self.assertEqual(
+                requests_payload[0]["headers"]["Authorization"],
+                "Bearer thunder-test-key",
+            )
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["shutdown"]["provider"], "thunder_api")
+            self.assertEqual(
+                metadata["shutdown"]["thunder_instance_id"],
+                "550e8400-e29b-41d4-a716-446655440000",
+            )
+            self.assertEqual(metadata["shutdown"]["return_code"], 0)
+            self.assertIn("snapshot_name", metadata["shutdown"]["response"])
+
+            log_path = _single_file(log_dir, "*.log")
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("[wrapper] running shutdown step | provider=thunder", log_text)
+            self.assertIn("[shutdown][thunder]", log_text)
+
+    def test_thunder_shutdown_runs_after_non_zero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            marker_path = tmp_path / "thunder_stop.json"
+            _write_thunder_requests_stub(stub_dir)
+
+            result = self._run_wrapper(
+                provider="thunder",
+                child_code="print('failing-run')",
+                child_exit_code=7,
+                log_dir=log_dir,
+                wrapper_env={
+                    "TNR_INSTANCE_ID": "550e8400-e29b-41d4-a716-446655440000",
+                    "TNR_API_TOKEN": "thunder-test-key",
+                    "THUNDER_TEST_MARKER": str(marker_path),
+                },
+                pythonpath_entries=[stub_dir],
+            )
+
+            self.assertEqual(result.returncode, 7)
+            self.assertTrue(marker_path.exists())
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertTrue(metadata["shutdown"]["attempted"])
+            self.assertEqual(metadata["child_return_code"], 7)
+
+    def test_missing_tnr_instance_id_fails_without_running_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            _write_thunder_requests_stub(stub_dir)
+
+            result = self._run_wrapper(
+                provider="thunder",
+                child_code="print('will-not-run')",
+                child_exit_code=0,
+                log_dir=log_dir,
+                wrapper_env={"TNR_API_TOKEN": "thunder-test-key"},
+                pythonpath_entries=[stub_dir],
+            )
+
+            self.assertEqual(result.returncode, 2)
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["child_return_code"], 2)
+            self.assertIn("TNR_INSTANCE_ID is not set", metadata["env"]["error"])
+
+    def test_missing_tnr_api_token_fails_without_interactive_tty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            _write_thunder_requests_stub(stub_dir)
+
+            result = self._run_wrapper(
+                provider="thunder",
+                child_code="print('will-not-run')",
+                child_exit_code=0,
+                log_dir=log_dir,
+                wrapper_env={"TNR_INSTANCE_ID": "550e8400-e29b-41d4-a716-446655440000"},
+                unset_env_keys=["TNR_API_TOKEN"],
+                pythonpath_entries=[stub_dir],
+            )
+
+            self.assertEqual(result.returncode, 2)
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["child_return_code"], 2)
+            self.assertIn("TNR_API_TOKEN is not set", metadata["env"]["error"])
+
+    def test_thunder_api_token_from_set_env_is_used_for_shutdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            marker_path = tmp_path / "thunder_stop.json"
+            _write_thunder_requests_stub(stub_dir)
+
+            cmd = [
+                sys.executable,
+                str(WRAPPER_PATH),
+                "--provider",
+                "thunder",
+                "--log-dir",
+                str(log_dir),
+                "--run-name",
+                "wrapper-test",
+                "--set-env",
+                "TNR_API_TOKEN=thunder-via-cli",
+                "--",
+                sys.executable,
+                "-c",
+                "print('done')",
+            ]
+            env = dict(os.environ)
+            env["WANDB_API_KEY"] = "dummy-test-key"
+            env["TNR_INSTANCE_ID"] = "550e8400-e29b-41d4-a716-446655440000"
+            env["THUNDER_TEST_MARKER"] = str(marker_path)
+            env["PYTHONPATH"] = str(stub_dir)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                requests_payload[0]["headers"]["Authorization"],
+                "Bearer thunder-via-cli",
+            )
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["env"]["thunder_api_key_source"], "cli")
+
+    def test_thunder_snapshot_failure_does_not_attempt_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            marker_path = tmp_path / "thunder_stop.json"
+            _write_thunder_requests_stub(stub_dir, snapshot_status_code=500)
+
+            result = self._run_wrapper(
+                provider="thunder",
+                child_code="print('failing-child')",
+                child_exit_code=5,
+                log_dir=log_dir,
+                wrapper_env={
+                    "TNR_INSTANCE_ID": "550e8400-e29b-41d4-a716-446655440000",
+                    "TNR_API_TOKEN": "thunder-test-key",
+                    "THUNDER_TEST_MARKER": str(marker_path),
+                },
+                pythonpath_entries=[stub_dir],
+            )
+
+            self.assertEqual(result.returncode, 5)
+            requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(requests_payload), 1)
+            self.assertTrue(requests_payload[0]["url"].endswith("/snapshots/create"))
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertIn("HTTP 500", metadata["shutdown"]["error"])
+            self.assertIsNone(metadata["shutdown"]["return_code"])
+
+    def test_thunder_delete_failure_preserves_snapshot_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            marker_path = tmp_path / "thunder_stop.json"
+            _write_thunder_requests_stub(stub_dir, delete_status_code=500)
+
+            result = self._run_wrapper(
+                provider="thunder",
+                child_code="print('failing-child')",
+                child_exit_code=5,
+                log_dir=log_dir,
+                wrapper_env={
+                    "TNR_INSTANCE_ID": "550e8400-e29b-41d4-a716-446655440000",
+                    "TNR_API_TOKEN": "thunder-test-key",
+                    "THUNDER_TEST_MARKER": str(marker_path),
+                },
+                pythonpath_entries=[stub_dir],
+            )
+
+            self.assertEqual(result.returncode, 5)
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertIn("HTTP 500", metadata["shutdown"]["error"])
+            self.assertIn("snapshot_name=autosnap-", metadata["shutdown"]["error"])
 
 
 if __name__ == "__main__":
