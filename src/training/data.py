@@ -487,8 +487,7 @@ def build_streaming_data_loaders(
         train_dataset,
         batch_size=batching.loader_batch_size, # This is effective batch and not micro batch
         pin_memory=pin_memory,
-        num_workers=1,
-        prefetch_factor=2
+        num_workers=0,
     )
 
     val_loader = None
