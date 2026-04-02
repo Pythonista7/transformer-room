@@ -91,16 +91,19 @@ def compute_attention_entropy_from_module_inputs(
         query = (
             query[:, :sampled_heads, :sampled_tokens, :]
             .detach()
-            .to(device="cpu", dtype=torch.float32)
+            .to(dtype=torch.float32)
         )
         key = (
             key[:, :sampled_heads, :sampled_tokens, :]
             .detach()
-            .to(device="cpu", dtype=torch.float32)
+            .to(dtype=torch.float32)
         )
-        attention_mask = attention_mask[:, :, :sampled_tokens, :sampled_tokens].detach().to(
-            device="cpu"
-        )
+        attention_mask = attention_mask[
+            :,
+            :,
+            :sampled_tokens,
+            :sampled_tokens,
+        ].detach()
 
         scores = (query @ key.transpose(-2, -1)) / attention_scale(int(head_dim))
         scores = scores.masked_fill(~attention_mask, float("-inf"))

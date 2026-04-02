@@ -715,6 +715,7 @@ class ForwardHookMetricsPluginTests(unittest.TestCase):
             float(expected_entropy.item()),
             places=6,
         )
+        self.assertEqual(computed_entropy.device, inputs.device)
 
     def test_unified_entropy_matches_between_basic_and_sdpa_modules(self) -> None:
         basic_attn = BasicMultiHeadSelfAttention(E_q=8, E_out=8, n_heads=2, E_bias=True)
