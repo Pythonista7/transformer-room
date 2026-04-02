@@ -47,10 +47,17 @@ STRIDE = SEQ_LEN
 DATASET_NAME = "HuggingFaceFW/fineweb"
 DATASET_CONFIG = "sample-10BT"
 
+# As for chinchilla recommeding 20 tokens per param
+# so a 124M model approx should train on 2.5B tokens -> that suggests max_steps = 38k steps 
 
-# for 100k steps, we shouldve seen around 6,553,600,000 ~ 6.5B tokens
-MAX_TRAIN_STEPS = 1_000 # Will first test it for 1k before 100_000
+# While llama recommends a 1000:1 for token:param, which lands us around 125B which is insane! 
+# Even for 100k steps, we shouldve seen around 6,553,600,000 ~ 6.5B tokens
 
+MAX_TRAIN_STEPS = 1_000 # Will first test it for 1k before anything else
+
+# On an A100, including torch.compile and final model upload, the train time for 1k steps was 34mins
+# The GPU utilization could be better with bigger batches but this is the ball park range.
+# So a chinchilla regime would take around 21.5-22hrs on the 40GB-A100
 
 
 PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
