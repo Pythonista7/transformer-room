@@ -487,9 +487,10 @@ def build_streaming_data_loaders(
         train_dataset,
         batch_size=batching.loader_batch_size, # This is effective batch and not micro batch
         pin_memory=pin_memory,
-        num_workers=2,
-        prefetch_factor=2,
-        multiprocessing_context="spawn"
+        num_workers=0,
+        # using multiproc here seems to cause one or the other problem.
+        # prefetch_factor=2,
+        # multiprocessing_context="spawn"
     )
 
     val_loader = None
