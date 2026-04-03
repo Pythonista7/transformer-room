@@ -62,27 +62,27 @@ DISABLED_CADENCE = 1_000
 
 
 VARIANT_CADENCES: dict[str, dict[str, int]] = {
-    # "control": {
-    #     "log_every_n_steps": 4,
-    #     "diagnostics_every_n_steps": DISABLED_CADENCE,
-    #     "layer_grad_norms_every_n_steps": DISABLED_CADENCE,
-    #     "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
-    #     "attention_entropy_every_n_steps": DISABLED_CADENCE,
-    # },
-    # "diagnostics": {
-    #     "log_every_n_steps": 4,
-    #     "diagnostics_every_n_steps": 12,
-    #     "layer_grad_norms_every_n_steps": DISABLED_CADENCE,
-    #     "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
-    #     "attention_entropy_every_n_steps": DISABLED_CADENCE,
-    # },
-    # "layer_grad": {
-    #     "log_every_n_steps": 4,
-    #     "diagnostics_every_n_steps": DISABLED_CADENCE,
-    #     "layer_grad_norms_every_n_steps": 12,
-    #     "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
-    #     "attention_entropy_every_n_steps": DISABLED_CADENCE,
-    # },
+    "control": {
+        "log_every_n_steps": 4,
+        "diagnostics_every_n_steps": DISABLED_CADENCE,
+        "layer_grad_norms_every_n_steps": DISABLED_CADENCE,
+        "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
+        "attention_entropy_every_n_steps": DISABLED_CADENCE,
+    },
+    "diagnostics": {
+        "log_every_n_steps": 4,
+        "diagnostics_every_n_steps": 12,
+        "layer_grad_norms_every_n_steps": DISABLED_CADENCE,
+        "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
+        "attention_entropy_every_n_steps": DISABLED_CADENCE,
+    },
+    "layer_grad": {
+        "log_every_n_steps": 4,
+        "diagnostics_every_n_steps": DISABLED_CADENCE,
+        "layer_grad_norms_every_n_steps": 12,
+        "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
+        "attention_entropy_every_n_steps": DISABLED_CADENCE,
+    },
     "param_optim": {
         "log_every_n_steps": 4,
         "diagnostics_every_n_steps": DISABLED_CADENCE,
