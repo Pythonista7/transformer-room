@@ -9,7 +9,7 @@ Example:
   .venv/bin/python src/utils/run_and_shutdown.py \
     --provider thunder \
     --log-dir runs/logs \
-    --run-name ph1-baseline \
+    --run-name ph1-stg1-baseline-test-1 \
     -- python experiments/phase-1/ph1-baseline.py
 """
 
@@ -501,6 +501,10 @@ def main(argv: list[str] | None = None) -> int:
                         response = snapshot_and_delete_thunder_instance(
                             instance_id=str(shutdown_meta["thunder_instance_id"]),
                             api_key=str(child_env.get("TNR_API_TOKEN") or ""),
+                            instance_name=(
+                                str(child_env.get("TNR_INSTANCE_NAME") or "").strip()
+                                or None
+                            ),
                         )
                     shutdown_meta["return_code"] = 0
                     shutdown_meta["response"] = response

@@ -75,6 +75,8 @@ def put(url, *, headers, json, timeout):
 def _write_thunder_requests_stub(
     stub_dir: Path,
     *,
+    instance_id: str = "550e8400-e29b-41d4-a716-446655440000",
+    instance_name: str = "wrapper-test-instance",
     snapshot_status_code: int = 202,
     delete_status_code: int = 200,
     should_fail: bool = False,
@@ -92,6 +94,9 @@ class Response:
 
     def json(self):
         return self._payload
+
+def get(url, *, headers, timeout):
+    raise RequestException("network down")
 
 def post(url, *, headers, json, timeout):
     raise RequestException("network down")
@@ -113,15 +118,40 @@ class Response:
     def json(self):
         return self._payload
 
+def _read_marker(marker_path):
+    if marker_path and Path(marker_path).exists():
+        return json_module.loads(Path(marker_path).read_text(encoding="utf-8"))
+    return []
+
+def _write_marker(marker_path, payload):
+    if marker_path:
+        Path(marker_path).write_text(json_module.dumps(payload), encoding="utf-8")
+
+def get(url, *, headers, timeout):
+    marker_path = os.environ.get("THUNDER_TEST_MARKER", "").strip()
+    existing = _read_marker(marker_path)
+    existing.append({{"method": "GET", "url": url, "headers": headers}})
+    _write_marker(marker_path, existing)
+
+    payload = {{
+        "instances": [
+            {{"identifier": "{instance_id}", "instance_name": "{instance_name}"}}
+        ]
+    }}
+    return Response(
+        status_code=200,
+        payload=payload,
+        text=json_module.dumps(payload),
+    )
+
 def post(url, *, headers, json, timeout):
     marker_path = os.environ.get("THUNDER_TEST_MARKER", "").strip()
-    if url.endswith("/snapshots/create"):
+    existing = _read_marker(marker_path)
+    existing.append({{"method": "POST", "url": url, "headers": headers, "json": json}})
+    _write_marker(marker_path, existing)
+
+    if url.endswith("/instances/snapshot"):
         payload = {{"accepted": {str(snapshot_status_code < 400)}}}
-        if marker_path:
-            Path(marker_path).write_text(
-                json_module.dumps([{{"url": url, "headers": headers, "json": json}}]),
-                encoding="utf-8",
-            )
         return Response(
             status_code={snapshot_status_code},
             payload=payload,
@@ -129,12 +159,6 @@ def post(url, *, headers, json, timeout):
         )
 
     payload = {{"deleted": {str(delete_status_code < 400)}}}
-    existing = []
-    if marker_path and Path(marker_path).exists():
-        existing = json_module.loads(Path(marker_path).read_text(encoding="utf-8"))
-    existing.append({{"url": url, "headers": headers, "json": json}})
-    if marker_path:
-        Path(marker_path).write_text(json_module.dumps(existing), encoding="utf-8")
     return Response(
         status_code={delete_status_code},
         payload=payload,
@@ -601,19 +625,22 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             self.assertTrue(marker_path.exists())
 
             requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
-            self.assertEqual(len(requests_payload), 2)
-            self.assertTrue(requests_payload[0]["url"].endswith("/snapshots/create"))
+            self.assertEqual(len(requests_payload), 3)
+            self.assertEqual(requests_payload[0]["method"], "GET")
+            self.assertTrue(requests_payload[0]["url"].endswith("/instances/list"))
+            self.assertEqual(requests_payload[1]["method"], "POST")
+            self.assertTrue(requests_payload[1]["url"].endswith("/instances/snapshot"))
             self.assertEqual(
-                requests_payload[0]["json"]["instanceId"],
-                "550e8400-e29b-41d4-a716-446655440000",
+                requests_payload[1]["json"]["instance_name"],
+                "wrapper-test-instance",
             )
             self.assertTrue(
-                requests_payload[1]["url"].endswith(
+                requests_payload[2]["url"].endswith(
                     "/instances/550e8400-e29b-41d4-a716-446655440000/delete"
                 )
             )
             self.assertEqual(
-                requests_payload[0]["headers"]["Authorization"],
+                requests_payload[1]["headers"]["Authorization"],
                 "Bearer thunder-test-key",
             )
 
@@ -748,7 +775,7 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
             self.assertEqual(
-                requests_payload[0]["headers"]["Authorization"],
+                requests_payload[1]["headers"]["Authorization"],
                 "Bearer thunder-via-cli",
             )
 
@@ -779,8 +806,8 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 5)
             requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
-            self.assertEqual(len(requests_payload), 1)
-            self.assertTrue(requests_payload[0]["url"].endswith("/snapshots/create"))
+            self.assertEqual(len(requests_payload), 2)
+            self.assertTrue(requests_payload[1]["url"].endswith("/instances/snapshot"))
 
             metadata_path = _single_file(log_dir, "*.json")
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
