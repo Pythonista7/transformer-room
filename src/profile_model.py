@@ -113,9 +113,9 @@ def profile_model(
     *,
     num_steps: int = 3,
     trace_path: str | Path | None = None,
-    record_shapes: bool = True,
-    profile_memory: bool = True,
-    with_stack: bool = True,
+    record_shapes: bool = False,
+    profile_memory: bool = False,
+    with_stack: bool = False,
 ) -> ProfileResult:
     if int(num_steps) <= 0:
         raise ValueError(f"num_steps must be > 0, got {num_steps}")
