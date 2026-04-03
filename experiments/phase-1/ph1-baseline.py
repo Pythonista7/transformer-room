@@ -12,9 +12,6 @@ from src.train import model_pipeline
 This is going to be a GPT-2 size model but with pre-norms and only a decay lr-schedule (thanks to pre-norm).
 """
 
-WANDB_PROJECT_NAME = "transformer-room-baseline"
-WANDB_GROUP_NAME = "phase1/stage-1"
-WANDB_RUN_NAME = "baseline-gpt-2-124M"
 
 SEED = 47
 
@@ -30,8 +27,8 @@ N_LAYERS = 12
 
 # Training Params
 # EPOCHS = 1 we will use MAX_TRAIN_STEPS instead since the dataset is huge.
-EFFECTIVE_BATCH_SZ = 128
-MICRO_BATCH_SZ = 32
+EFFECTIVE_BATCH_SZ = 512
+MICRO_BATCH_SZ = 96
 TORCH_COMPILE_MEM_BUDGET = 0.75
 LEARNING_RATE = 1e-3
 LR_END_FACTOR = 0.1 
@@ -40,24 +37,32 @@ SEQ_LEN = 1024
 STRIDE = SEQ_LEN
 
 
+# WANDB
+WANDB_PROJECT_NAME = "transformer-room-baseline"
+WANDB_GROUP_NAME = "phase1/stage-1"
+WANDB_RUN_NAME = f"baseline-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}"
+
+
 # Dataset
 
-# We are using a 10B Token dataset, with a batch-sz of 64 & seq_len 1024 toks
-# which comes to 65,536 per step
+# We are using a 10B Token dataset, with a batch-sz of 512 & seq_len 1024 toks
+# which comes to 524k per step
 DATASET_NAME = "HuggingFaceFW/fineweb"
 DATASET_CONFIG = "sample-10BT"
 
 # As for chinchilla recommeding 20 tokens per param
-# so a 124M model approx should train on 2.5B tokens -> that suggests max_steps = 38k steps 
+# so a 124M model approx should train on 2.5B tokens -> that suggests max_steps = 4.8k steps 
 
 # While llama recommends a 1000:1 for token:param, which lands us around 125B which is insane! 
-# Even for 100k steps, we shouldve seen around 6,553,600,000 ~ 6.5B tokens
+# That would be 240k steps, for 125B tokens !
 
-MAX_TRAIN_STEPS = 1_000 # Will first test it for 1k before anything else, DONE
+MAX_TRAIN_STEPS = 5_000
 
-# On an A100, including torch.compile and final model upload, the train time for 1k steps was 34mins
+# On an 40GB A100, including torch.compile and final model upload, the train time for B=128 @ 1k steps was 34mins
 # The GPU utilization could be better with bigger batches but this is the ball park range.
-# So a chinchilla regime of 20:1 would mean -> 38k steps -> taking around 21.5-22hrs on the 40GB-A100
+# So a chinchilla regime of 20:1 would mean -> 19k steps -> taking around 11-11.25hrs on the 40GB-A100
+
+# Upgrading to a 80GB A100 or maybe even a H100 for bigget batches, effective = 512 and micro = 64 and faster!
 
 
 PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
