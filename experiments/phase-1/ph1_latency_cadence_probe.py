@@ -25,6 +25,7 @@ from src.core.config import (
     WandbMetricsConfig,
 )
 from src.train import model_pipeline
+from src.training.runtime import clear_runtime_state
 
 
 SEED = 47
@@ -61,27 +62,27 @@ DISABLED_CADENCE = 1_000
 
 
 VARIANT_CADENCES: dict[str, dict[str, int]] = {
-    "control": {
-        "log_every_n_steps": 4,
-        "diagnostics_every_n_steps": DISABLED_CADENCE,
-        "layer_grad_norms_every_n_steps": DISABLED_CADENCE,
-        "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
-        "attention_entropy_every_n_steps": DISABLED_CADENCE,
-    },
-    "diagnostics": {
-        "log_every_n_steps": 4,
-        "diagnostics_every_n_steps": 12,
-        "layer_grad_norms_every_n_steps": DISABLED_CADENCE,
-        "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
-        "attention_entropy_every_n_steps": DISABLED_CADENCE,
-    },
-    "layer_grad": {
-        "log_every_n_steps": 4,
-        "diagnostics_every_n_steps": DISABLED_CADENCE,
-        "layer_grad_norms_every_n_steps": 12,
-        "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
-        "attention_entropy_every_n_steps": DISABLED_CADENCE,
-    },
+    # "control": {
+    #     "log_every_n_steps": 4,
+    #     "diagnostics_every_n_steps": DISABLED_CADENCE,
+    #     "layer_grad_norms_every_n_steps": DISABLED_CADENCE,
+    #     "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
+    #     "attention_entropy_every_n_steps": DISABLED_CADENCE,
+    # },
+    # "diagnostics": {
+    #     "log_every_n_steps": 4,
+    #     "diagnostics_every_n_steps": 12,
+    #     "layer_grad_norms_every_n_steps": DISABLED_CADENCE,
+    #     "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
+    #     "attention_entropy_every_n_steps": DISABLED_CADENCE,
+    # },
+    # "layer_grad": {
+    #     "log_every_n_steps": 4,
+    #     "diagnostics_every_n_steps": DISABLED_CADENCE,
+    #     "layer_grad_norms_every_n_steps": 12,
+    #     "parameter_optimizer_norms_every_n_steps": DISABLED_CADENCE,
+    #     "attention_entropy_every_n_steps": DISABLED_CADENCE,
+    # },
     "param_optim": {
         "log_every_n_steps": 4,
         "diagnostics_every_n_steps": DISABLED_CADENCE,
@@ -257,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     for variant_name in variant_names:
+        clear_runtime_state()
         variant_config = _build_variant_config(
             base_config=base_config,
             variant_name=variant_name,
@@ -272,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
             f"accumulation_steps={variant_config.train.accumulation_steps}\n"
         )
         result = model_pipeline(variant_config)
+        clear_runtime_state()
         print(
             "Variant complete | "
             f"name={variant_name} | "
