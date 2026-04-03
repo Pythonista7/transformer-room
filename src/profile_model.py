@@ -42,6 +42,72 @@ def _profiler_activities(device: torch.device) -> list[torch.profiler.ProfilerAc
     return activities
 
 
+def _run_profile_step(
+    *,
+    train_iter,
+    model: torch.nn.Module,
+    checkpoint_model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    accumulation_steps: int,
+    loss_fn: CrossEntropyLoss,
+    device: torch.device,
+    non_blocking: bool,
+    use_bf16: bool,
+    pad_id: int,
+) -> tuple[bool, bool]:
+    optimizer.zero_grad()
+    step_token_count = 0
+    micro_batches_done = 0
+    saw_batch = False
+
+    while micro_batches_done < accumulation_steps:
+        try:
+            batch = next(train_iter)
+        except StopIteration:
+            break
+
+        saw_batch = True
+        (
+            input_seq,
+            target_seq,
+            key_padding_mask,
+            _target_byte_lengths,
+        ) = _unpack_batch_tensors(batch)
+        input_seq = input_seq.to(device, non_blocking=non_blocking)
+        target_seq = target_seq.to(device, non_blocking=non_blocking)
+        key_padding_mask = key_padding_mask.to(
+            device,
+            non_blocking=non_blocking,
+        )
+
+        with get_autocast_context(device=device, use_bf16=use_bf16):
+            output = model(input_seq, key_padding_mask=key_padding_mask)
+            loss_sum = loss_fn(
+                output.reshape(-1, output.size(-1)),
+                target_seq.reshape(-1),
+            )
+
+        valid_tokens = int((target_seq != pad_id).sum().item())
+        if valid_tokens > 0:
+            loss_sum.backward()
+            step_token_count += valid_tokens
+
+        micro_batches_done += 1
+
+    if not saw_batch:
+        return False, False
+    if step_token_count <= 0:
+        return True, False
+
+    scale_gradients_by_token_count(checkpoint_model, step_token_count)
+    optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
+    synchronize_if_cuda(device)
+    return True, True
+
+
 def profile_model(
     config: ExperimentConfig,
     *,
@@ -49,7 +115,7 @@ def profile_model(
     trace_path: str | Path | None = None,
     record_shapes: bool = True,
     profile_memory: bool = True,
-    with_stack: bool = False,
+    with_stack: bool = True,
 ) -> ProfileResult:
     if int(num_steps) <= 0:
         raise ValueError(f"num_steps must be > 0, got {num_steps}")
@@ -178,65 +244,60 @@ def profile_model(
         if hasattr(train_loader, "dataset") and hasattr(train_loader.dataset, "set_epoch"):
             train_loader.dataset.set_epoch(0)
         train_iter = iter(train_loader)
+        warmup_steps_done = 0
+        compile_warmup = int(config.run.compile_warmup_steps)
+
+        while warmup_steps_done < compile_warmup:
+            saw_batch, completed_step = _run_profile_step(
+                train_iter=train_iter,
+                model=model,
+                checkpoint_model=checkpoint_model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                accumulation_steps=accumulation_steps,
+                loss_fn=loss_fn,
+                device=device,
+                non_blocking=non_blocking,
+                use_bf16=use_bf16,
+                pad_id=pad_id,
+            )
+            if not saw_batch:
+                break
+            if completed_step:
+                warmup_steps_done += 1
+
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        print(
+            f"Warmup complete ({warmup_steps_done} steps). Starting profiler..."
+        )
 
         profiler_kwargs = {
             "activities": _profiler_activities(device),
             "record_shapes": bool(record_shapes),
             "profile_memory": bool(profile_memory),
-            "with_stack": bool(with_stack),
+            "with_stack": True,
             "acc_events": True,
         }
         with torch.profiler.profile(**profiler_kwargs) as prof:
             while steps_profiled < int(num_steps):
-                optimizer.zero_grad()
-                step_token_count = 0
-                micro_batches_in_step = 0
-                saw_batch = False
-
-                while micro_batches_in_step < accumulation_steps:
-                    try:
-                        batch = next(train_iter)
-                    except StopIteration:
-                        break
-
-                    saw_batch = True
-                    (
-                        input_seq,
-                        target_seq,
-                        key_padding_mask,
-                        _target_byte_lengths,
-                    ) = _unpack_batch_tensors(batch)
-                    input_seq = input_seq.to(device, non_blocking=non_blocking)
-                    target_seq = target_seq.to(device, non_blocking=non_blocking)
-                    key_padding_mask = key_padding_mask.to(
-                        device,
-                        non_blocking=non_blocking,
-                    )
-
-                    with get_autocast_context(device=device, use_bf16=use_bf16):
-                        output = model(input_seq, key_padding_mask=key_padding_mask)
-                        loss_sum = loss_fn(
-                            output.reshape(-1, output.size(-1)),
-                            target_seq.reshape(-1),
-                        )
-
-                    valid_tokens = int((target_seq != pad_id).sum().item())
-                    if valid_tokens > 0:
-                        loss_sum.backward()
-                        step_token_count += valid_tokens
-
-                    micro_batches_in_step += 1
-
+                saw_batch, completed_step = _run_profile_step(
+                    train_iter=train_iter,
+                    model=model,
+                    checkpoint_model=checkpoint_model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    accumulation_steps=accumulation_steps,
+                    loss_fn=loss_fn,
+                    device=device,
+                    non_blocking=non_blocking,
+                    use_bf16=use_bf16,
+                    pad_id=pad_id,
+                )
                 if not saw_batch:
                     break
-                if step_token_count <= 0:
+                if not completed_step:
                     continue
-
-                scale_gradients_by_token_count(checkpoint_model, step_token_count)
-                optimizer.step()
-                if scheduler is not None:
-                    scheduler.step()
-                synchronize_if_cuda(device)
                 prof.step()
                 steps_profiled += 1
 

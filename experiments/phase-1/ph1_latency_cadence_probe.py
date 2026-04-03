@@ -1,3 +1,10 @@
+"""
+experiments/phase-1/ph1_latency_cadence_probe.py \
+    --mode profile\ 
+    --variant collision_profile\
+    --profile-steps 5
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -104,6 +111,13 @@ VARIANT_CADENCES: dict[str, dict[str, int]] = {
         "layer_grad_norms_every_n_steps": 12,
         "parameter_optimizer_norms_every_n_steps": 12,
         "attention_entropy_every_n_steps": 12,
+    },
+    "collision_profile": {
+        "log_every_n_steps": 1,
+        "diagnostics_every_n_steps": 2,
+        "layer_grad_norms_every_n_steps": 2,
+        "parameter_optimizer_norms_every_n_steps": 2,
+        "attention_entropy_every_n_steps": 2,
     },
 }
 
