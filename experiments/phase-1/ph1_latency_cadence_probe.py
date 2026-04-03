@@ -115,7 +115,7 @@ def _build_base_config(max_train_steps: int) -> ExperimentConfig:
             run_name=WANDB_RUN_NAME,
             artifacts_root=str(PROJECT_ROOT / "artifacts" / "models"),
             resume_from_checkpoint=False,
-            persist_local_artifacts=True,
+            persist_local_artifacts=False,
             checkpoint_every_n_steps=0,
             seed=SEED,
             use_torch_compile=True,
@@ -173,7 +173,7 @@ def _build_base_config(max_train_steps: int) -> ExperimentConfig:
         split=PreSplitConfig(),
         logging=LoggingConfig(
             provider="wandb",
-            enable_artifact_io=True,
+            enable_artifact_io=False,
             wandb=WandbMetricsConfig(
                 enable_train_loss_vs_tokens=True,
                 enable_val_loss_vs_tokens=False,
