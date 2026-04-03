@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -21,11 +22,22 @@ def _timestamp_slug(dt: datetime) -> str:
 
 
 def resolve_thunder_instance_id(env: Mapping[str, str]) -> tuple[str | None, str | None]:
+    try:
+        hostname = subprocess.check_output(["hostname"], text=True).strip()
+        instance_id = hostname.split("-")[1] if "-" in hostname else ""
+        if instance_id:
+            return instance_id, "hostname"
+    except Exception:
+        pass
+    
     for key in TNR_INSTANCE_ID_ENV_KEYS:
         value = env.get(key, "").strip()
         if value:
             return value, key
-    return None, None
+    
+    input_instance_id = input("Enter this instance id:")
+    
+    return input_instance_id, "console"
 
 
 def resolve_thunder_instance_name(env: Mapping[str, str]) -> tuple[str | None, str | None]:
