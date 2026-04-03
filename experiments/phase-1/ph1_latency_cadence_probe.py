@@ -24,6 +24,7 @@ from src.core.config import (
     TrainConfig,
     WandbMetricsConfig,
 )
+from src.profile_model import profile_model
 from src.train import model_pipeline
 from src.training.runtime import clear_runtime_state
 
@@ -238,6 +239,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=DEFAULT_MAX_TRAIN_STEPS,
         help="Short run length used for each latency probe.",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("train", "profile"),
+        default="train",
+        help="Whether to run full short training or export profiler traces.",
+    )
+    parser.add_argument(
+        "--profile-steps",
+        type=int,
+        default=3,
+        help="Number of optimizer steps to capture per variant in profile mode.",
+    )
     return parser.parse_args(argv)
 
 
@@ -254,7 +267,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         "Running latency cadence probe variants: "
-        f"{', '.join(variant_names)} | max_train_steps={args.max_train_steps}"
+        f"{', '.join(variant_names)} | mode={args.mode} | "
+        f"max_train_steps={args.max_train_steps} | profile_steps={args.profile_steps}"
     )
 
     for variant_name in variant_names:
@@ -273,15 +287,30 @@ def main(argv: list[str] | None = None) -> int:
             f"micro_batch_size={variant_config.train.micro_batch_size}\n"
             f"accumulation_steps={variant_config.train.accumulation_steps}\n"
         )
-        result = model_pipeline(variant_config)
+        if args.mode == "profile":
+            result = profile_model(
+                variant_config,
+                num_steps=args.profile_steps,
+            )
+        else:
+            result = model_pipeline(variant_config)
         clear_runtime_state()
-        print(
-            "Variant complete | "
-            f"name={variant_name} | "
-            f"run_dir={result.run_artifact_dir} | "
-            f"checkpoint={result.checkpoint_path} | "
-            f"final_model={result.final_model_path}"
-        )
+        if args.mode == "profile":
+            print(
+                "Variant complete | "
+                f"name={variant_name} | "
+                f"run_dir={result.run_artifact_dir} | "
+                f"trace={result.trace_path} | "
+                f"steps_profiled={result.steps_profiled}"
+            )
+        else:
+            print(
+                "Variant complete | "
+                f"name={variant_name} | "
+                f"run_dir={result.run_artifact_dir} | "
+                f"checkpoint={result.checkpoint_path} | "
+                f"final_model={result.final_model_path}"
+            )
 
     return 0
 

@@ -82,6 +82,17 @@ class RunResult:
     epoch_end_validation_ran: bool
 
 
+@dataclass(slots=True)
+class ProfileResult:
+    model: torch.nn.Module
+    device: torch.device
+    run_artifact_dir: str
+    trace_path: str
+    steps_profiled: int
+    compile_enabled: bool
+    bf16_autocast_enabled: bool
+
+
 @runtime_checkable
 class DatasetAdapter(Protocol):
     def load(self, cfg: LocalTextDatasetConfig | HFTextDatasetConfig) -> TextCorpus:
