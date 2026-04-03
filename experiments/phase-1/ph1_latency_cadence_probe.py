@@ -1,9 +1,6 @@
-"""
-experiments/phase-1/ph1_latency_cadence_probe.py \
-    --mode profile\ 
-    --variant collision_profile\
-    --profile-steps 5
-"""
+
+# python experiments/phase-1/ph1_latency_cadence_probe.py --mode profile --variant collision_profile --profile-steps 5 --profile-memory False
+
 
 from __future__ import annotations
 
@@ -265,6 +262,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=3,
         help="Number of optimizer steps to capture per variant in profile mode.",
     )
+    parser.add_argument(
+        "--profile-memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable profiler memory tracking in profile mode.",
+    )
+    parser.add_argument(
+        "--with-stack",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Python stack capture in profile mode.",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -282,7 +292,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "Running latency cadence probe variants: "
         f"{', '.join(variant_names)} | mode={args.mode} | "
-        f"max_train_steps={args.max_train_steps} | profile_steps={args.profile_steps}"
+        f"max_train_steps={args.max_train_steps} | profile_steps={args.profile_steps} | "
+        f"profile_memory={args.profile_memory} | with_stack={args.with_stack}"
     )
 
     for variant_name in variant_names:
@@ -305,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
             result = profile_model(
                 variant_config,
                 num_steps=args.profile_steps,
+                profile_memory=args.profile_memory,
+                with_stack=args.with_stack,
             )
         else:
             result = model_pipeline(variant_config)
