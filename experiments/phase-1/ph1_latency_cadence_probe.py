@@ -1,7 +1,3 @@
-
-# python experiments/phase-1/ph1_latency_cadence_probe.py --mode profile --variant collision_profile --profile-steps 5 --profile-memory False
-
-
 from __future__ import annotations
 
 import argparse
@@ -28,7 +24,6 @@ from src.core.config import (
     TrainConfig,
     WandbMetricsConfig,
 )
-from src.profile_model import profile_model
 from src.train import model_pipeline
 from src.training.runtime import clear_runtime_state
 
@@ -108,13 +103,6 @@ VARIANT_CADENCES: dict[str, dict[str, int]] = {
         "layer_grad_norms_every_n_steps": 12,
         "parameter_optimizer_norms_every_n_steps": 12,
         "attention_entropy_every_n_steps": 12,
-    },
-    "collision_profile": {
-        "log_every_n_steps": 1,
-        "diagnostics_every_n_steps": 2,
-        "layer_grad_norms_every_n_steps": 2,
-        "parameter_optimizer_norms_every_n_steps": 2,
-        "attention_entropy_every_n_steps": 2,
     },
 }
 
@@ -251,28 +239,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Short run length used for each latency probe.",
     )
     parser.add_argument(
-        "--mode",
-        choices=("train", "profile"),
-        default="train",
-        help="Whether to run full short training or export profiler traces.",
-    )
-    parser.add_argument(
-        "--profile-steps",
-        type=int,
-        default=3,
-        help="Number of optimizer steps to capture per variant in profile mode.",
-    )
-    parser.add_argument(
-        "--profile-memory",
+        "--metrics-debug-timing",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable profiler memory tracking in profile mode.",
-    )
-    parser.add_argument(
-        "--with-stack",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable Python stack capture in profile mode.",
+        help="Print per-plugin metric timing totals from model_pipeline.",
     )
 
     return parser.parse_args(argv)
@@ -291,9 +261,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         "Running latency cadence probe variants: "
-        f"{', '.join(variant_names)} | mode={args.mode} | "
-        f"max_train_steps={args.max_train_steps} | profile_steps={args.profile_steps} | "
-        f"profile_memory={args.profile_memory} | with_stack={args.with_stack}"
+        f"{', '.join(variant_names)} | "
+        f"max_train_steps={args.max_train_steps} | "
+        f"metrics_debug_timing={args.metrics_debug_timing}"
     )
 
     for variant_name in variant_names:
@@ -312,32 +282,18 @@ def main(argv: list[str] | None = None) -> int:
             f"micro_batch_size={variant_config.train.micro_batch_size}\n"
             f"accumulation_steps={variant_config.train.accumulation_steps}\n"
         )
-        if args.mode == "profile":
-            result = profile_model(
-                variant_config,
-                num_steps=args.profile_steps,
-                profile_memory=args.profile_memory,
-                with_stack=args.with_stack,
-            )
-        else:
-            result = model_pipeline(variant_config)
+        result = model_pipeline(
+            variant_config,
+            metrics_debug_timing=args.metrics_debug_timing,
+        )
         clear_runtime_state()
-        if args.mode == "profile":
-            print(
-                "Variant complete | "
-                f"name={variant_name} | "
-                f"run_dir={result.run_artifact_dir} | "
-                f"trace={result.trace_path} | "
-                f"steps_profiled={result.steps_profiled}"
-            )
-        else:
-            print(
-                "Variant complete | "
-                f"name={variant_name} | "
-                f"run_dir={result.run_artifact_dir} | "
-                f"checkpoint={result.checkpoint_path} | "
-                f"final_model={result.final_model_path}"
-            )
+        print(
+            "Variant complete | "
+            f"name={variant_name} | "
+            f"run_dir={result.run_artifact_dir} | "
+            f"checkpoint={result.checkpoint_path} | "
+            f"final_model={result.final_model_path}"
+        )
 
     return 0
 
