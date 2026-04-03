@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 
 import torch
 
@@ -13,6 +14,12 @@ from src.components.models.baseline_model import BaselineModel
 from src.components.models.baseline_with_AC_model import ACEveryN_DecoderModel
 from src.components.models.baseline_with_SAC_model import SelectiveAC_DecoderModel
 
+from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(
+    dotenv_path=PROJECT_ROOT / ".env",
+)
 
 class BaselineDecoderModelAdapter:
     def build(

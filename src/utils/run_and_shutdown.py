@@ -298,10 +298,12 @@ def _prepare_child_env(
     thunder_instance_id, thunder_instance_id_source = resolve_thunder_instance_id(env)
     env_summary["thunder_instance_id"] = thunder_instance_id
     env_summary["thunder_instance_id_source"] = thunder_instance_id_source
-    if thunder_instance_id is None:
-        raise RuntimeError(
-            "TNR_INSTANCE_ID is not set, so the Thunder instance cannot be stopped."
-        )
+    if not thunder_instance_id:
+        thunder_instance_id = _prompt_for_secret(env_key="TNR_INSTANCE_ID", tee=tee)
+        env["TNR_INSTANCE_ID"] = thunder_instance_id
+        env_summary["thunder_instance_id_source"] = "prompted"
+        env_summary["thunder_instance_id"] = thunder_instance_id
+
 
     thunder_api_key, thunder_api_key_source = resolve_thunder_api_key(env)
     if not thunder_api_key:
