@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -11,18 +10,55 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.core.config import ExperimentConfig
+from src.core.config import (
+    BaselineDecoderConfig,
+    ExperimentConfig,
+    HFPretrainedTokenizerConfig,
+    HFTextDatasetConfig,
+    LRSchedulerChainConfig,
+    LRSchedulerStageConfig,
+    LoggingConfig,
+    OptimizerConfig,
+    PreSplitConfig,
+    RunConfig,
+    TrainConfig,
+    WandbMetricsConfig,
+)
 from src.train import model_pipeline
 
 
-BASELINE_SCRIPT_PATH = PROJECT_ROOT / "experiments" / "phase-1" / "ph1-baseline.py"
-BASELINE_MODULE_NAME = "ph1_baseline_module"
+SEED = 47
+
+# Model params
+D_MODEL = 768
+N_HEADS = 12
+N_LAYERS = 12
+
+# Training params
+LEARNING_RATE = 1e-3
+LR_END_FACTOR = 0.1
+SEQ_LEN = 1024
+STRIDE = SEQ_LEN
+
+# For the latency probe we keep micro-batch size close to the phase-1 baseline
+# while using a valid integer accumulation plan.
+MICRO_BATCH_SZ = 96
+ACCUMULATION_STEPS = 5
+EFFECTIVE_BATCH_SZ = MICRO_BATCH_SZ * ACCUMULATION_STEPS
+TORCH_COMPILE_MEM_BUDGET = 0.75
+
+# Logging / dataset
+WANDB_PROJECT_NAME = "transformer-room-baseline"
+WANDB_GROUP_NAME = "phase1/stage-1/latency-cadence-probe"
+WANDB_RUN_NAME = (
+    f"baseline-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}-latency-probe"
+)
+DATASET_NAME = "HuggingFaceFW/fineweb"
+DATASET_CONFIG = "sample-10BT"
+
 DEFAULT_MAX_TRAIN_STEPS = 16
 DISABLED_CADENCE = 1_000
 
-assert(
-    DISABLED_CADENCE > DEFAULT_MAX_TRAIN_STEPS
-)
 
 VARIANT_CADENCES: dict[str, dict[str, int]] = {
     "control": {
@@ -70,73 +106,124 @@ VARIANT_CADENCES: dict[str, dict[str, int]] = {
 }
 
 
-def _load_baseline_config() -> ExperimentConfig:
-    spec = importlib.util.spec_from_file_location(
-        BASELINE_MODULE_NAME,
-        BASELINE_SCRIPT_PATH,
+def _build_base_config(max_train_steps: int) -> ExperimentConfig:
+    return ExperimentConfig(
+        run=RunConfig(
+            project_name=WANDB_PROJECT_NAME,
+            group_name=WANDB_GROUP_NAME,
+            run_name=WANDB_RUN_NAME,
+            artifacts_root=str(PROJECT_ROOT / "artifacts" / "models"),
+            resume_from_checkpoint=False,
+            persist_local_artifacts=True,
+            checkpoint_every_n_steps=0,
+            seed=SEED,
+            use_torch_compile=True,
+            activation_memory_budget=TORCH_COMPILE_MEM_BUDGET,
+            compile_warmup_steps=3,
+        ),
+        dataset=HFTextDatasetConfig(
+            dataset_name=DATASET_NAME,
+            dataset_config=DATASET_CONFIG,
+            split="train",
+            text_field="text",
+            shuffle_buffer_size=5_000,
+        ),
+        tokenizer=HFPretrainedTokenizerConfig(
+            pretrained_name_or_path="gpt2",
+            use_fast=True,
+            bpb_mode="exact",
+        ),
+        model=BaselineDecoderConfig(
+            d_model=D_MODEL,
+            n_heads=N_HEADS,
+            layers=N_LAYERS,
+            dropout=0,
+            norm_placement="pre",
+            attention_impl="sdpa",
+            enable_weight_tying=True,
+        ),
+        train=TrainConfig(
+            epochs=None,
+            optimizer=OptimizerConfig(
+                name="adamw",
+                learning_rate=LEARNING_RATE,
+                weight_decay=0.1,
+            ),
+            lr_scheduler=LRSchedulerChainConfig(
+                stages=[
+                    LRSchedulerStageConfig(
+                        type="cosine",
+                        start_factor=1,
+                        end_factor=LR_END_FACTOR,
+                        steps=None,
+                    )
+                ]
+            ),
+            effective_batch_size=EFFECTIVE_BATCH_SZ,
+            micro_batch_size=MICRO_BATCH_SZ,
+            accumulation_steps=ACCUMULATION_STEPS,
+            lr_scaling="sqrt",
+            seq_len=SEQ_LEN,
+            stride=STRIDE,
+            data_mode="streaming",
+            max_steps=max_train_steps,
+            run_validation=False,
+        ),
+        split=PreSplitConfig(),
+        logging=LoggingConfig(
+            provider="wandb",
+            enable_artifact_io=True,
+            wandb=WandbMetricsConfig(
+                enable_train_loss_vs_tokens=True,
+                enable_val_loss_vs_tokens=False,
+                enable_perplexity=True,
+                enable_bits_per_byte=True,
+                enable_step_time=True,
+                enable_peak_memory=True,
+                enable_update_to_weight_ratio=True,
+                enable_global_param_norm=True,
+                enable_global_grad_norm=True,
+                enable_activation_norms=True,
+                enable_layer_grad_norms=True,
+                layer_grad_norm_stride=4,
+                enable_attention_entropy=True,
+                attention_entropy_head_cap=4,
+                attention_entropy_token_cap=256,
+                log_every_n_steps=4,
+                diagnostics_every_n_steps=DISABLED_CADENCE,
+                layer_grad_norms_every_n_steps=DISABLED_CADENCE,
+                parameter_optimizer_norms_every_n_steps=DISABLED_CADENCE,
+                attention_entropy_every_n_steps=DISABLED_CADENCE,
+            ),
+        ),
     )
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load baseline experiment from {BASELINE_SCRIPT_PATH}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    config = getattr(module, "PHASE_1_STAGE_1_BAELINE_CONFIG", None)
-    if config is None:
-        raise RuntimeError(
-            "Baseline experiment script does not expose "
-            "`PHASE_1_STAGE_1_BAELINE_CONFIG`."
-        )
-    return config
 
 
 def _build_variant_config(
     *,
     base_config: ExperimentConfig,
     variant_name: str,
-    max_train_steps: int,
 ) -> ExperimentConfig:
     cadence_overrides = VARIANT_CADENCES[variant_name]
-    run_name_base = base_config.run.run_name or "phase1-baseline"
-    variant_run_name = f"{run_name_base}-latency-{variant_name}-{max_train_steps}steps"
-    variant_group_name = (
-        f"{base_config.run.group_name}/latency-cadence-probe"
-        if base_config.run.group_name
-        else "latency-cadence-probe"
-    )
-
     updated_run = replace(
         base_config.run,
-        run_name=variant_run_name,
-        group_name=variant_group_name,
-        resume_from_checkpoint=False,
-        checkpoint_every_n_steps=0,
-    )
-    updated_train = replace(
-        base_config.train,
-        max_steps=max_train_steps,
-        run_validation=False,
+        run_name=f"{base_config.run.run_name}-{variant_name}",
     )
     updated_wandb = replace(
         base_config.logging.wandb,
         **cadence_overrides,
     )
-    updated_logging = replace(
-        base_config.logging,
-        wandb=updated_wandb,
-    )
+    updated_logging = replace(base_config.logging, wandb=updated_wandb)
     return replace(
         base_config,
         run=updated_run,
-        train=updated_train,
         logging=updated_logging,
     )
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Run short cadence-isolation experiments derived from the phase-1 baseline."
-        )
+        description="Run short cadence-isolation experiments for latency debugging."
     )
     parser.add_argument(
         "--variant",
@@ -161,7 +248,7 @@ def _resolve_variant_names(selected_variant: str) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    base_config = _load_baseline_config()
+    base_config = _build_base_config(args.max_train_steps)
     variant_names = _resolve_variant_names(args.variant)
 
     print(
@@ -173,7 +260,6 @@ def main(argv: list[str] | None = None) -> int:
         variant_config = _build_variant_config(
             base_config=base_config,
             variant_name=variant_name,
-            max_train_steps=args.max_train_steps,
         )
         cadence_overrides = VARIANT_CADENCES[variant_name]
         print(
@@ -181,8 +267,9 @@ def main(argv: list[str] | None = None) -> int:
             f"name={variant_name}\n"
             f"run_name={variant_config.run.run_name}\n"
             f"cadences={cadence_overrides}\n"
-            f"resume_from_checkpoint={variant_config.run.resume_from_checkpoint}\n"
-            f"checkpoint_every_n_steps={variant_config.run.checkpoint_every_n_steps}\n"
+            f"effective_batch_size={variant_config.train.effective_batch_size}\n"
+            f"micro_batch_size={variant_config.train.micro_batch_size}\n"
+            f"accumulation_steps={variant_config.train.accumulation_steps}\n"
         )
         result = model_pipeline(variant_config)
         print(

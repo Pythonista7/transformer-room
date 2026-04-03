@@ -9,8 +9,8 @@ Example:
   .venv/bin/python src/utils/run_and_shutdown.py \
     --provider thunder \
     --log-dir runs/logs \
-    --run-name ph1-stg1-baseline-test-1 \
-    -- python experiments/phase-1/ph1-baseline.py
+    --run-name ph1-stg1-baseline-latency-probes \
+    -- python experiments/phase-1/ph1_latency_cadence_probe.py
 """
 
 from __future__ import annotations
