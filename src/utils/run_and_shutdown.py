@@ -503,10 +503,6 @@ def main(argv: list[str] | None = None) -> int:
                         response = snapshot_and_delete_thunder_instance(
                             instance_id=str(shutdown_meta["thunder_instance_id"]),
                             api_key=str(child_env.get("TNR_API_TOKEN") or ""),
-                            instance_name=(
-                                str(child_env.get("TNR_INSTANCE_NAME") or "").strip()
-                                or None
-                            ),
                         )
                     shutdown_meta["return_code"] = 0
                     shutdown_meta["response"] = response
@@ -524,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                 except Exception as exc:  # pragma: no cover - defensive path.
                     shutdown_meta["error"] = str(exc)
-                    tee.write_message(f"[wrapper] shutdown step raised: {exc}")
+                    tee.write_message(f"[wrapper] shutdown step failed: {exc}")
                 finally:
                     shutdown_end = _utc_now()
                     shutdown_meta["end_time_utc"] = _utc_iso(shutdown_end)
