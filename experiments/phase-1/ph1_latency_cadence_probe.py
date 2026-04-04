@@ -50,7 +50,7 @@ TORCH_COMPILE_MEM_BUDGET = 0.75
 
 # Logging / dataset
 WANDB_PROJECT_NAME = "transformer-room-baseline"
-WANDB_GROUP_NAME = "phase1/stage-1/latency-cadence-probe"
+WANDB_GROUP_NAME = "phase1/stage-1/latency-cadence-probe-test-2"
 WANDB_RUN_NAME = (
     f"baseline-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}-latency-probe"
 )
