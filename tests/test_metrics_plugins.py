@@ -768,7 +768,6 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
         model: _FakeDecoderModel,
         optimizer: torch.optim.Optimizer,
         layer_labels: dict[int, list[str]],
-        pre_step_param_snapshot: dict[int, torch.Tensor],
         pre_step_global_param_norm: float | None,
     ) -> dict[str, float]:
         metrics: dict[str, float] = {}
@@ -795,15 +794,7 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
             for label in labels:
                 metrics[f"layer_param_norm_{label}"] = layer_norm
 
-        update_sq: torch.Tensor | None = None
-        for param in model.parameters():
-            pre_step = pre_step_param_snapshot.get(id(param))
-            if pre_step is None:
-                continue
-            update = param.detach().float() - pre_step
-            term = update.pow(2).sum()
-            update_sq = term if update_sq is None else update_sq + term
-        update_norm = self._finalize_norm(update_sq)
+        update_norm = self._expected_update_norm_from_optimizer_state(optimizer)
         if update_norm is not None:
             metrics["param_update_norm"] = update_norm
             if (
@@ -875,6 +866,51 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
 
         return metrics
 
+    def _expected_update_norm_from_optimizer_state(
+        self,
+        optimizer: torch.optim.Optimizer,
+    ) -> float | None:
+        if not isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):
+            return None
+
+        update_sq: torch.Tensor | None = None
+        for group in optimizer.param_groups:
+            lr = group.get("lr")
+            betas = group.get("betas")
+            eps = group.get("eps", 1e-8)
+            if not isinstance(lr, (int, float)):
+                return None
+            if not isinstance(eps, (int, float)):
+                return None
+            if not isinstance(betas, tuple) or len(betas) != 2:
+                return None
+            beta1, beta2 = betas
+            if not isinstance(beta1, (int, float)) or not isinstance(beta2, (int, float)):
+                return None
+
+            for param in group["params"]:
+                state = optimizer.state.get(param)
+                if not state:
+                    continue
+                exp_avg = state.get("exp_avg")
+                exp_avg_sq = state.get("exp_avg_sq")
+                step_val = state.get("step")
+                if not torch.is_tensor(exp_avg) or not torch.is_tensor(exp_avg_sq):
+                    continue
+
+                m_hat = exp_avg.detach().float()
+                v_hat = exp_avg_sq.detach().float()
+                if step_val is not None:
+                    t = float(step_val.item() if torch.is_tensor(step_val) else step_val)
+                    if t > 0.0:
+                        m_hat = m_hat / (1 - float(beta1) ** t)
+                        v_hat = v_hat / (1 - float(beta2) ** t)
+                update = float(lr) * (m_hat / (v_hat.sqrt() + float(eps)))
+                term = update.pow(2).sum()
+                update_sq = term if update_sq is None else update_sq + term
+
+        return self._finalize_norm(update_sq)
+
     def _run_single_optimization_step(
         self,
         *,
@@ -915,11 +951,6 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
         ctx = _step_ctx(schedule)
 
         plugin.on_step_start(ctx)
-        pre_step_snapshot = {
-            key: value.clone() for key, value in plugin._pre_step_param_snapshot.items()
-        }
-        self.assertTrue(pre_step_snapshot)
-        self.assertTrue(all(value.device.type == "cpu" for value in pre_step_snapshot.values()))
         pre_step_global_norm = plugin._pre_step_global_param_norm
 
         optimizer.zero_grad()
@@ -934,7 +965,6 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
             model=model,
             optimizer=optimizer,
             layer_labels=layer_labels,
-            pre_step_param_snapshot=pre_step_snapshot,
             pre_step_global_param_norm=pre_step_global_norm,
         )
 
@@ -942,7 +972,7 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
         for key, expected_value in expected.items():
             self.assertAlmostEqual(actual[key], expected_value, places=5, msg=key)
 
-    def test_clears_snapshot_buffers_after_step_and_train_end(self) -> None:
+    def test_clears_pre_step_norm_buffers_after_step_and_train_end(self) -> None:
         model = _FakeDecoderModel()
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         plugin = ParameterOptimizerNormsPlugin(
@@ -958,7 +988,6 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
         ctx = _step_ctx(schedule)
 
         plugin.on_step_start(ctx)
-        self.assertTrue(plugin._pre_step_param_snapshot)
         self.assertIsNotNone(plugin._pre_step_global_param_norm)
 
         optimizer.zero_grad()
@@ -967,13 +996,11 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
         optimizer.step()
         plugin.after_optimizer_step(ctx)
 
-        self.assertEqual(plugin._pre_step_param_snapshot, {})
         self.assertIsNone(plugin._pre_step_global_param_norm)
 
         plugin.on_step_start(ctx)
-        self.assertTrue(plugin._pre_step_param_snapshot)
+        self.assertIsNotNone(plugin._pre_step_global_param_norm)
         plugin.on_train_end()
-        self.assertEqual(plugin._pre_step_param_snapshot, {})
         self.assertIsNone(plugin._pre_step_global_param_norm)
         self.assertEqual(plugin._metrics, {})
 
@@ -1046,6 +1073,108 @@ class ParameterOptimizerNormsPluginTests(unittest.TestCase):
                     self.assertNotIn("adam_v_norm", metrics)
                     self.assertNotIn("adam_elemwise_snr_norm", metrics)
                     self.assertNotIn("layer_estimated_variance_norm_first", metrics)
+
+    def test_sgd_skips_update_metrics_and_warns_once(self) -> None:
+        model = _FakeDecoderModel()
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+        plugin = ParameterOptimizerNormsPlugin(
+            wandb_cfg=WandbMetricsConfig(
+                enable_param_update_norm=True,
+                enable_update_to_weight_ratio=True,
+            ),
+            model=model,
+            optimizer=optimizer,
+            layer_labels=get_decoder_layer_labels(model),
+        )
+        schedule = _make_schedule(should_log_diagnostics=True)
+
+        with self.assertLogs(
+            "src.training.metrics.plugins.parameter_optimizer_norms",
+            level="WARNING",
+        ) as warning_logs:
+            metrics_first = self._run_single_optimization_step(
+                model=model,
+                optimizer=optimizer,
+                plugin=plugin,
+                schedule=schedule,
+            )
+            metrics_second = self._run_single_optimization_step(
+                model=model,
+                optimizer=optimizer,
+                plugin=plugin,
+                schedule=schedule,
+            )
+
+        self.assertNotIn("param_update_norm", metrics_first)
+        self.assertNotIn("update_to_weight_ratio", metrics_first)
+        self.assertNotIn("param_update_norm", metrics_second)
+        self.assertNotIn("update_to_weight_ratio", metrics_second)
+        self.assertEqual(len(warning_logs.output), 1)
+        self.assertIn("Skipping param_update_norm/update_to_weight_ratio", warning_logs.output[0])
+
+    def test_zero_trainable_params_omits_update_and_ratio_without_crashing(self) -> None:
+        model = _FakeDecoderModel()
+        for param in model.parameters():
+            param.requires_grad_(False)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        plugin = ParameterOptimizerNormsPlugin(
+            wandb_cfg=WandbMetricsConfig(
+                enable_param_update_norm=True,
+                enable_update_to_weight_ratio=True,
+            ),
+            model=model,
+            optimizer=optimizer,
+            layer_labels=get_decoder_layer_labels(model),
+        )
+        ctx = _step_ctx(_make_schedule(should_log_diagnostics=True))
+
+        plugin.on_step_start(ctx)
+        plugin.after_optimizer_step(ctx)
+        metrics = plugin.collect_step_metrics(ctx)
+
+        self.assertNotIn("param_update_norm", metrics)
+        self.assertNotIn("update_to_weight_ratio", metrics)
+
+    def test_param_update_norm_uses_per_group_hparams(self) -> None:
+        torch.manual_seed(17)
+        model = _FakeDecoderModel()
+        params = list(model.parameters())
+        split_at = len(params) // 2
+        optimizer = torch.optim.Adam(
+            [
+                {
+                    "params": params[:split_at],
+                    "lr": 1e-3,
+                    "betas": (0.9, 0.999),
+                    "eps": 1e-8,
+                },
+                {
+                    "params": params[split_at:],
+                    "lr": 3e-4,
+                    "betas": (0.8, 0.99),
+                    "eps": 1e-6,
+                },
+            ]
+        )
+        plugin = ParameterOptimizerNormsPlugin(
+            wandb_cfg=WandbMetricsConfig(enable_param_update_norm=True),
+            model=model,
+            optimizer=optimizer,
+            layer_labels=get_decoder_layer_labels(model),
+        )
+
+        metrics = self._run_single_optimization_step(
+            model=model,
+            optimizer=optimizer,
+            plugin=plugin,
+            schedule=_make_schedule(should_log_diagnostics=True),
+        )
+        expected_update_norm = self._expected_update_norm_from_optimizer_state(optimizer)
+
+        self.assertIn("param_update_norm", metrics)
+        self.assertIsNotNone(expected_update_norm)
+        self.assertAlmostEqual(metrics["param_update_norm"], expected_update_norm, places=6)
 
     def test_emits_nothing_when_diagnostics_cadence_is_off(self) -> None:
         model = _FakeDecoderModel()

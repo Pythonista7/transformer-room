@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
+
 import torch
 from torch import optim
 
 from src.core.config import WandbMetricsConfig
 
 from ..contracts import BaseMetricPlugin, MetricPayload, StepMetricsContext
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _to_cpu_float_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -53,6 +58,32 @@ def _get_bias_corrected_moments(
             v_hat = v_hat / (1 - beta2**t)
 
     return m_hat, v_hat
+
+
+def _get_adam_group_hparams(group: dict) -> tuple[float, float, float, float] | None:
+    lr = group.get("lr")
+    betas = group.get("betas")
+    eps = group.get("eps", 1e-8)
+    if not isinstance(lr, (int, float)):
+        return None
+    if not isinstance(eps, (int, float)):
+        return None
+    if not isinstance(betas, tuple) or len(betas) != 2:
+        return None
+    beta1, beta2 = betas
+    if not isinstance(beta1, (int, float)) or not isinstance(beta2, (int, float)):
+        return None
+    return float(lr), float(beta1), float(beta2), float(eps)
+
+
+def _get_update_norm_unavailability_reason(optimizer: optim.Optimizer) -> str | None:
+    if not isinstance(optimizer, (optim.Adam, optim.AdamW)):
+        return f"optimizer type {type(optimizer).__name__} is not Adam/AdamW"
+
+    for group_idx, group in enumerate(optimizer.param_groups):
+        if _get_adam_group_hparams(group) is None:
+            return f"param_group[{group_idx}] is missing valid lr/betas/eps"
+    return None
 
 
 def compute_global_param_norm(model: torch.nn.Module) -> float | None:
@@ -107,6 +138,30 @@ def compute_param_update_norm(
             update_sq = _accumulate_l2_sq_cpu(update_sq, update)
     return _finalize_l2_norm(update_sq)
 
+def compute_update_norm_from_optim_state(optimizer: optim.Optimizer) -> float | None:
+    # Approximate: ||Δw|| ≈ lr * ||m̂ / (√v̂ + ε)||
+    # Exact if weight_decay=0; approximate otherwise
+    if _get_update_norm_unavailability_reason(optimizer) is not None:
+        return None
+
+    update_sq: torch.Tensor | None = None
+    for group in optimizer.param_groups:
+        hparams = _get_adam_group_hparams(group)
+        if hparams is None:
+            return None
+        lr, beta1, beta2, eps = hparams
+
+        for param in group.get("params", ()):
+            state = optimizer.state.get(param)
+            if not state:
+                continue
+            moments = _get_bias_corrected_moments(state, beta1, beta2)
+            if moments is None:
+                continue
+            m_hat, v_hat = moments  # already on CPU
+            step = m_hat / (v_hat.sqrt() + eps)
+            update_sq = _accumulate_l2_sq_cpu(update_sq, step * lr)
+    return _finalize_l2_norm(update_sq)
 
 def compute_adam_state_norms(optimizer: optim.Optimizer) -> MetricPayload:
 
@@ -196,8 +251,8 @@ class ParameterOptimizerNormsPlugin(BaseMetricPlugin):
         self._optimizer = optimizer
         self._layer_labels = layer_labels
         self._metrics: MetricPayload = {}
-        self._pre_step_param_snapshot: dict[int, torch.Tensor] = {}
         self._pre_step_global_param_norm: float | None = None
+        self._update_norm_warning_emitted = False
 
     def _should_collect(self, ctx: StepMetricsContext) -> bool:
         if not ctx.schedule.should_log_parameter_optimizer_norms:
@@ -214,7 +269,6 @@ class ParameterOptimizerNormsPlugin(BaseMetricPlugin):
 
     def on_step_start(self, ctx: StepMetricsContext) -> None:
         self._metrics = {}
-        self._pre_step_param_snapshot = {}
         self._pre_step_global_param_norm = None
 
         if not self._should_collect(ctx):
@@ -228,16 +282,14 @@ class ParameterOptimizerNormsPlugin(BaseMetricPlugin):
         with torch.no_grad():
             track_pre_norm = self._wandb_cfg.enable_update_to_weight_ratio
             pre_norm_sq: torch.Tensor | None = None
-            for param in self._model.parameters():
-                if not param.requires_grad:
-                    continue
-                # Keep snapshots off-GPU to avoid diagnostics-step VRAM spikes.
-                snapshot = _to_cpu_float_tensor(param).clone()
-                self._pre_step_param_snapshot[id(param)] = snapshot
-                if track_pre_norm:
-                    pre_norm_sq = _accumulate_l2_sq_cpu(pre_norm_sq, snapshot)
 
             if track_pre_norm:
+                for param in self._model.parameters():
+                    if not param.requires_grad:
+                        continue
+                    # Keep accumulation on-device; only sync once for the final scalar.
+                    term = param.detach().float().pow(2).sum()
+                    pre_norm_sq = term if pre_norm_sq is None else pre_norm_sq + term
                 self._pre_step_global_param_norm = _finalize_l2_norm(pre_norm_sq)
 
     def after_optimizer_step(self, ctx: StepMetricsContext) -> None:
@@ -261,10 +313,15 @@ class ParameterOptimizerNormsPlugin(BaseMetricPlugin):
                     self._wandb_cfg.enable_param_update_norm
                     or self._wandb_cfg.enable_update_to_weight_ratio
                 ):
-                    update_norm = compute_param_update_norm(
-                        self._model,
-                        self._pre_step_param_snapshot,
-                    )
+                    update_norm = compute_update_norm_from_optim_state(self._optimizer)
+                    if update_norm is None and not self._update_norm_warning_emitted:
+                        reason = _get_update_norm_unavailability_reason(self._optimizer)
+                        if reason is not None:
+                            _LOGGER.warning(
+                                "Skipping param_update_norm/update_to_weight_ratio: %s.",
+                                reason,
+                            )
+                            self._update_norm_warning_emitted = True
                     if self._wandb_cfg.enable_param_update_norm and update_norm is not None:
                         metrics["param_update_norm"] = update_norm
 
@@ -288,14 +345,12 @@ class ParameterOptimizerNormsPlugin(BaseMetricPlugin):
                         )
                     )
         finally:
-            self._pre_step_param_snapshot = {}
             self._pre_step_global_param_norm = None
 
         self._metrics = metrics
 
     def on_train_end(self) -> None:
         self._metrics = {}
-        self._pre_step_param_snapshot = {}
         self._pre_step_global_param_norm = None
 
     def collect_step_metrics(self, ctx: StepMetricsContext) -> MetricPayload:

@@ -34,8 +34,9 @@ This package keeps training metrics modular and logger-agnostic.
 - `adam_m_norm`, `adam_v_norm`, `adam_elemwise_snr_norm`
 - `layer_estimated_variance_norm_first|middle|last`
 
-`param_update_norm` is computed from pre-step vs post-step parameter snapshots. It is not directly exposed by optimizer state dicts.
-For VRAM safety, heavy parameter/optimizer diagnostics are reduced from CPU snapshots instead of GPU-resident clones.
+`param_update_norm` is approximated from optimizer state for `Adam`/`AdamW` using each parameter group's current (`lr`, `betas`, `eps`) at metric time.
+It is not emitted for unsupported optimizers.
+For VRAM safety, heavy parameter/optimizer diagnostics avoid full pre-step model snapshots.
 Use `parameter_optimizer_norms_every_n_steps` to decouple these heavy metrics from the general diagnostics cadence.
 
 ## Add a New Metric
