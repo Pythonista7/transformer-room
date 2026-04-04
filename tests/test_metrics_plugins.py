@@ -40,10 +40,20 @@ class _FakeMultiHeadAttention(torch.nn.Module):
         self.n_heads = n_heads
         self.head_dim = width // n_heads
         self.packed_proj = torch.nn.Linear(width, width * 3, bias=False)
+        self._forward_metric_entropy_capture = None
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        _ = kwargs
-        _ = self.packed_proj(x)
+        all_projs = self.packed_proj(x)
+        capture_entropy = getattr(self, "_forward_metric_entropy_capture", None)
+        if callable(capture_entropy):
+            capture_entropy(
+                all_projs=all_projs,
+                mask=kwargs.get("mask"),
+                key_padding_mask=kwargs.get("key_padding_mask"),
+                is_causal=bool(kwargs.get("is_causal", True)),
+                n_heads=int(self.n_heads),
+                head_dim=int(self.head_dim),
+            )
         return x
 
 
@@ -612,7 +622,107 @@ class ForwardHookMetricsPluginTests(unittest.TestCase):
             for handle in handles:
                 handle.remove()
 
-        self.assertEqual(packed_proj_calls, [2, 2, 2])
+        self.assertEqual(packed_proj_calls, [1, 1, 1])
+
+    def test_attention_entropy_uses_first_microbatch_in_step(self) -> None:
+        torch.manual_seed(42)
+        model = _FakeDecoderModel(layers=3)
+        labels = get_decoder_layer_labels(model)
+        plugin = ForwardHookMetricsPlugin(
+            wandb_enabled=True,
+            wandb_cfg=WandbMetricsConfig(
+                enable_activation_norms=False,
+                enable_attention_entropy=True,
+                attention_entropy_head_cap=1,
+                attention_entropy_token_cap=4,
+            ),
+            model=model,
+            layer_labels=labels,
+        )
+
+        ctx = _step_ctx(
+            _make_schedule(
+                capture_activation_norms=False,
+                capture_attention_entropy=True,
+            )
+        )
+        first_input = torch.randn(2, 4, 8)
+        second_input = torch.zeros_like(first_input)
+        expected_first = compute_attention_entropy_from_module_inputs(
+            model.dec_layers[0].multi_head_attention,
+            first_input,
+            attention_head_cap=1,
+            attention_token_cap=4,
+            is_causal=True,
+        )
+        expected_second = compute_attention_entropy_from_module_inputs(
+            model.dec_layers[0].multi_head_attention,
+            second_input,
+            attention_head_cap=1,
+            attention_token_cap=4,
+            is_causal=True,
+        )
+
+        self.assertIsNotNone(expected_first)
+        self.assertIsNotNone(expected_second)
+        if expected_first is None or expected_second is None:
+            self.fail("Expected entropy helpers to return tensors.")
+        self.assertNotAlmostEqual(
+            float(expected_first.item()),
+            float(expected_second.item()),
+            places=6,
+        )
+
+        plugin.on_train_start()
+        try:
+            plugin.on_step_start(ctx)
+            _ = model(first_input)
+            _ = model(second_input)
+            metrics = plugin.collect_step_metrics(ctx)
+        finally:
+            plugin.on_train_end()
+
+        self.assertIn("attention_entropy_first", metrics)
+        self.assertAlmostEqual(
+            metrics["attention_entropy_first"],
+            float(expected_first.item()),
+            places=6,
+        )
+
+    def test_attention_entropy_capture_disabled_after_step_collection(self) -> None:
+        model = _FakeDecoderModel(layers=3)
+        labels = get_decoder_layer_labels(model)
+        plugin = ForwardHookMetricsPlugin(
+            wandb_enabled=True,
+            wandb_cfg=WandbMetricsConfig(
+                enable_activation_norms=False,
+                enable_attention_entropy=True,
+                attention_entropy_head_cap=1,
+                attention_entropy_token_cap=4,
+            ),
+            model=model,
+            layer_labels=labels,
+        )
+        ctx = _step_ctx(
+            _make_schedule(
+                capture_activation_norms=False,
+                capture_attention_entropy=True,
+            )
+        )
+
+        plugin.on_train_start()
+        try:
+            plugin.on_step_start(ctx)
+            _ = model(torch.randn(2, 4, 8))
+            first_metrics = plugin.collect_step_metrics(ctx)
+            self.assertIn("attention_entropy_first", first_metrics)
+
+            _ = model(torch.randn(2, 4, 8))
+            second_metrics = plugin.collect_step_metrics(ctx)
+        finally:
+            plugin.on_train_end()
+
+        self.assertEqual(second_metrics, {})
 
     def test_forward_hook_metrics_do_not_change_step_update(self) -> None:
         torch.manual_seed(0)

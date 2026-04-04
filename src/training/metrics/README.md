@@ -39,6 +39,21 @@ It is not emitted for unsupported optimizers.
 For VRAM safety, heavy parameter/optimizer diagnostics avoid full pre-step model snapshots.
 Use `parameter_optimizer_norms_every_n_steps` to decouple these heavy metrics from the general diagnostics cadence.
 
+## Attention Entropy Capture Flow
+
+`ForwardHookMetricsPlugin` captures attention entropy with a one-shot stash per step:
+
+1. On `on_train_start()`, the plugin installs an internal callback on selected attention modules by setting the module attribute `_forward_metric_entropy_capture`.
+2. Inside attention `forward(...)`, right after `packed_proj(...)`, attention modules check whether `_forward_metric_entropy_capture` is callable and invoke it with detached projection/mask metadata.
+3. The collector keeps only the first capture per layer for the current step (first micro-batch semantics). Later micro-batches in the same step are ignored.
+4. On `collect_step_metrics(...)`, entropy is computed off-graph from the stashed projections and emitted as `attention_entropy_first|middle|last`.
+5. After collection, stash/capture state is cleared so validation or other forwards do not repopulate step entropy.
+
+Notes:
+- This avoids recomputing projections in metric hooks.
+- Stashed tensors stay on-device (no CPU transfer during stash).
+- `torch.compile(fullgraph=True)` is treated as best-effort only for this metric path.
+
 ## Add a New Metric
 
 1. Create a plugin in `plugins/` (copy `plugins/template.py`).
