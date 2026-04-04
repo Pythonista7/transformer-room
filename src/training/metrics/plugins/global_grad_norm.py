@@ -8,17 +8,15 @@ from ..contracts import BaseMetricPlugin, MetricPayload, StepMetricsContext
 
 
 def compute_global_grad_norm(model: torch.nn.Module) -> float | None:
-    grad_norm_sq: torch.Tensor | None = None
+    grads = []
     for param in model.parameters():
         if param.grad is None:
             continue
-        grad_sq = param.grad.detach().float().pow(2).sum()
-        grad_norm_sq = grad_sq if grad_norm_sq is None else grad_norm_sq + grad_sq
+        grads.append(param.grad)
 
-    if grad_norm_sq is None:
-        return None
-    return float(grad_norm_sq.sqrt().item())
-
+    norms = torch._foreach_norm(grads)
+    total = torch.stack(norms).norm()
+    return float(total.item())
 
 class GlobalGradNormPlugin(BaseMetricPlugin):
     name = "global_grad_norm"

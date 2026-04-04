@@ -35,18 +35,11 @@ def compute_layer_grad_norms(
 
     metrics: MetricPayload = {}
     for layer_idx in layer_indices:
-        layer = dec_layers[layer_idx]
-        layer_grad_sq: torch.Tensor | None = None
-        for param in layer.parameters():
-            grad = param.grad
-            if grad is None:
-                continue
-            grad_sq = grad.detach().float().pow(2).sum()
-            layer_grad_sq = grad_sq if layer_grad_sq is None else layer_grad_sq + grad_sq
-
-        if layer_grad_sq is None:
-            continue
-        metrics[f"layer_grad_norm_layer_{layer_idx}"] = float(layer_grad_sq.sqrt().item())
+        layer = dec_layers[layer_idx]        
+        layer_param_grads = torch._foreach_norm([p.grad for p in layer.parameters() if p.grad is not None])
+        stack = torch.stack(layer_param_grads)
+        layer_grad_norm = stack.norm()
+        metrics[f"layer_grad_norm_layer_{layer_idx}"] = float(layer_grad_norm.item())
     return metrics
 
 
