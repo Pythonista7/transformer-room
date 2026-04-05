@@ -33,11 +33,12 @@ def resolve_thunder_instance_id(
     try:
         hostname = subprocess.check_output(["hostname"], text=True).strip()
         host_label = hostname.split(".", 1)[0].strip().lower()
-        hostname_match = re.search(
+        hostname_matches = re.findall(
             r"(?<![a-z0-9])([a-z0-9]{8})(?![a-z0-9])", host_label
         )
-        if hostname_match:
-            return hostname_match.group(1), "hostname"
+        for candidate in reversed(hostname_matches):
+            if any(char.isdigit() for char in candidate):
+                return candidate, "hostname"
     except Exception:
         pass
 

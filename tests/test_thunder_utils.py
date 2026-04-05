@@ -85,6 +85,16 @@ class ThunderUtilsTests(unittest.TestCase):
         self.assertEqual(instance_id, "vq9089t3")
         self.assertEqual(source, "console")
 
+    def test_resolve_thunder_instance_id_ignores_plain_word_hostname_token(self) -> None:
+        with patch(
+            "src.utils.thunder.subprocess.check_output",
+            return_value="thunder-instance-yla07bfi\n",
+        ):
+            instance_id, source = resolve_thunder_instance_id({})
+
+        self.assertEqual(instance_id, "yla07bfi")
+        self.assertEqual(source, "hostname")
+
     def test_delete_404_instance_not_found_is_treated_as_idempotent_success(self) -> None:
         fake_requests = _FakeRequestsModule(
             responses=[
