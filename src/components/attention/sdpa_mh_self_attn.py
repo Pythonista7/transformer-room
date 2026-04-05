@@ -21,7 +21,6 @@ class SDPASelfAttn(torch.nn.Module):
         # Same projection layout as the basic attention variant.
         self.packed_proj = LinearLayer(in_dim=d_model, out_dim=d_model * 3, bias=True)
         self.out_proj = LinearLayer(in_dim=d_model, out_dim=d_model, bias=True)
-        self._forward_metric_entropy_capture = None
 
     def forward(
         self,
@@ -37,16 +36,6 @@ class SDPASelfAttn(torch.nn.Module):
             )
 
         all_projs = self.packed_proj(Q)
-        capture_entropy = getattr(self, "_forward_metric_entropy_capture", None)
-        if callable(capture_entropy):
-            capture_entropy(
-                all_projs=all_projs,
-                mask=mask,
-                key_padding_mask=key_padding_mask,
-                is_causal=bool(is_causal),
-                n_heads=int(self.n_heads),
-                head_dim=int(self.head_dim),
-            )
         query, key, value = torch.chunk(all_projs, 3, dim=-1)
 
         query = reshape_for_multi_head(

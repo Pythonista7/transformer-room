@@ -33,7 +33,6 @@ class BasicMultiHeadSelfAttention(nn.Module):
         self.out_proj = LinearLayer(in_dim=E_q, out_dim=E_out, bias=E_bias)
         self.softmax = SoftmaxActivation(dim=-1)
         self.attn_dropout = DropoutLayer(p=dropout)
-        self._forward_metric_entropy_capture = None
 
     def forward(
         self,
@@ -53,16 +52,6 @@ class BasicMultiHeadSelfAttention(nn.Module):
 
         # Linearly Project the inputs as per the defined embedding dims for attention
         all_projs = self.packed_proj(Q)  # Assuming this is just self attention.
-        capture_entropy = getattr(self, "_forward_metric_entropy_capture", None)
-        if callable(capture_entropy):
-            capture_entropy(
-                all_projs=all_projs,
-                mask=mask,
-                key_padding_mask=key_padding_mask,
-                is_causal=bool(is_causal),
-                n_heads=int(self.n_heads),
-                head_dim=int(self.head_dim),
-            )
         Q, K, V = torch.chunk(all_projs, 3, dim=-1)
 
         # Reshape for multi-heads

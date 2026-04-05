@@ -100,28 +100,6 @@ class ForwardMetricCollector:
         self._attention_stash_by_layer[layer_idx] = stash
         self._attention_captured_layers.add(layer_idx)
 
-    def build_attention_stash_callback(self, layer_idx: int):
-        def _callback(
-            *,
-            all_projs: torch.Tensor,
-            mask: torch.Tensor | None,
-            key_padding_mask: torch.Tensor | None,
-            is_causal: bool,
-            n_heads: int,
-            head_dim: int,
-        ) -> None:
-            self.stash_attention_projection_once(
-                layer_idx=layer_idx,
-                all_projs=all_projs,
-                mask=mask,
-                key_padding_mask=key_padding_mask,
-                is_causal=is_causal,
-                n_heads=n_heads,
-                head_dim=head_dim,
-            )
-
-        return _callback
-
     def take_metrics(self) -> MetricPayload:
         metrics: MetricPayload = {}
         for key, value in self.activation_norms.items():
@@ -273,12 +251,11 @@ def register_forward_metric_hooks(
     *,
     enable_activation_norms: bool,
     enable_attention_entropy: bool,
-) -> tuple[list[torch.utils.hooks.RemovableHandle], list[torch.nn.Module]]:
+) -> list[torch.utils.hooks.RemovableHandle]:
     handles: list[torch.utils.hooks.RemovableHandle] = []
-    entropy_callback_modules: list[torch.nn.Module] = []
     dec_layers = getattr(model, "dec_layers", None)
     if dec_layers is None:
-        return handles, entropy_callback_modules
+        return handles
 
     for layer_idx, labels in layer_labels.items():
         layer = dec_layers[layer_idx]
@@ -302,14 +279,54 @@ def register_forward_metric_hooks(
             continue
 
         if enable_attention_entropy:
-            setattr(
-                attn,
-                "_forward_metric_entropy_capture",
-                collector.build_attention_stash_callback(layer_idx),
-            )
-            entropy_callback_modules.append(attn)
+            latest_all_projs: torch.Tensor | None = None
 
-    return handles, entropy_callback_modules
+            def packed_proj_hook(
+                _module,
+                _inputs,
+                output,
+            ) -> None:
+                nonlocal latest_all_projs
+                latest_all_projs = output if torch.is_tensor(output) else None
+
+            def entropy_hook(
+                module,
+                _inputs,
+                kwargs,
+                _output,
+                *,
+                layer_idx: int = layer_idx,
+            ) -> None:
+                nonlocal latest_all_projs
+                try:
+                    n_heads = getattr(module, "n_heads", None)
+                    head_dim = getattr(module, "head_dim", None)
+                    if latest_all_projs is None:
+                        return
+                    if n_heads is None or head_dim is None:
+                        return
+                    collector.stash_attention_projection_once(
+                        layer_idx=layer_idx,
+                        all_projs=latest_all_projs,
+                        mask=kwargs.get("mask"),
+                        key_padding_mask=kwargs.get("key_padding_mask"),
+                        is_causal=bool(kwargs.get("is_causal", True)),
+                        n_heads=int(n_heads),
+                        head_dim=int(head_dim),
+                    )
+                finally:
+                    latest_all_projs = None
+
+            handles.append(attn.packed_proj.register_forward_hook(packed_proj_hook))
+            handles.append(
+                attn.register_forward_hook(
+                    entropy_hook,
+                    with_kwargs=True,
+                    always_call=True,
+                )
+            )
+
+    return handles
 
 
 class ForwardHookMetricsPlugin(BaseMetricPlugin):
@@ -332,16 +349,12 @@ class ForwardHookMetricsPlugin(BaseMetricPlugin):
             attention_token_cap=self._wandb_cfg.attention_entropy_token_cap,
         )
         self._hook_handles: list[torch.utils.hooks.RemovableHandle] = []
-        self._entropy_callback_modules: list[torch.nn.Module] = []
 
     def on_train_start(self) -> None:
         if self._wandb_enabled and self._layer_labels and (
             self._wandb_cfg.enable_activation_norms or self._wandb_cfg.enable_attention_entropy
         ):
-            (
-                self._hook_handles,
-                self._entropy_callback_modules,
-            ) = register_forward_metric_hooks(
+            self._hook_handles = register_forward_metric_hooks(
                 model=self._model,
                 collector=self._collector,
                 layer_labels=self._layer_labels,
@@ -367,8 +380,4 @@ class ForwardHookMetricsPlugin(BaseMetricPlugin):
         for handle in self._hook_handles:
             handle.remove()
         self._hook_handles = []
-        for module in self._entropy_callback_modules:
-            if hasattr(module, "_forward_metric_entropy_capture"):
-                setattr(module, "_forward_metric_entropy_capture", None)
-        self._entropy_callback_modules = []
         self._collector.finish_step()

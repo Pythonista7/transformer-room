@@ -40,20 +40,9 @@ class _FakeMultiHeadAttention(torch.nn.Module):
         self.n_heads = n_heads
         self.head_dim = width // n_heads
         self.packed_proj = torch.nn.Linear(width, width * 3, bias=False)
-        self._forward_metric_entropy_capture = None
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        all_projs = self.packed_proj(x)
-        capture_entropy = getattr(self, "_forward_metric_entropy_capture", None)
-        if callable(capture_entropy):
-            capture_entropy(
-                all_projs=all_projs,
-                mask=kwargs.get("mask"),
-                key_padding_mask=kwargs.get("key_padding_mask"),
-                is_causal=bool(kwargs.get("is_causal", True)),
-                n_heads=int(self.n_heads),
-                head_dim=int(self.head_dim),
-            )
+        _ = self.packed_proj(x)
         return x
 
 
@@ -64,10 +53,10 @@ class _FakeDecoderLayer(torch.nn.Module):
         self.ln2 = _FakeLayerNorm(width)
         self.multi_head_attention = _FakeMultiHeadAttention(width)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         x = x * self.ln1.gamma.mean() + self.ln1.beta.mean()
         x = x * self.ln2.gamma.mean() + self.ln2.beta.mean()
-        _ = self.multi_head_attention(x)
+        _ = self.multi_head_attention(x, **kwargs)
         return x
 
 
@@ -77,9 +66,9 @@ class _FakeDecoderModel(torch.nn.Module):
         self.dec_layers = torch.nn.ModuleList(_FakeDecoderLayer(width) for _ in range(layers))
         self.proj = torch.nn.Linear(width, width)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         for layer in self.dec_layers:
-            x = layer(x)
+            x = layer(x, **kwargs)
         return self.proj(x)
 
 
@@ -180,7 +169,8 @@ def _count_forward_hooks(model: _FakeDecoderModel) -> int:
     count = 0
     for layer in model.dec_layers:
         count += len(layer._forward_hooks)
-        count += len(layer.multi_head_attention._forward_pre_hooks)
+        count += len(layer.multi_head_attention._forward_hooks)
+        count += len(layer.multi_head_attention.packed_proj._forward_hooks)
     return count
 
 
@@ -678,6 +668,76 @@ class ForwardHookMetricsPluginTests(unittest.TestCase):
             plugin.on_step_start(ctx)
             _ = model(first_input)
             _ = model(second_input)
+            metrics = plugin.collect_step_metrics(ctx)
+        finally:
+            plugin.on_train_end()
+
+        self.assertIn("attention_entropy_first", metrics)
+        self.assertAlmostEqual(
+            metrics["attention_entropy_first"],
+            float(expected_first.item()),
+            places=6,
+        )
+
+    def test_attention_entropy_hook_preserves_mask_and_causal_kwargs(self) -> None:
+        torch.manual_seed(7)
+        model = _FakeDecoderModel(layers=3)
+        labels = get_decoder_layer_labels(model)
+        plugin = ForwardHookMetricsPlugin(
+            wandb_enabled=True,
+            wandb_cfg=WandbMetricsConfig(
+                enable_activation_norms=False,
+                enable_attention_entropy=True,
+                attention_entropy_head_cap=1,
+                attention_entropy_token_cap=4,
+            ),
+            model=model,
+            layer_labels=labels,
+        )
+
+        ctx = _step_ctx(
+            _make_schedule(
+                capture_activation_norms=False,
+                capture_attention_entropy=True,
+            )
+        )
+        inputs = torch.randn(2, 4, 8)
+        mask = torch.tensor(
+            [
+                [True, True, False, False],
+                [True, True, True, False],
+                [True, True, True, True],
+                [True, True, True, True],
+            ],
+            dtype=torch.bool,
+        )
+        key_padding_mask = torch.tensor(
+            [[True, True, True, False], [True, True, True, True]],
+            dtype=torch.bool,
+        )
+        expected_first = compute_attention_entropy_from_module_inputs(
+            model.dec_layers[0].multi_head_attention,
+            inputs,
+            attention_head_cap=1,
+            attention_token_cap=4,
+            mask=mask,
+            key_padding_mask=key_padding_mask,
+            is_causal=False,
+        )
+
+        self.assertIsNotNone(expected_first)
+        if expected_first is None:
+            self.fail("Expected entropy helper to return a tensor.")
+
+        plugin.on_train_start()
+        try:
+            plugin.on_step_start(ctx)
+            _ = model(
+                inputs,
+                mask=mask,
+                key_padding_mask=key_padding_mask,
+                is_causal=False,
+            )
             metrics = plugin.collect_step_metrics(ctx)
         finally:
             plugin.on_train_end()
