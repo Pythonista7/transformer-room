@@ -75,6 +75,7 @@ def put(url, *, headers, json, timeout):
 def _write_thunder_requests_stub(
     stub_dir: Path,
     *,
+    control_plane_instance_id: str = "0",
     instance_id: str = "550e8400-e29b-41d4-a716-446655440000",
     instance_name: str = "wrapper-test-instance",
     snapshot_status_code: int = 202,
@@ -134,9 +135,11 @@ def get(url, *, headers, timeout):
     _write_marker(marker_path, existing)
 
     payload = {{
-        "instances": [
-            {{"identifier": "{instance_id}", "instance_name": "{instance_name}"}}
-        ]
+        "{control_plane_instance_id}": {{
+            "uuid": "{instance_id}",
+            "name": "{instance_name}",
+            "status": "RUNNING"
+        }}
     }}
     return Response(
         status_code=200,
@@ -150,7 +153,7 @@ def post(url, *, headers, json, timeout):
     existing.append({{"method": "POST", "url": url, "headers": headers, "json": json}})
     _write_marker(marker_path, existing)
 
-    if url.endswith("/instances/snapshot"):
+    if url.endswith("/snapshots/create"):
         payload = {{"accepted": {str(snapshot_status_code < 400)}}}
         return Response(
             status_code={snapshot_status_code},
@@ -625,20 +628,11 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             self.assertTrue(marker_path.exists())
 
             requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
-            self.assertEqual(len(requests_payload), 3)
+            self.assertEqual(len(requests_payload), 2)
             self.assertEqual(requests_payload[0]["method"], "GET")
             self.assertTrue(requests_payload[0]["url"].endswith("/instances/list"))
             self.assertEqual(requests_payload[1]["method"], "POST")
-            self.assertTrue(requests_payload[1]["url"].endswith("/instances/snapshot"))
-            self.assertEqual(
-                requests_payload[1]["json"]["instance_name"],
-                "wrapper-test-instance",
-            )
-            self.assertTrue(
-                requests_payload[2]["url"].endswith(
-                    "/instances/550e8400-e29b-41d4-a716-446655440000/delete"
-                )
-            )
+            self.assertTrue(requests_payload[1]["url"].endswith("/instances/0/delete"))
             self.assertEqual(
                 requests_payload[1]["headers"]["Authorization"],
                 "Bearer thunder-test-key",
@@ -652,7 +646,13 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
                 "550e8400-e29b-41d4-a716-446655440000",
             )
             self.assertEqual(metadata["shutdown"]["return_code"], 0)
-            self.assertIn("snapshot_name", metadata["shutdown"]["response"])
+            self.assertFalse(metadata["shutdown"]["create_snapshot"])
+            self.assertFalse(metadata["shutdown"]["response"]["create_snapshot"])
+            self.assertIsNone(metadata["shutdown"]["response"]["snapshot_name"])
+            self.assertEqual(
+                metadata["shutdown"]["response"]["resolved_instance_id"],
+                "0",
+            )
 
             log_path = _single_file(log_dir, "*.log")
             log_text = log_path.read_text(encoding="utf-8")
@@ -790,29 +790,137 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             stub_dir = tmp_path / "stubs"
             marker_path = tmp_path / "thunder_stop.json"
             _write_thunder_requests_stub(stub_dir, snapshot_status_code=500)
-
-            result = self._run_wrapper(
-                provider="thunder",
-                child_code="print('failing-child')",
-                child_exit_code=5,
-                log_dir=log_dir,
-                wrapper_env={
-                    "TNR_INSTANCE_ID": "550e8400-e29b-41d4-a716-446655440000",
-                    "TNR_API_TOKEN": "thunder-test-key",
-                    "THUNDER_TEST_MARKER": str(marker_path),
-                },
-                pythonpath_entries=[stub_dir],
+            cmd = [
+                sys.executable,
+                str(WRAPPER_PATH),
+                "--provider",
+                "thunder",
+                "--create-snapshot",
+                "--log-dir",
+                str(log_dir),
+                "--run-name",
+                "wrapper-test",
+                "--",
+                sys.executable,
+                "-c",
+                "print('failing-child')\nimport sys\nsys.exit(5)\n",
+            ]
+            env = dict(os.environ)
+            env["WANDB_API_KEY"] = "dummy-test-key"
+            env["TNR_INSTANCE_ID"] = "550e8400-e29b-41d4-a716-446655440000"
+            env["TNR_API_TOKEN"] = "thunder-test-key"
+            env["THUNDER_TEST_MARKER"] = str(marker_path)
+            env["PYTHONPATH"] = str(stub_dir)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
             )
 
             self.assertEqual(result.returncode, 5)
             requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
             self.assertEqual(len(requests_payload), 2)
-            self.assertTrue(requests_payload[1]["url"].endswith("/instances/snapshot"))
+            self.assertTrue(requests_payload[1]["url"].endswith("/snapshots/create"))
 
             metadata_path = _single_file(log_dir, "*.json")
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertIn("HTTP 500", metadata["shutdown"]["error"])
             self.assertIsNone(metadata["shutdown"]["return_code"])
+            self.assertTrue(metadata["shutdown"]["create_snapshot"])
+            self.assertIn("Traceback", metadata["shutdown"]["error_traceback"])
+
+    def test_thunder_snapshot_failure_after_successful_child_returns_non_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            marker_path = tmp_path / "thunder_stop.json"
+            _write_thunder_requests_stub(stub_dir, snapshot_status_code=500)
+
+            cmd = [
+                sys.executable,
+                str(WRAPPER_PATH),
+                "--provider",
+                "thunder",
+                "--create-snapshot",
+                "--log-dir",
+                str(log_dir),
+                "--run-name",
+                "wrapper-test",
+                "--",
+                sys.executable,
+                "-c",
+                "print('done')",
+            ]
+            env = dict(os.environ)
+            env["WANDB_API_KEY"] = "dummy-test-key"
+            env["TNR_INSTANCE_ID"] = "550e8400-e29b-41d4-a716-446655440000"
+            env["TNR_API_TOKEN"] = "thunder-test-key"
+            env["THUNDER_TEST_MARKER"] = str(marker_path)
+            env["PYTHONPATH"] = str(stub_dir)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(requests_payload), 2)
+            self.assertTrue(requests_payload[1]["url"].endswith("/snapshots/create"))
+
+    def test_thunder_create_snapshot_flag_adds_snapshot_before_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            marker_path = tmp_path / "thunder_stop.json"
+            _write_thunder_requests_stub(stub_dir)
+
+            cmd = [
+                sys.executable,
+                str(WRAPPER_PATH),
+                "--provider",
+                "thunder",
+                "--create-snapshot",
+                "--log-dir",
+                str(log_dir),
+                "--run-name",
+                "wrapper-test",
+                "--",
+                sys.executable,
+                "-c",
+                "print('done')",
+            ]
+            env = dict(os.environ)
+            env["WANDB_API_KEY"] = "dummy-test-key"
+            env["TNR_INSTANCE_ID"] = "550e8400-e29b-41d4-a716-446655440000"
+            env["TNR_API_TOKEN"] = "thunder-test-key"
+            env["THUNDER_TEST_MARKER"] = str(marker_path)
+            env["PYTHONPATH"] = str(stub_dir)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            requests_payload = json.loads(marker_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(requests_payload), 3)
+            self.assertTrue(requests_payload[1]["url"].endswith("/snapshots/create"))
+            self.assertTrue(requests_payload[2]["url"].endswith("/instances/0/delete"))
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertTrue(metadata["shutdown"]["create_snapshot"])
+            self.assertTrue(metadata["shutdown"]["response"]["create_snapshot"])
+            self.assertIsNotNone(metadata["shutdown"]["response"]["snapshot_name"])
 
     def test_thunder_delete_failure_preserves_snapshot_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -840,7 +948,7 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             metadata_path = _single_file(log_dir, "*.json")
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertIn("HTTP 500", metadata["shutdown"]["error"])
-            self.assertIn("snapshot_name=autosnap-", metadata["shutdown"]["error"])
+            self.assertIn("snapshot_attempted=False", metadata["shutdown"]["error"])
 
 
 if __name__ == "__main__":

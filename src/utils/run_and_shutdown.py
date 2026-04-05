@@ -8,9 +8,10 @@ Example:
 
   .venv/bin/python src/utils/run_and_shutdown.py \
     --provider thunder \
+    --create-snapshot \
     --log-dir runs/logs \
-    --run-name ph1-stg1-baseline-latency-probes \
-    -- python experiments/phase-1/ph1_latency_cadence_probe.py --metrics-debug-timing
+    --run-name phase1/stage-1/latency-cadence-probe-test-2-hook-fixed \
+    -- python experiments/phase-1/ph1_latency_cadence_probe.py --variant collision
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import signal
 import socket
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,7 @@ from src.utils.vast import (
 from src.utils.thunder import (
     resolve_thunder_api_key,
     resolve_thunder_instance_id,
+    resolve_thunder_instance_name,
     snapshot_and_delete_thunder_instance,
 )
 
@@ -142,6 +145,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--run-name",
         default=None,
         help="Optional run slug used in log/metadata filenames.",
+    )
+    parser.add_argument(
+        "--create-snapshot",
+        action="store_true",
+        help="Thunder only: create a snapshot before deletion. Disabled by default.",
     )
     parser.add_argument(
         "--set-env",
@@ -292,12 +300,17 @@ def _prepare_child_env(
             "thunder_api_key_source": None,
             "thunder_instance_id": None,
             "thunder_instance_id_source": None,
+            "thunder_instance_name": None,
+            "thunder_instance_name_source": None,
         }
     )
 
     thunder_instance_id, thunder_instance_id_source = resolve_thunder_instance_id(env)
     env_summary["thunder_instance_id"] = thunder_instance_id
     env_summary["thunder_instance_id_source"] = thunder_instance_id_source
+    thunder_instance_name, thunder_instance_name_source = resolve_thunder_instance_name(env)
+    env_summary["thunder_instance_name"] = thunder_instance_name
+    env_summary["thunder_instance_name_source"] = thunder_instance_name_source
     if not thunder_instance_id:
         thunder_instance_id = _prompt_for_secret(env_key="TNR_INSTANCE_ID", tee=tee)
         env["TNR_INSTANCE_ID"] = thunder_instance_id
@@ -358,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
                 "duration_sec": None,
                 "return_code": None,
                 "error": None,
+                "error_traceback": None,
                 "response": None,
                 "vast_instance_id": None,
             }
@@ -370,8 +384,11 @@ def main(argv: list[str] | None = None) -> int:
                 "duration_sec": None,
                 "return_code": None,
                 "error": None,
+                "error_traceback": None,
                 "response": None,
                 "thunder_instance_id": None,
+                "thunder_instance_name": None,
+                "create_snapshot": bool(args.create_snapshot),
             }
         ),
     }
@@ -411,8 +428,18 @@ def main(argv: list[str] | None = None) -> int:
                     metadata["shutdown"]["thunder_instance_id"] = env_summary[
                         "thunder_instance_id"
                     ]
+                    metadata["shutdown"]["thunder_instance_name"] = env_summary[
+                        "thunder_instance_name"
+                    ]
                     instance_id_msg = (
                         f"thunder_instance_id={env_summary['thunder_instance_id']}"
+                    )
+                    if env_summary["thunder_instance_name"]:
+                        instance_id_msg += (
+                            f" thunder_instance_name={env_summary['thunder_instance_name']}"
+                        )
+                    instance_id_msg += (
+                        f" create_snapshot={bool(args.create_snapshot)}"
                     )
                 tee.write_message(
                     "[wrapper] env prepared | "
@@ -503,6 +530,12 @@ def main(argv: list[str] | None = None) -> int:
                         response = snapshot_and_delete_thunder_instance(
                             instance_id=str(shutdown_meta["thunder_instance_id"]),
                             api_key=str(child_env.get("TNR_API_TOKEN") or ""),
+                            create_snapshot=bool(shutdown_meta.get("create_snapshot")),
+                            instance_name=(
+                                str(shutdown_meta["thunder_instance_name"])
+                                if shutdown_meta["thunder_instance_name"]
+                                else None
+                            ),
                         )
                     shutdown_meta["return_code"] = 0
                     shutdown_meta["response"] = response
@@ -520,7 +553,10 @@ def main(argv: list[str] | None = None) -> int:
                         )
                 except Exception as exc:  # pragma: no cover - defensive path.
                     shutdown_meta["error"] = str(exc)
+                    shutdown_meta["error_traceback"] = traceback.format_exc()
                     tee.write_message(f"[wrapper] shutdown step failed: {exc}")
+                    tee.write_message("[wrapper] shutdown traceback follows:")
+                    tee.write_message(shutdown_meta["error_traceback"])
                 finally:
                     shutdown_end = _utc_now()
                     shutdown_meta["end_time_utc"] = _utc_iso(shutdown_end)
@@ -530,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     _write_metadata(metadata_path, metadata)
 
+            if metadata["shutdown"].get("error"):
+                return child_return_code if child_return_code != 0 else 1
             return child_return_code
     finally:
         for handled in handled_signals:
