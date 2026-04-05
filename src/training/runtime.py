@@ -89,7 +89,7 @@ def maybe_compile_model(
         return model, False, "disabled"
     if not hasattr(torch, "compile"):
         return model, False, "torch.compile unavailable"
-    if device.type != "cuda":
+    if device.type == "cpu":
         return model, False, f"skipped on {device.type}"
 
     _set_activation_memory_budget_if_configured(config)

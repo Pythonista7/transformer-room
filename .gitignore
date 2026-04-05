@@ -149,6 +149,7 @@ activemq-data/
 
 # Environments
 .env
+.env.sh
 .env.vast
 .envrc
 .venv

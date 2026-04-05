@@ -10,7 +10,7 @@ Example:
     --provider thunder \
     --log-dir runs/logs \
     --run-name ph1-stg1-baseline-latency-probes \
-    -- python experiments/phase-1/ph1_latency_cadence_probe.py
+    -- python experiments/phase-1/ph1_latency_cadence_probe.py --metrics-debug-timing
 """
 
 from __future__ import annotations
