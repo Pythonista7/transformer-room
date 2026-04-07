@@ -159,6 +159,17 @@ class LoggerSession(Protocol):
     def watch(self, model: torch.nn.Module, loss_fn: torch.nn.Module) -> None:
         """Optionally watch model gradients/weights."""
 
+    def get_run_id(self) -> str | None:
+        """Return the active backend run identifier when one exists."""
+
+    def upload_run_files(
+        self,
+        paths: Sequence[str],
+        *,
+        base_path: str | None = None,
+    ) -> None:
+        """Upload files as run files without using artifact I/O gating."""
+
     def close(self) -> None:
         """Close logging session."""
 

@@ -33,6 +33,7 @@ class FakeRemoteLoggerSession:
         self.remote_checkpoint_payload = remote_checkpoint_payload
         self.saved: list[dict[str, Any]] = []
         self.restore_calls: list[dict[str, Any]] = []
+        self.uploaded_run_files: list[dict[str, Any]] = []
 
     def log(self, metrics: Mapping[str, float], step: int | None = None) -> None:
         _ = metrics
@@ -90,6 +91,22 @@ class FakeRemoteLoggerSession:
     def watch(self, model, loss_fn) -> None:
         _ = model
         _ = loss_fn
+
+    def get_run_id(self) -> str | None:
+        return "remote-run-id"
+
+    def upload_run_files(
+        self,
+        paths: Sequence[str],
+        *,
+        base_path: str | None = None,
+    ) -> None:
+        self.uploaded_run_files.append(
+            {
+                "paths": list(paths),
+                "base_path": base_path,
+            }
+        )
 
     def close(self) -> None:
         return

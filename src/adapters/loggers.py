@@ -166,6 +166,18 @@ class ConsoleLoggerSession:
         _ = model
         _ = loss_fn
 
+    def get_run_id(self) -> str | None:
+        return None
+
+    def upload_run_files(
+        self,
+        paths: Sequence[str],
+        *,
+        base_path: str | None = None,
+    ) -> None:
+        _ = paths
+        _ = base_path
+
     def close(self) -> None:
         return
 
@@ -316,6 +328,31 @@ class WandbLoggerSession:
 
     def watch(self, model: torch.nn.Module, loss_fn: torch.nn.Module) -> None:
         self._run.watch(model, loss_fn, log="all", log_freq=10)
+
+    def get_run_id(self) -> str | None:
+        return self._run_info.run_id
+
+    def upload_run_files(
+        self,
+        paths: Sequence[str],
+        *,
+        base_path: str | None = None,
+    ) -> None:
+        if not paths:
+            return
+
+        resolved_base_path: str | None = None
+        if base_path is not None:
+            resolved_base_path = str(Path(base_path).expanduser().resolve())
+
+        for path in paths:
+            resolved_path = Path(path).expanduser().resolve()
+            if not resolved_path.exists():
+                raise FileNotFoundError(f"Run file path does not exist: {resolved_path}")
+            save_kwargs: dict[str, Any] = {"policy": "now"}
+            if resolved_base_path is not None:
+                save_kwargs["base_path"] = resolved_base_path
+            self._run.save(str(resolved_path), **save_kwargs)
 
     def close(self) -> None:
         self._run.finish()

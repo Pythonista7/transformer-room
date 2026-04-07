@@ -375,10 +375,12 @@ class ConfigValidationTests(unittest.TestCase):
     def test_artifact_controls_default_to_enabled_and_serialize(self) -> None:
         config = make_config()
         self.assertTrue(config.run.persist_local_artifacts)
+        self.assertFalse(config.run.torch_compile_trace)
         self.assertTrue(config.logging.enable_artifact_io)
 
         payload = config.to_dict()
         self.assertTrue(payload["run"]["persist_local_artifacts"])
+        self.assertFalse(payload["run"]["torch_compile_trace"])
         self.assertTrue(payload["logging"]["enable_artifact_io"])
 
     def test_invalid_optimizer_name_fails(self) -> None:

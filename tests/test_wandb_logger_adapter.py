@@ -134,6 +134,7 @@ class FakeRun:
         self._store = store
         self.logged_metrics: list[tuple[int | None, dict[str, float]]] = []
         self.logged_artifacts: list[tuple[FakeArtifact, list[str], FakeLoggedArtifact]] = []
+        self.saved_files: list[tuple[str, dict[str, object]]] = []
         self.finished = False
 
     def log(self, metrics, step=None) -> None:
@@ -152,6 +153,9 @@ class FakeRun:
         _ = loss_fn
         _ = log
         _ = log_freq
+
+    def save(self, path: str, **kwargs) -> None:
+        self.saved_files.append((path, dict(kwargs)))
 
     def finish(self) -> None:
         self.finished = True
@@ -393,6 +397,51 @@ class WandbLoggerAdapterTests(unittest.TestCase):
             self.assertTrue(restored)
             self.assertTrue(restore_path.exists())
             self.assertEqual(restore_path.read_text(encoding="utf-8"), "checkpoint-payload")
+
+    def test_upload_run_files_uses_run_save_and_exposes_run_id(self) -> None:
+        fake_wandb, fake_run, _store, _init_calls = self._make_fake_wandb()
+        adapter = WandbLoggerAdapter()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_dir = Path(tmpdir) / "run-123"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_file = trace_dir / "dedicated_log_torch_trace_run-123.log"
+            trace_file.write_text("trace", encoding="utf-8")
+
+            original_module = sys.modules.get("wandb")
+            sys.modules["wandb"] = fake_wandb
+            try:
+                session = adapter.start(
+                    cfg=LoggingConfig(provider="wandb"),
+                    project_name="transformer-room-baseline",
+                    run_name="lr-run",
+                    group_name=None,
+                    config_payload={},
+                )
+                self.assertEqual(session.get_run_id(), "run-123")
+                session.upload_run_files(
+                    [str(trace_file)],
+                    base_path=str(trace_dir.parent),
+                )
+                session.close()
+            finally:
+                if original_module is None:
+                    sys.modules.pop("wandb", None)
+                else:
+                    sys.modules["wandb"] = original_module
+
+        self.assertEqual(
+            fake_run.saved_files,
+            [
+                (
+                    str(trace_file.resolve()),
+                    {
+                        "policy": "now",
+                        "base_path": str(trace_dir.parent.resolve()),
+                    },
+                )
+            ],
+        )
 
 
 if __name__ == "__main__":

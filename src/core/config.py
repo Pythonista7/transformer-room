@@ -31,6 +31,7 @@ class RunConfig:
     - `torch_compile_mode`: compile mode string passed to `torch.compile(...)`.
     - `torch_compile_fullgraph`: forward `fullgraph` flag to `torch.compile(...)`.
     - `torch_compile_dynamic`: forward `dynamic` flag to `torch.compile(...)`.
+    - `torch_compile_trace`: set `TORCH_TRACE` before calling `torch.compile(...)`.
     - `activation_memory_budget`: optional Torch functorch activation memory budget in
       `[0, 1]`; applied only when supported by the installed torch build.
     - `compile_warmup_steps`: number of initial compiled steps excluded from perf
@@ -50,6 +51,7 @@ class RunConfig:
     torch_compile_mode: str = "default"
     torch_compile_fullgraph: bool = False
     torch_compile_dynamic: bool = False
+    torch_compile_trace: bool = False
     activation_memory_budget: float | None = None
     compile_warmup_steps: int = 3 if use_torch_compile else 0
     seed: int = 42
@@ -564,6 +566,8 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         0.0 <= config.run.activation_memory_budget <= 1.0
     ):
         raise ValueError("run.activation_memory_budget must be in [0, 1] when set.")
+    if not isinstance(config.run.torch_compile_trace, bool):
+        raise ValueError("run.torch_compile_trace must be a bool.")
     if not config.run.checkpoint_filename.strip():
         raise ValueError("run.checkpoint_filename must be non-empty.")
     if not config.run.final_model_filename.strip():

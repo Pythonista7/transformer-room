@@ -35,6 +35,7 @@ class RecordingLoggerSession:
         self.logged: list[tuple[int | None, dict[str, float]]] = []
         self.saved: list[dict[str, Any]] = []
         self.restore_calls: list[dict[str, Any]] = []
+        self.uploaded_run_files: list[dict[str, Any]] = []
 
     def log(self, metrics: Mapping[str, float], step: int | None = None) -> None:
         self.logged.append((step, dict(metrics)))
@@ -80,6 +81,22 @@ class RecordingLoggerSession:
     def watch(self, model, loss_fn) -> None:
         _ = model
         _ = loss_fn
+
+    def get_run_id(self) -> str | None:
+        return "recording-run-id"
+
+    def upload_run_files(
+        self,
+        paths: Sequence[str],
+        *,
+        base_path: str | None = None,
+    ) -> None:
+        self.uploaded_run_files.append(
+            {
+                "paths": list(paths),
+                "base_path": base_path,
+            }
+        )
 
     def close(self) -> None:
         return
@@ -311,6 +328,53 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
             run_dir = Path(result.run_artifact_dir)
             self.assertFalse((run_dir / cfg.run.checkpoint_filename).exists())
             self.assertFalse((run_dir / cfg.run.final_model_filename).exists())
+
+    def test_trace_run_files_upload_even_when_artifact_io_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(
+                tmp_path=Path(tmpdir),
+                run_name="trace-upload-run",
+                provider="wandb",
+                effective_batch_size=4,
+                persist_local_artifacts=False,
+                enable_artifact_io=False,
+            )
+            cfg.run.use_torch_compile = True
+            cfg.run.torch_compile_trace = True
+
+            trace_dir = Path(tmpdir) / "torch-trace" / "recording-run-id"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_file = trace_dir / "dedicated_log_torch_trace_recording-run-id.log"
+            trace_file.write_text("trace", encoding="utf-8")
+
+            with (
+                mock.patch("src.train.resolve_torch_compile_trace_dir", return_value=trace_dir),
+                mock.patch(
+                    "src.train.maybe_compile_model",
+                    side_effect=lambda model, device, config, trace_dir=None: (
+                        model,
+                        True,
+                        "enabled",
+                    ),
+                ),
+            ):
+                result = model_pipeline(cfg)
+
+            session = self.recording_adapter.sessions[-1]
+            saved_types = [entry["artifact_type"] for entry in session.saved]
+            self.assertEqual(saved_types, ["metadata", "metadata"])
+            self.assertEqual(session.restore_calls, [])
+            self.assertEqual(
+                session.uploaded_run_files,
+                [
+                    {
+                        "paths": [str(trace_file)],
+                        "base_path": str(trace_dir.parent),
+                    }
+                ],
+            )
+            self.assertIsNone(result.checkpoint_artifact_ref)
+            self.assertIsNone(result.final_model_artifact_ref)
 
     def test_microbatch_backward_callback_runs_before_optimizer_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -56,10 +56,12 @@ from .training.optimizer import (
     scale_gradients_by_token_count,
 )
 from .training.runtime import (
+    finalize_torch_compile_trace,
     get_autocast_context,
     get_best_device,
     get_uncompiled_model,
     maybe_compile_model,
+    resolve_torch_compile_trace_dir,
     set_seed,
     should_enable_bf16_autocast,
     synchronize_if_cuda,
@@ -882,6 +884,8 @@ def model_pipeline(
         group_name=config.run.group_name,
         config_payload=asdict(config),
     )
+    trace_dir = resolve_torch_compile_trace_dir(config, logger)
+    compile_enabled = False
 
     try:
         logger.save(
@@ -907,7 +911,12 @@ def model_pipeline(
                 "group_name": config.run.group_name,
             },
         )
-        model, compile_enabled, compile_status = maybe_compile_model(model, device, config)
+        model, compile_enabled, compile_status = maybe_compile_model(
+            model,
+            device,
+            config,
+            trace_dir=trace_dir,
+        )
         logger.log(
             {
                 "torch_compile_enabled": float(1 if compile_enabled else 0),
@@ -954,6 +963,12 @@ def model_pipeline(
             extra_metric_plugins=extra_metric_plugins,
             metrics_debug_timing=metrics_debug_timing,
         )
+        if compile_enabled and trace_dir is not None:
+            finalize_torch_compile_trace(
+                config=config,
+                logger=logger,
+                trace_dir=trace_dir,
+            )
     finally:
         logger.close()
         if train_loader.multiprocessing_context is not None:

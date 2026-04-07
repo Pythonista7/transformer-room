@@ -27,6 +27,7 @@ class RecordingLoggerSession:
         self.logged: list[tuple[int | None, dict[str, float]]] = []
         self.saved: list[dict[str, Any]] = []
         self.watch_called = 0
+        self.uploaded_run_files: list[dict[str, Any]] = []
 
     def log(self, metrics: Mapping[str, float], step: int | None = None) -> None:
         self.logged.append((step, dict(metrics)))
@@ -77,6 +78,22 @@ class RecordingLoggerSession:
         _ = model
         _ = loss_fn
         self.watch_called += 1
+
+    def get_run_id(self) -> str | None:
+        return "recording-run-id"
+
+    def upload_run_files(
+        self,
+        paths: Sequence[str],
+        *,
+        base_path: str | None = None,
+    ) -> None:
+        self.uploaded_run_files.append(
+            {
+                "paths": list(paths),
+                "base_path": base_path,
+            }
+        )
 
     def close(self) -> None:
         return

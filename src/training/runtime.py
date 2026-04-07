@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import gc
+import os
+import shutil
+import subprocess
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Iterable
 
 import torch
 
+from ..adapters.loggers import sanitize_wandb_name
 from ..core.config import ExperimentConfig
+
+DEFAULT_TORCH_TRACE_ROOT = Path("/tmp/tracedir")
+DEFAULT_TLPARSE_OUTPUT_DIR = Path("tl_out")
 
 
 def get_best_device() -> torch.device:
@@ -82,8 +90,103 @@ def _set_activation_memory_budget_if_configured(config: ExperimentConfig) -> Non
     functorch_config.activation_memory_budget = float(budget)
 
 
+def resolve_torch_compile_trace_dir(config: ExperimentConfig, logger) -> Path | None:
+    if not config.run.torch_compile_trace:
+        return None
+
+    trace_root = DEFAULT_TORCH_TRACE_ROOT
+    if config.logging.provider != "wandb":
+        return trace_root
+
+    get_run_id = getattr(logger, "get_run_id", None)
+    run_id = get_run_id() if callable(get_run_id) else None
+    if run_id is None or not str(run_id).strip():
+        raise RuntimeError(
+            "run.torch_compile_trace requires an active W&B run ID before compile."
+        )
+    return trace_root / sanitize_wandb_name(str(run_id))
+
+
+def _collect_trace_files(trace_dir: Path) -> list[Path]:
+    return sorted(candidate for candidate in trace_dir.rglob("*") if candidate.is_file())
+
+
+def _find_latest_trace_log(trace_dir: Path) -> Path | None:
+    log_files = sorted(
+        (candidate for candidate in trace_dir.rglob("*.log") if candidate.is_file()),
+        key=lambda candidate: candidate.stat().st_mtime,
+    )
+    if not log_files:
+        return None
+    return log_files[-1]
+
+
+def finalize_torch_compile_trace(
+    *,
+    config: ExperimentConfig,
+    logger,
+    trace_dir: Path | None,
+) -> None:
+    if trace_dir is None:
+        return
+
+    if not trace_dir.exists():
+        raise RuntimeError(
+            f"run.torch_compile_trace is enabled, but no trace directory was created at {trace_dir}."
+        )
+
+    if config.logging.provider == "wandb":
+        trace_files = _collect_trace_files(trace_dir)
+        if not trace_files:
+            raise RuntimeError(
+                f"run.torch_compile_trace is enabled, but no trace files were found under {trace_dir}."
+            )
+        upload_run_files = getattr(logger, "upload_run_files", None)
+        if not callable(upload_run_files):
+            raise RuntimeError(
+                "Active logger does not support uploading torch trace run files."
+            )
+        upload_run_files(
+            [str(path) for path in trace_files],
+            base_path=str(trace_dir.parent),
+        )
+        return
+
+    tlparse_path = shutil.which("tlparse")
+    if tlparse_path is None:
+        raise RuntimeError(
+            "run.torch_compile_trace requires `tlparse` to be installed when logging.provider='console'."
+        )
+
+    trace_log = _find_latest_trace_log(trace_dir)
+    if trace_log is None:
+        raise RuntimeError(
+            f"run.torch_compile_trace is enabled, but no torch trace log was found under {trace_dir}."
+        )
+
+    try:
+        subprocess.run(
+            [
+                tlparse_path,
+                str(trace_log),
+                "-o",
+                str(DEFAULT_TLPARSE_OUTPUT_DIR),
+                "--overwrite",
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"tlparse failed for torch trace log {trace_log} with exit code {exc.returncode}."
+        ) from exc
+
+
 def maybe_compile_model(
-    model: torch.nn.Module, device: torch.device, config: ExperimentConfig
+    model: torch.nn.Module,
+    device: torch.device,
+    config: ExperimentConfig,
+    *,
+    trace_dir: Path | None = None,
 ) -> tuple[torch.nn.Module, bool, str]:
     if not config.run.use_torch_compile:
         return model, False, "disabled"
@@ -95,6 +198,9 @@ def maybe_compile_model(
     _set_activation_memory_budget_if_configured(config)
 
     try:
+        if trace_dir is not None:
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            os.environ["TORCH_TRACE"] = str(trace_dir)
         compiled_model = torch.compile(
             model,
             mode=config.run.torch_compile_mode,
