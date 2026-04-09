@@ -202,6 +202,7 @@ For `LoggingConfig(provider="wandb", ...)` runs:
   - `TrainConfig(data_mode="streaming", max_steps=...)`
 - Logging:
   - `LoggingConfig(provider="console")` for local iteration
+  - `LoggingConfig(provider="local", wandb=WandbMetricsConfig(...))` for local rich metrics in `metrics.jsonl`
   - `LoggingConfig(provider="wandb", wandb=WandbMetricsConfig(...))` for experiment tracking
   - For W&B runs, set a stable `run.run_name` such as `wikitext2-gpt2-lr1e-4-bs20`
 - Model size:

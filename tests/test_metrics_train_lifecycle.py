@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from src.config import (
@@ -33,7 +34,7 @@ class _FailingPlugin(BaseMetricPlugin):
         self.ended = True
 
 
-def _make_console_config(tmp_path: Path) -> ExperimentConfig:
+def _make_config(tmp_path: Path, *, provider: str) -> ExperimentConfig:
     dataset_path = tmp_path / "tiny.txt"
     vocab_path = tmp_path / "tiny_vocab.txt"
     artifacts_root = tmp_path / "artifacts"
@@ -71,7 +72,7 @@ def _make_console_config(tmp_path: Path) -> ExperimentConfig:
             data_fraction=1.0,
         ),
         split=HoldoutSplitConfig(train_fraction=0.8, seed=123, shuffle=True),
-        logging=LoggingConfig(provider="console"),
+        logging=LoggingConfig(provider=provider),
     )
 
 
@@ -80,11 +81,35 @@ class MetricsTrainLifecycleTests(unittest.TestCase):
         plugin = _FailingPlugin()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            cfg = _make_console_config(Path(tmpdir))
+            cfg = _make_config(Path(tmpdir), provider="console")
             with self.assertRaisesRegex(RuntimeError, "failing plugin"):
                 model_pipeline(cfg, extra_metric_plugins=[plugin])
 
         self.assertTrue(plugin.ended)
+
+    def test_local_provider_writes_metrics_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(Path(tmpdir), provider="local")
+            model_pipeline(cfg)
+
+            run_dir = Path(cfg.run.artifacts_root) / cfg.run.run_name
+            metrics_path = run_dir / "metrics.jsonl"
+            self.assertTrue(metrics_path.exists())
+            records = [
+                json.loads(line)
+                for line in metrics_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertGreater(len(records), 0)
+            self.assertIn("metrics", records[0])
+            self.assertIn("logged_at", records[0])
+
+    def test_console_provider_does_not_write_metrics_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_config(Path(tmpdir), provider="console")
+            model_pipeline(cfg)
+
+            run_dir = Path(cfg.run.artifacts_root) / cfg.run.run_name
+            self.assertFalse((run_dir / "metrics.jsonl").exists())
 
 
 if __name__ == "__main__":

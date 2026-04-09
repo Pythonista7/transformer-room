@@ -176,6 +176,9 @@ class LoggerSession(Protocol):
 
 @runtime_checkable
 class LoggerAdapter(Protocol):
+    def supports_rich_metrics(self, cfg: "LoggingConfig") -> bool:
+        """Return whether this backend enables rich metric collection."""
+
     def start(
         self,
         cfg: LoggingConfig,
@@ -183,5 +186,6 @@ class LoggerAdapter(Protocol):
         run_name: str | None,
         group_name: str | None,
         config_payload: dict[str, Any],
+        run_artifact_dir: str,
     ) -> LoggerSession:
         """Start a new logging session."""

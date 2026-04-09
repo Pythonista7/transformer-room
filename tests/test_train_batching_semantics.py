@@ -106,6 +106,10 @@ class RecordingLoggerAdapter:
     def __init__(self) -> None:
         self.sessions: list[RecordingLoggerSession] = []
 
+    def supports_rich_metrics(self, cfg: LoggingConfig) -> bool:
+        _ = cfg
+        return True
+
     def start(
         self,
         cfg: LoggingConfig,
@@ -113,12 +117,14 @@ class RecordingLoggerAdapter:
         run_name: str | None,
         group_name: str | None,
         config_payload: dict[str, Any],
+        run_artifact_dir: str,
     ) -> RecordingLoggerSession:
         _ = cfg
         _ = project_name
         _ = run_name
         _ = group_name
         _ = config_payload
+        _ = run_artifact_dir
         session = RecordingLoggerSession()
         self.sessions.append(session)
         return session
@@ -478,7 +484,7 @@ class TrainBatchingSemanticsTests(unittest.TestCase):
                             type="linear",
                             start_factor=0.25,
                             end_factor=1.0,
-                            steps=4,
+                            steps=1,
                         )
                     ]
                 ),

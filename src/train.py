@@ -157,6 +157,7 @@ def train_loop(
     *,
     extra_metric_plugins: Sequence[MetricPlugin] | None = None,
     metrics_debug_timing: bool = False,
+    rich_metrics_enabled: bool = False,
 ) -> TrainLoopResult:
     checkpoint_model = get_uncompiled_model(model)
     pad_id = int(loss_fn.ignore_index)
@@ -168,7 +169,6 @@ def train_loop(
             device=device,
         )
     wandb_cfg = config.logging.wandb
-    wandb_enabled = config.logging.provider == "wandb"
     persist_local_artifacts = bool(config.run.persist_local_artifacts)
     artifact_io_enabled = bool(config.logging.enable_artifact_io)
     layer_labels = get_decoder_layer_labels(checkpoint_model)
@@ -179,7 +179,7 @@ def train_loop(
             optimizer=optimizer,
             device=device,
             layer_labels=layer_labels,
-            wandb_enabled=wandb_enabled,
+            wandb_enabled=rich_metrics_enabled,
             extra_plugins=extra_metric_plugins,
         ),
         enable_timing_debug=metrics_debug_timing,
@@ -419,7 +419,7 @@ def train_loop(
                     step_time_ms = (time.perf_counter() - step_start) * 1000.0
 
                 should_capture_peak_memory = (
-                    wandb_enabled
+                    rich_metrics_enabled
                     and wandb_cfg.enable_peak_memory
                     and step_ctx.schedule.should_log_step_metrics
                 )
@@ -513,7 +513,7 @@ def train_loop(
                     next_global_step = global_step + 1
                     schedule = build_metric_schedule(
                         next_global_step=next_global_step,
-                        wandb_enabled=wandb_enabled,
+                        wandb_enabled=rich_metrics_enabled,
                         wandb_cfg=wandb_cfg,
                         layer_labels_available=bool(layer_labels),
                     )
@@ -538,7 +538,7 @@ def train_loop(
 
                     optimizer.zero_grad()
                     should_measure_step_timing = (
-                        wandb_enabled
+                        rich_metrics_enabled
                         and wandb_cfg.enable_step_time
                         and step_ctx.include_in_perf_aggregates
                     )
@@ -767,6 +767,7 @@ def model_pipeline(
     register_builtin_adapters()
     validate_experiment_config(config)
     logger_adapter = get_logger_adapter(config.logging.provider)
+    rich_metrics_enabled = bool(logger_adapter.supports_rich_metrics(config.logging))
     config = resolve_wandb_lineage(config, logger_adapter)
     set_seed(config.run.seed)
     print(f"Using seed: {config.run.seed}")
@@ -799,8 +800,7 @@ def model_pipeline(
                 "Streaming mode requires tokenizer.name='hf_pretrained'."
             )
         bpb_metrics_enabled = (
-            config.logging.provider == "wandb"
-            and config.logging.wandb.enable_bits_per_byte
+            rich_metrics_enabled and config.logging.wandb.enable_bits_per_byte
         )
         tokenized = build_hf_pretrained_tokenizer_bundle(
             config.tokenizer,
@@ -883,6 +883,7 @@ def model_pipeline(
         run_name=config.run.run_name,
         group_name=config.run.group_name,
         config_payload=asdict(config),
+        run_artifact_dir=str(run_paths["run_artifact_dir"]),
     )
     trace_dir = resolve_torch_compile_trace_dir(config, logger)
     compile_enabled = False
@@ -962,6 +963,7 @@ def model_pipeline(
             token_byte_lengths=token_byte_lengths,
             extra_metric_plugins=extra_metric_plugins,
             metrics_debug_timing=metrics_debug_timing,
+            rich_metrics_enabled=rich_metrics_enabled,
         )
         if compile_enabled and trace_dir is not None:
             finalize_torch_compile_trace(

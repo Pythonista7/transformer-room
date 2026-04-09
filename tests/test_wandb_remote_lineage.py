@@ -124,6 +124,10 @@ class FakeRemoteLoggerAdapter:
         self.has_remote_artifact_calls: list[dict[str, str]] = []
         self.sessions: list[FakeRemoteLoggerSession] = []
 
+    def supports_rich_metrics(self, cfg: LoggingConfig) -> bool:
+        _ = cfg
+        return True
+
     def has_remote_artifact(
         self,
         *,
@@ -149,12 +153,14 @@ class FakeRemoteLoggerAdapter:
         run_name: str | None,
         group_name: str | None,
         config_payload: dict[str, Any],
+        run_artifact_dir: str,
     ) -> FakeRemoteLoggerSession:
         _ = cfg
         _ = project_name
         _ = run_name
         _ = group_name
         _ = config_payload
+        _ = run_artifact_dir
         session = FakeRemoteLoggerSession(self.remote_checkpoint_payload)
         self.sessions.append(session)
         return session
@@ -215,6 +221,7 @@ def make_wandb_config(tmp_path: Path, *, run_name: str, resume_from_checkpoint: 
 
 def build_checkpoint_payload(config: ExperimentConfig) -> dict[str, Any]:
     special = SpecialTokenIds(
+        vocab_size=67,
         base_vocab_size=64,
         num_special_tokens=3,
         eos_id=64,

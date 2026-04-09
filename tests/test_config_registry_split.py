@@ -203,6 +203,11 @@ class ConfigValidationTests(unittest.TestCase):
             config.tokenizer.bpb_mode = mode
             validate_experiment_config(config)
 
+    def test_local_provider_is_accepted(self) -> None:
+        config = make_config()
+        config.logging.provider = "local"
+        validate_experiment_config(config)
+
     def test_streaming_max_steps_allows_epochless_training(self) -> None:
         config = self._make_streaming_hf_config()
         config.train.epochs = None
@@ -244,6 +249,18 @@ class ConfigValidationTests(unittest.TestCase):
         config.tokenizer.use_fast = False
         config.logging.wandb.enable_bits_per_byte = False
         validate_experiment_config(config)
+
+    def test_hf_bpb_exact_requires_fast_tokenizer_for_local_metrics(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.logging.provider = "local"
+        config.tokenizer.bpb_mode = "exact"
+        config.tokenizer.use_fast = False
+        config.logging.wandb.enable_bits_per_byte = True
+        with self.assertRaisesRegex(
+            ValueError,
+            "bpb_mode='exact' requires tokenizer.use_fast=True",
+        ):
+            validate_experiment_config(config)
 
     def test_validate_experiment_config_rechecks_mutated_batching(self) -> None:
         config = make_config()

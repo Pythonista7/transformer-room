@@ -29,6 +29,7 @@ class MetricScheduleTests(unittest.TestCase):
             log_every_n_steps=5,
             diagnostics_every_n_steps=3,
             enable_global_param_norm=True,
+            enable_activation_norms=True,
             attention_entropy_every_n_steps=7,
             val_every_n_steps=11,
         )
@@ -130,6 +131,7 @@ class MetricScheduleTests(unittest.TestCase):
     def test_attention_capture_requires_labels(self) -> None:
         cfg = WandbMetricsConfig(
             diagnostics_every_n_steps=1,
+            enable_attention_entropy=True,
             attention_entropy_every_n_steps=1,
         )
         schedule = build_metric_schedule(

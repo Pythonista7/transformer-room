@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
 
-from src.adapters.loggers import WandbLoggerAdapter
+from src.adapters.loggers import LocalLoggerAdapter, WandbLoggerAdapter
 from src.config import LoggingConfig
 
 
@@ -195,6 +196,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
                     run_name="lr-run",
                     group_name="sweep-20260228-120000",
                     config_payload={"train": {"learning_rate": 1e-4}},
+                    run_artifact_dir=tmpdir,
                 )
                 artifact_ref = session.save(
                     str(artifact_path),
@@ -253,6 +255,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
                 run_name="lr-run",
                 group_name=None,
                 config_payload={},
+                run_artifact_dir=tempfile.gettempdir(),
             )
             session.log(
                 {
@@ -327,6 +330,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
                     run_name="lr-run",
                     group_name=None,
                     config_payload={},
+                    run_artifact_dir=tmpdir,
                 )
                 artifact_path.write_text("checkpoint-v1", encoding="utf-8")
                 session.save(
@@ -374,6 +378,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
                     run_name="lr-run",
                     group_name=None,
                     config_payload={},
+                    run_artifact_dir=tmpdir,
                 )
                 session.save(
                     str(upload_path),
@@ -417,6 +422,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
                     run_name="lr-run",
                     group_name=None,
                     config_payload={},
+                    run_artifact_dir=tmpdir,
                 )
                 self.assertEqual(session.get_run_id(), "run-123")
                 session.upload_run_files(
@@ -442,6 +448,68 @@ class WandbLoggerAdapterTests(unittest.TestCase):
                 )
             ],
         )
+
+
+class LocalLoggerAdapterTests(unittest.TestCase):
+    def test_supports_rich_metrics_and_writes_jsonl_records(self) -> None:
+        adapter = LocalLoggerAdapter()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session = adapter.start(
+                cfg=LoggingConfig(provider="local"),
+                project_name="transformer-room-baseline",
+                run_name="local-run",
+                group_name=None,
+                config_payload={},
+                run_artifact_dir=tmpdir,
+            )
+            session.log({"train_loss_step": 1.5, "lr_current": 1e-3}, step=10)
+            session.close()
+
+            metrics_path = Path(tmpdir) / "metrics.jsonl"
+            self.assertTrue(metrics_path.exists())
+            lines = metrics_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            payload = json.loads(lines[0])
+
+        self.assertTrue(adapter.supports_rich_metrics(LoggingConfig(provider="local")))
+        self.assertEqual(payload["step"], 10)
+        self.assertIn("logged_at", payload)
+        self.assertEqual(
+            payload["metrics"],
+            {"train_loss_step": 1.5, "lr_current": 1e-3},
+        )
+
+    def test_non_metric_methods_are_local_noops(self) -> None:
+        adapter = LocalLoggerAdapter()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session = adapter.start(
+                cfg=LoggingConfig(provider="local"),
+                project_name="transformer-room-baseline",
+                run_name="local-run",
+                group_name=None,
+                config_payload={},
+                run_artifact_dir=tmpdir,
+            )
+
+            self.assertIsNone(
+                session.save(
+                    str(Path(tmpdir) / "checkpoint.pt"),
+                    artifact_name="unused",
+                    artifact_type="checkpoint",
+                )
+            )
+            self.assertFalse(
+                session.restore(
+                    str(Path(tmpdir) / "checkpoint.pt"),
+                    artifact_name="unused",
+                    artifact_type="checkpoint",
+                )
+            )
+            self.assertIsNone(session.get_run_id())
+            session.upload_run_files([str(Path(tmpdir) / "trace.log")], base_path=tmpdir)
+            session.close()
 
 
 if __name__ == "__main__":

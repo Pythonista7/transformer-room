@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
@@ -183,6 +185,10 @@ class ConsoleLoggerSession:
 
 
 class ConsoleLoggerAdapter:
+    def supports_rich_metrics(self, cfg: LoggingConfig) -> bool:
+        _ = cfg
+        return False
+
     def start(
         self,
         cfg: LoggingConfig,
@@ -190,12 +196,104 @@ class ConsoleLoggerAdapter:
         run_name: str | None,
         group_name: str | None,
         config_payload: dict[str, Any],
+        run_artifact_dir: str,
     ) -> LoggerSession:
         _ = cfg
         _ = project_name
         _ = group_name
         _ = config_payload
+        _ = run_artifact_dir
         return ConsoleLoggerSession(run_name=run_name)
+
+
+class LocalLoggerSession:
+    def __init__(self, run_name: str | None, run_artifact_dir: str) -> None:
+        self.run_name = run_name or "local-run"
+        self._metrics_path = Path(run_artifact_dir).expanduser().resolve() / "metrics.jsonl"
+        self._metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self._metrics_path.open("a", encoding="utf-8")
+
+    def log(self, metrics: Mapping[str, float], step: int | None = None) -> None:
+        record = {
+            "step": step,
+            "logged_at": datetime.now(UTC).isoformat(),
+            "metrics": dict(metrics),
+        }
+        self._handle.write(json.dumps(record, sort_keys=True) + "\n")
+        self._handle.flush()
+
+    def save(
+        self,
+        path: str,
+        *,
+        artifact_name: str | None = None,
+        artifact_type: str | None = None,
+        aliases: Sequence[str] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> str | None:
+        _ = path
+        _ = artifact_name
+        _ = artifact_type
+        _ = aliases
+        _ = metadata
+        return None
+
+    def restore(
+        self,
+        path: str,
+        *,
+        artifact_name: str,
+        artifact_type: str | None = None,
+        alias: str = "latest",
+    ) -> bool:
+        _ = path
+        _ = artifact_name
+        _ = artifact_type
+        _ = alias
+        return False
+
+    def watch(self, model: torch.nn.Module, loss_fn: torch.nn.Module) -> None:
+        _ = model
+        _ = loss_fn
+
+    def get_run_id(self) -> str | None:
+        return None
+
+    def upload_run_files(
+        self,
+        paths: Sequence[str],
+        *,
+        base_path: str | None = None,
+    ) -> None:
+        _ = paths
+        _ = base_path
+
+    def close(self) -> None:
+        self._handle.close()
+
+
+class LocalLoggerAdapter:
+    def supports_rich_metrics(self, cfg: LoggingConfig) -> bool:
+        _ = cfg
+        return True
+
+    def start(
+        self,
+        cfg: LoggingConfig,
+        project_name: str,
+        run_name: str | None,
+        group_name: str | None,
+        config_payload: dict[str, Any],
+        run_artifact_dir: str,
+    ) -> LoggerSession:
+        _ = cfg
+        _ = project_name
+        _ = group_name
+        _ = config_payload
+        return LocalLoggerSession(
+            run_name=run_name,
+            run_artifact_dir=run_artifact_dir,
+        )
 
 
 class WandbLoggerSession:
@@ -359,6 +457,10 @@ class WandbLoggerSession:
 
 
 class WandbLoggerAdapter:
+    def supports_rich_metrics(self, cfg: LoggingConfig) -> bool:
+        _ = cfg
+        return True
+
     def _artifact_ref(
         self,
         api: WandbApi,
@@ -403,9 +505,11 @@ class WandbLoggerAdapter:
         project_name: str,
         run_name: str | None,
         group_name: str | None,
-            config_payload: dict[str, Any],
+        config_payload: dict[str, Any],
+        run_artifact_dir: str,
     ) -> LoggerSession:
         _ = cfg
+        _ = run_artifact_dir
         try:
             import wandb
         except ImportError as exc:
@@ -429,5 +533,7 @@ class WandbLoggerAdapter:
 def register_logger_adapters() -> None:
     if "console" not in LOGGER_ADAPTERS:
         register_logger_adapter("console", ConsoleLoggerAdapter())
+    if "local" not in LOGGER_ADAPTERS:
+        register_logger_adapter("local", LocalLoggerAdapter())
     if "wandb" not in LOGGER_ADAPTERS:
         register_logger_adapter("wandb", WandbLoggerAdapter())

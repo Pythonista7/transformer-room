@@ -440,5 +440,5 @@ Run tests:
 
 - Keep experiment files in `experiments/baseline/hyperparam_sweeps/`.
 - Keep vocab files under `src/vocabs/`.
-- Use `console` logging while iterating quickly; switch to `wandb` when needed.
+- Use `console` logging while iterating quickly, `local` when you want rich metrics without remote logging, and `wandb` for experiment tracking.
 - Prefer changing config first; only add new adapters when config-only changes cannot express what you need.

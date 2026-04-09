@@ -396,7 +396,7 @@ class LoggingConfig:
     - `enable_artifact_io=False` disables remote artifact save/restore operations.
       Local file writes still depend on `run.persist_local_artifacts`.
     """
-    provider: Literal["console", "wandb"] = "console"
+    provider: Literal["console", "local", "wandb"] = "console"
     enable_artifact_io: bool = True
     wandb: WandbMetricsConfig = field(default_factory=WandbMetricsConfig)
 
@@ -720,10 +720,10 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             "split.name='pre_split' is only supported when train.data_mode='streaming'."
         )
 
-    if config.logging.provider not in {"console", "wandb"}:
+    if config.logging.provider not in {"console", "local", "wandb"}:
         raise ValueError(
             f"Unsupported logging.provider '{config.logging.provider}'. "
-            "Expected one of: console, wandb."
+            "Expected one of: console, local, wandb."
         )
     if not isinstance(config.logging.enable_artifact_io, bool):
         raise ValueError("logging.enable_artifact_io must be a bool.")
@@ -736,7 +736,7 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
 
     wandb_cfg = config.logging.wandb
     bpb_metrics_enabled = (
-        config.logging.provider == "wandb" and wandb_cfg.enable_bits_per_byte
+        config.logging.provider in {"wandb", "local"} and wandb_cfg.enable_bits_per_byte
     )
     if wandb_cfg.log_every_n_steps <= 0:
         raise ValueError("logging.wandb.log_every_n_steps must be > 0.")
