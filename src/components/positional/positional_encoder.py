@@ -2,11 +2,16 @@ import torch.nn as nn
 import torch
 
 class SinusoidalPositionalEncoder(nn.Module):
-  def __init__(self, d_model , **kwargs) -> None:
+  def __init__(self, d_model ,max_seq_len=1024, **kwargs) -> None:
     super().__init__( **kwargs)
     self.d_model = d_model
+    cache = self.get_positional_encoding(max_seq_len, device='cpu', dtype=torch.float32)
     # Growable runtime cache. Keep it out of checkpoints to avoid shape mismatch on restore.
-    self.register_buffer('pos_enc_cache', torch.empty((0, d_model)), persistent=False)
+    self.register_buffer(
+      'pos_enc_cache',
+      cache, # torch.empty((0, d_model)), 
+      persistent=False
+    )
 
 
   def get_positional_encoding(self,T,device='cpu',dtype=torch.float32):
@@ -81,6 +86,8 @@ class SinusoidalPositionalEncoder(nn.Module):
 
   def forward(self,X):
     input_seq_len = X.shape[1]
-    self._ensure_cache(input_seq_len, device=X.device, dtype=X.dtype)
+    # Note: skipping ensure cache for now since we only process upto max-seq-len for now.
+    # This helps avoid graph-breaks which are expensive at train time.
+    # self._ensure_cache(input_seq_len, device=X.device, dtype=X.dtype)
     pos_enc = self.pos_enc_cache[:input_seq_len,:]
     return X + pos_enc.unsqueeze(0)

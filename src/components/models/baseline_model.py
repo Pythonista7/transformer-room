@@ -16,6 +16,7 @@ class BaselineModel(nn.Module):
         layers,
         d_model,
         n_heads,
+        seq_len: int,
         pad_id=None,
         dropout=0.1,
         attention_impl: str = "basic",
@@ -35,10 +36,10 @@ class BaselineModel(nn.Module):
         self.embedding_layer = EmbeddingLayer(
             key_size=vocab_size, embedding_size=d_model, pad_idx=pad_id
         )
-        self.pos_encoding = PositionalEncoder(d_model=d_model) 
+        self.pos_encoding = PositionalEncoder(d_model=d_model,max_seq_len=seq_len) 
         
         self.layer_count = layers
-        self.d_model = d_model
+        self.d_model = d_model  
         self.n_heads = n_heads
         self.dropout = dropout
         self.attention_impl = attention_impl

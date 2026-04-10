@@ -30,6 +30,7 @@ class BaselineDecoderModelAdapter:
     ) -> torch.nn.Module:
         return BaselineModel(
             vocab_size=vocab.vocab_size,
+            seq_len=cfg.seq_len,
             d_model=cfg.d_model,
             n_heads=cfg.n_heads,
             layers=cfg.layers,
@@ -38,6 +39,7 @@ class BaselineDecoderModelAdapter:
             pad_id=special.pad_id,
             norm_placement=cfg.norm_placement,
             enable_weight_tying=cfg.enable_weight_tying,
+            
         )
 
 
