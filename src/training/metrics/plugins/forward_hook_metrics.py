@@ -261,7 +261,8 @@ def register_forward_metric_hooks(
         layer = dec_layers[layer_idx]
         label_tuple = tuple(labels)
         collector.register_attention_layer(layer_idx, label_tuple)
-
+        
+        @torch._dynamo.disable
         def activation_hook(_module, _inputs, output, label_tuple=label_tuple):
             if not collector.capture_activation_norms:
                 return
