@@ -281,7 +281,7 @@ def register_forward_metric_hooks(
 
         if enable_attention_entropy:
             latest_all_projs: torch.Tensor | None = None
-
+            @torch._dynamo.disable
             def packed_proj_hook(
                 _module,
                 _inputs,
@@ -290,6 +290,7 @@ def register_forward_metric_hooks(
                 nonlocal latest_all_projs
                 latest_all_projs = output if torch.is_tensor(output) else None
 
+            @torch._dynamo.disable
             def entropy_hook(
                 module,
                 _inputs,
