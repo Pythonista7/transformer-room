@@ -147,6 +147,7 @@ class BaselineDecoderConfig:
     - `norm_placement` selects pre-norm vs post-norm block layout.
     - `enable_weight_tying` ties output projection weights to token embeddings.
     """
+    seq_len:int = 1024
     name: Literal["baseline_decoder"] = "baseline_decoder"
     d_model: int = 128
     n_heads: int = 8
@@ -155,6 +156,7 @@ class BaselineDecoderConfig:
     attention_impl: AttentionImplementation = "basic"
     norm_placement: NormPlacement = "post"
     enable_weight_tying: bool = False
+    
 
 @dataclass(slots=True)
 class ACEveryNDecoderConfig:
