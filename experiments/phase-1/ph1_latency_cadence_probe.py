@@ -32,13 +32,13 @@ SEED = 47
 
 # Model params
 D_MODEL = 768
-N_HEADS = 12
-N_LAYERS = 12
+N_HEADS = 1
+N_LAYERS = 1
 
 # Training params
 LEARNING_RATE = 1e-3
 LR_END_FACTOR = 0.1
-SEQ_LEN = 1024
+SEQ_LEN = 128
 STRIDE = SEQ_LEN
 
 # For the latency probe we keep micro-batch size close to the phase-1 baseline
@@ -50,9 +50,10 @@ TORCH_COMPILE_MEM_BUDGET = 0.75
 
 # Logging / dataset
 WANDB_PROJECT_NAME = "transformer-room-baseline"
-WANDB_GROUP_NAME = "phase1/stage-1/latency-cadence-probe-test-2"
+EXP_NAME = "test-8-dynamo-disabled-attn-entropy-full-graph"
+WANDB_GROUP_NAME = "phase1/stage-1/latency-cadence-probe-"+EXP_NAME
 WANDB_RUN_NAME = (
-    f"baseline-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}-latency-probe"
+    f"baseline-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}-latency-probe-{EXP_NAME}"
 )
 DATASET_NAME = "HuggingFaceFW/fineweb"
 DATASET_CONFIG = "sample-10BT"
@@ -121,6 +122,7 @@ def _build_base_config(max_train_steps: int) -> ExperimentConfig:
             use_torch_compile=True,
             activation_memory_budget=TORCH_COMPILE_MEM_BUDGET,
             compile_warmup_steps=3,
+            torch_compile_fullgraph=True
         ),
         dataset=HFTextDatasetConfig(
             dataset_name=DATASET_NAME,
@@ -172,7 +174,7 @@ def _build_base_config(max_train_steps: int) -> ExperimentConfig:
         ),
         split=PreSplitConfig(),
         logging=LoggingConfig(
-            provider="wandb",
+            provider="local",
             enable_artifact_io=False,
             wandb=WandbMetricsConfig(
                 enable_train_loss_vs_tokens=True,
