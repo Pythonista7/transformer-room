@@ -39,8 +39,8 @@ STRIDE = SEQ_LEN
 
 # WANDB
 WANDB_PROJECT_NAME = "transformer-room-baseline"
-WANDB_GROUP_NAME = "phase1/stage-1"
-WANDB_RUN_NAME = f"baseline-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}"
+WANDB_GROUP_NAME = "phase1/stage-1/baseline"
+WANDB_RUN_NAME = f"A100-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}"
 
 
 # Dataset
@@ -56,7 +56,7 @@ DATASET_CONFIG = "sample-10BT"
 # While llama recommends a 1000:1 for token:param, which lands us around 125B which is insane! 
 # That would be 240k steps, for 125B tokens !
 
-MAX_TRAIN_STEPS = 5_000
+MAX_TRAIN_STEPS = 1_000
 
 # On an 40GB A100, including torch.compile and final model upload, the train time for B=128 @ 1k steps was 34mins
 # The GPU utilization could be better with bigger batches but this is the ball park range.
@@ -159,7 +159,7 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
                 diagnostics_every_n_steps= 100, # default for diagnostics
                 layer_grad_norms_every_n_steps= 500,
                 parameter_optimizer_norms_every_n_steps=500, # for update/weight ratio freq
-                attention_entropy_every_n_steps=250,
+                attention_entropy_every_n_steps=500,
 
             ),
         ),
