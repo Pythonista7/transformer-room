@@ -6,7 +6,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
+
+import src.utils.run_and_shutdown as run_and_shutdown
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -172,6 +175,78 @@ def post(url, *, headers, json, timeout):
 
 
 class RunAndShutdownWrapperTests(unittest.TestCase):
+    def _make_tee(self) -> run_and_shutdown._Tee:
+        log_file = tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False)
+        self.addCleanup(lambda: Path(log_file.name).unlink(missing_ok=True))
+        self.addCleanup(log_file.close)
+        return run_and_shutdown._Tee(log_file)
+
+    def test_confirm_shutdown_or_abort_aborts_on_abort_input(self) -> None:
+        tee = self._make_tee()
+        fake_stdin = mock.Mock()
+        fake_stdin.isatty.return_value = True
+        fake_stdin.readline.return_value = "  AbOrT  \n"
+
+        with (
+            mock.patch.object(run_and_shutdown.sys, "stdin", fake_stdin),
+            mock.patch.object(
+                run_and_shutdown.select,
+                "select",
+                return_value=([fake_stdin], [], []),
+            ),
+        ):
+            result = run_and_shutdown._confirm_shutdown_or_abort(
+                tee=tee,
+                window_seconds=30,
+            )
+
+        self.assertFalse(result["proceed"])
+        self.assertTrue(result["aborted_by_user"])
+        self.assertEqual(result["interrupt_input"], "AbOrT")
+        self.assertTrue(result["interrupt_prompt_shown"])
+        self.assertEqual(result["skip_reason"], "aborted_by_user")
+
+    def test_confirm_shutdown_or_abort_times_out_and_proceeds(self) -> None:
+        tee = self._make_tee()
+        fake_stdin = mock.Mock()
+        fake_stdin.isatty.return_value = True
+
+        with (
+            mock.patch.object(run_and_shutdown.sys, "stdin", fake_stdin),
+            mock.patch.object(
+                run_and_shutdown.select,
+                "select",
+                return_value=([], [], []),
+            ),
+        ):
+            result = run_and_shutdown._confirm_shutdown_or_abort(
+                tee=tee,
+                window_seconds=30,
+            )
+
+        self.assertTrue(result["proceed"])
+        self.assertFalse(result["aborted_by_user"])
+        self.assertIsNone(result["interrupt_input"])
+        self.assertTrue(result["interrupt_prompt_shown"])
+        self.assertEqual(result["skip_reason"], "interrupt_timeout_auto_proceed")
+
+    def test_confirm_shutdown_or_abort_non_tty_auto_proceeds(self) -> None:
+        tee = self._make_tee()
+        fake_stdin = mock.Mock()
+        fake_stdin.isatty.return_value = False
+
+        with mock.patch.object(run_and_shutdown.sys, "stdin", fake_stdin):
+            result = run_and_shutdown._confirm_shutdown_or_abort(
+                tee=tee,
+                window_seconds=30,
+            )
+
+        self.assertTrue(result["proceed"])
+        self.assertFalse(result["aborted_by_user"])
+        self.assertFalse(result["interrupt_prompt_shown"])
+        self.assertIsNone(result["interrupt_input"])
+        self.assertEqual(result["skip_reason"], "no_tty_auto_proceed")
+
     def _run_wrapper(
         self,
         *,
@@ -324,6 +399,67 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
             self.assertTrue(metadata["shutdown"]["attempted"])
             self.assertEqual(metadata["shutdown"]["return_code"], 0)
             self.assertEqual(metadata["shutdown"]["provider"], "vast_api")
+            self.assertEqual(metadata["shutdown"]["interrupt_window_sec"], 30)
+            self.assertFalse(metadata["shutdown"]["interrupt_prompt_shown"])
+            self.assertFalse(metadata["shutdown"]["aborted_by_user"])
+            self.assertEqual(metadata["shutdown"]["skip_reason"], "no_tty_auto_proceed")
+
+    def test_shutdown_abort_input_skips_vast_shutdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            log_dir = tmp_path / "logs"
+            stub_dir = tmp_path / "stubs"
+            marker_path = tmp_path / "vast_stop.json"
+            _write_requests_stub(stub_dir)
+
+            cmd = [
+                sys.executable,
+                str(WRAPPER_PATH),
+                "--provider",
+                "vast",
+                "--log-dir",
+                str(log_dir),
+                "--run-name",
+                "wrapper-test",
+                "--",
+                sys.executable,
+                "-c",
+                "print('done')",
+            ]
+            env = dict(os.environ)
+            env["WANDB_API_KEY"] = "dummy-test-key"
+            env["CONTAINER_ID"] = "12345"
+            env["CONTAINER_API_KEY"] = "vast-test-key"
+            env["VAST_TEST_MARKER"] = str(marker_path)
+            env["PYTHONPATH"] = str(stub_dir)
+
+            master_fd, slave_fd = os.openpty()
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=slave_fd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                )
+                os.close(slave_fd)
+                os.write(master_fd, b"abort\n")
+                stdout, stderr = process.communicate(timeout=20)
+            finally:
+                os.close(master_fd)
+
+            self.assertEqual(process.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")
+            self.assertFalse(marker_path.exists(), "shutdown call should be skipped")
+
+            metadata_path = _single_file(log_dir, "*.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertFalse(metadata["shutdown"]["attempted"])
+            self.assertTrue(metadata["shutdown"]["aborted_by_user"])
+            self.assertTrue(metadata["shutdown"]["interrupt_prompt_shown"])
+            self.assertEqual(metadata["shutdown"]["interrupt_input"], "abort")
+            self.assertEqual(metadata["shutdown"]["skip_reason"], "aborted_by_user")
+            self.assertIsNone(metadata["shutdown"]["return_code"])
 
     def test_shutdown_runs_after_non_zero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -701,6 +837,7 @@ class RunAndShutdownWrapperTests(unittest.TestCase):
                 child_exit_code=0,
                 log_dir=log_dir,
                 wrapper_env={"TNR_API_TOKEN": "thunder-test-key"},
+                unset_env_keys=["TNR_INSTANCE_ID"],
                 pythonpath_entries=[stub_dir],
             )
 

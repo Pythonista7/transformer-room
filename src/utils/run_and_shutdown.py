@@ -20,6 +20,7 @@ import getpass
 import json
 import os
 import re
+import select
 import shlex
 import signal
 import socket
@@ -49,6 +50,7 @@ from src.utils.thunder import (
 
 
 DEFAULT_PYTORCH_ALLOC_CONF = "expandable_segments:True"
+DEFAULT_SHUTDOWN_INTERRUPT_WINDOW_SEC = 30
 
 
 def _utc_now() -> datetime:
@@ -209,6 +211,80 @@ def _prompt_for_secret(*, env_key: str, tee: _Tee) -> str:
         print(f"{env_key} cannot be empty.", file=sys.stderr)
 
 
+def _confirm_shutdown_or_abort(
+    *,
+    tee: _Tee,
+    window_seconds: int = DEFAULT_SHUTDOWN_INTERRUPT_WINDOW_SEC,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "proceed": True,
+        "interrupt_window_sec": int(window_seconds),
+        "interrupt_prompt_shown": False,
+        "interrupt_input": None,
+        "aborted_by_user": False,
+        "skip_reason": None,
+    }
+
+    if window_seconds <= 0:
+        result["skip_reason"] = "interrupt_window_disabled"
+        return result
+
+    if not sys.stdin.isatty():
+        result["skip_reason"] = "no_tty_auto_proceed"
+        return result
+
+    result["interrupt_prompt_shown"] = True
+    tee.write_message(
+        "[wrapper] shutdown guard active: type 'abort' + Enter within "
+        f"{window_seconds}s to skip shutdown and keep instance running."
+    )
+
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], float(window_seconds))
+    except Exception as exc:  # pragma: no cover - defensive path.
+        result["skip_reason"] = f"interrupt_wait_error:{exc}"
+        tee.write_message(
+            f"[wrapper] shutdown guard wait failed ({exc}); proceeding with shutdown."
+        )
+        return result
+
+    if not ready:
+        result["skip_reason"] = "interrupt_timeout_auto_proceed"
+        tee.write_message("[wrapper] shutdown guard timed out; proceeding with shutdown.")
+        return result
+
+    try:
+        raw_input = sys.stdin.readline()
+    except Exception as exc:  # pragma: no cover - defensive path.
+        result["skip_reason"] = f"interrupt_read_error:{exc}"
+        tee.write_message(
+            f"[wrapper] shutdown guard input read failed ({exc}); proceeding with shutdown."
+        )
+        return result
+
+    if raw_input == "":
+        result["skip_reason"] = "interrupt_eof_auto_proceed"
+        tee.write_message(
+            "[wrapper] shutdown guard received EOF; proceeding with shutdown."
+        )
+        return result
+
+    entered = raw_input.strip()
+    result["interrupt_input"] = entered
+    if entered.lower() == "abort":
+        result["proceed"] = False
+        result["aborted_by_user"] = True
+        result["skip_reason"] = "aborted_by_user"
+        tee.write_message("[wrapper] shutdown aborted by user request.")
+        return result
+
+    result["skip_reason"] = "interrupt_non_abort_input_auto_proceed"
+    tee.write_message(
+        f"[wrapper] shutdown guard received '{entered}' (not 'abort'); proceeding."
+    )
+    return result
+
+
 def _prepare_child_env(
     *,
     provider: str,
@@ -304,7 +380,12 @@ def _prepare_child_env(
         }
     )
 
-    thunder_instance_id, thunder_instance_id_source = resolve_thunder_instance_id(env)
+    try:
+        thunder_instance_id, thunder_instance_id_source = resolve_thunder_instance_id(env)
+    except Exception as exc:
+        raise RuntimeError(
+            f"TNR_INSTANCE_ID is not set and could not be resolved automatically: {exc}"
+        ) from exc
     env_summary["thunder_instance_id"] = thunder_instance_id
     env_summary["thunder_instance_id_source"] = thunder_instance_id_source
     thunder_instance_name, thunder_instance_name_source = resolve_thunder_instance_name(env)
@@ -365,6 +446,11 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "provider": "vast_api",
                 "attempted": False,
+                "aborted_by_user": False,
+                "interrupt_window_sec": DEFAULT_SHUTDOWN_INTERRUPT_WINDOW_SEC,
+                "interrupt_prompt_shown": False,
+                "interrupt_input": None,
+                "skip_reason": None,
                 "start_time_utc": None,
                 "end_time_utc": None,
                 "duration_sec": None,
@@ -378,6 +464,11 @@ def main(argv: list[str] | None = None) -> int:
             else {
                 "provider": "thunder_api",
                 "attempted": False,
+                "aborted_by_user": False,
+                "interrupt_window_sec": DEFAULT_SHUTDOWN_INTERRUPT_WINDOW_SEC,
+                "interrupt_prompt_shown": False,
+                "interrupt_input": None,
+                "skip_reason": None,
                 "start_time_utc": None,
                 "end_time_utc": None,
                 "duration_sec": None,
@@ -501,69 +592,91 @@ def main(argv: list[str] | None = None) -> int:
                 _write_metadata(metadata_path, metadata)
 
                 shutdown_meta = metadata["shutdown"]
-                shutdown_meta["attempted"] = True
-                shutdown_start = _utc_now()
-                shutdown_meta["start_time_utc"] = _utc_iso(shutdown_start)
-                tee.write_message(f"[wrapper] running shutdown step | provider={provider}")
-                if provider == "vast":
-                    tee.write_message(
-                        f"[wrapper] vast_instance_id={shutdown_meta['vast_instance_id']}"
-                    )
-                else:
-                    tee.write_message(
-                        "[wrapper] "
-                        f"thunder_instance_id={shutdown_meta['thunder_instance_id']}"
-                    )
+                interrupt_result = _confirm_shutdown_or_abort(
+                    tee=tee,
+                    window_seconds=DEFAULT_SHUTDOWN_INTERRUPT_WINDOW_SEC,
+                )
+                shutdown_meta["interrupt_window_sec"] = interrupt_result[
+                    "interrupt_window_sec"
+                ]
+                shutdown_meta["interrupt_prompt_shown"] = interrupt_result[
+                    "interrupt_prompt_shown"
+                ]
+                shutdown_meta["interrupt_input"] = interrupt_result["interrupt_input"]
+                shutdown_meta["aborted_by_user"] = interrupt_result["aborted_by_user"]
+                shutdown_meta["skip_reason"] = interrupt_result["skip_reason"]
+                _write_metadata(metadata_path, metadata)
 
-                try:
-                    if provider == "vast":
-                        response = stop_vast_instance(
-                            instance_id=int(shutdown_meta["vast_instance_id"]),
-                            api_key=str(
-                                child_env.get("CONTAINER_API_KEY")
-                                or child_env.get("VAST_API_KEY")
-                                or ""
-                            ),
-                        )
-                    else:
-                        response = snapshot_and_delete_thunder_instance(
-                            instance_id=str(shutdown_meta["thunder_instance_id"]),
-                            api_key=str(child_env.get("TNR_API_TOKEN") or ""),
-                            create_snapshot=bool(shutdown_meta.get("create_snapshot")),
-                            instance_name=(
-                                str(shutdown_meta["thunder_instance_name"])
-                                if shutdown_meta["thunder_instance_name"]
-                                else None
-                            ),
-                        )
-                    shutdown_meta["return_code"] = 0
-                    shutdown_meta["response"] = response
-                    if provider == "vast":
-                        tee.write_message("[wrapper] Vast stop_instance completed")
-                        tee.write_message(
-                            "[shutdown][vast] " + json.dumps(response, sort_keys=True)
-                        )
-                    else:
-                        tee.write_message(
-                            "[wrapper] Thunder snapshot_and_delete completed"
-                        )
-                        tee.write_message(
-                            "[shutdown][thunder] " + json.dumps(response, sort_keys=True)
-                        )
-                except Exception as exc:  # pragma: no cover - defensive path.
-                    shutdown_meta["error"] = str(exc)
-                    shutdown_meta["error_traceback"] = traceback.format_exc()
-                    tee.write_message(f"[wrapper] shutdown step failed: {exc}")
-                    tee.write_message("[wrapper] shutdown traceback follows:")
-                    tee.write_message(shutdown_meta["error_traceback"])
-                finally:
-                    shutdown_end = _utc_now()
-                    shutdown_meta["end_time_utc"] = _utc_iso(shutdown_end)
-                    shutdown_meta["duration_sec"] = round(
-                        (shutdown_end - shutdown_start).total_seconds(),
-                        6,
+                if not interrupt_result["proceed"]:
+                    tee.write_message("[wrapper] shutdown step skipped; instance left running.")
+                else:
+                    shutdown_meta["attempted"] = True
+                    shutdown_start = _utc_now()
+                    shutdown_meta["start_time_utc"] = _utc_iso(shutdown_start)
+                    tee.write_message(
+                        f"[wrapper] running shutdown step | provider={provider}"
                     )
-                    _write_metadata(metadata_path, metadata)
+                    if provider == "vast":
+                        tee.write_message(
+                            f"[wrapper] vast_instance_id={shutdown_meta['vast_instance_id']}"
+                        )
+                    else:
+                        tee.write_message(
+                            "[wrapper] "
+                            f"thunder_instance_id={shutdown_meta['thunder_instance_id']}"
+                        )
+
+                    try:
+                        if provider == "vast":
+                            response = stop_vast_instance(
+                                instance_id=int(shutdown_meta["vast_instance_id"]),
+                                api_key=str(
+                                    child_env.get("CONTAINER_API_KEY")
+                                    or child_env.get("VAST_API_KEY")
+                                    or ""
+                                ),
+                            )
+                        else:
+                            response = snapshot_and_delete_thunder_instance(
+                                instance_id=str(shutdown_meta["thunder_instance_id"]),
+                                api_key=str(child_env.get("TNR_API_TOKEN") or ""),
+                                create_snapshot=bool(
+                                    shutdown_meta.get("create_snapshot")
+                                ),
+                                instance_name=(
+                                    str(shutdown_meta["thunder_instance_name"])
+                                    if shutdown_meta["thunder_instance_name"]
+                                    else None
+                                ),
+                            )
+                        shutdown_meta["return_code"] = 0
+                        shutdown_meta["response"] = response
+                        if provider == "vast":
+                            tee.write_message("[wrapper] Vast stop_instance completed")
+                            tee.write_message(
+                                "[shutdown][vast] " + json.dumps(response, sort_keys=True)
+                            )
+                        else:
+                            tee.write_message(
+                                "[wrapper] Thunder snapshot_and_delete completed"
+                            )
+                            tee.write_message(
+                                "[shutdown][thunder] " + json.dumps(response, sort_keys=True)
+                            )
+                    except Exception as exc:  # pragma: no cover - defensive path.
+                        shutdown_meta["error"] = str(exc)
+                        shutdown_meta["error_traceback"] = traceback.format_exc()
+                        tee.write_message(f"[wrapper] shutdown step failed: {exc}")
+                        tee.write_message("[wrapper] shutdown traceback follows:")
+                        tee.write_message(shutdown_meta["error_traceback"])
+                    finally:
+                        shutdown_end = _utc_now()
+                        shutdown_meta["end_time_utc"] = _utc_iso(shutdown_end)
+                        shutdown_meta["duration_sec"] = round(
+                            (shutdown_end - shutdown_start).total_seconds(),
+                            6,
+                        )
+                        _write_metadata(metadata_path, metadata)
 
             if metadata["shutdown"].get("error"):
                 return child_return_code if child_return_code != 0 else 1
