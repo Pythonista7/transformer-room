@@ -314,6 +314,119 @@ class WandbLoggerAdapterTests(unittest.TestCase):
         )
         self.assertIn("Perplexity/custom_metric", logged_metrics)
 
+    def test_log_prefers_sectioned_key_when_raw_and_sectioned_metrics_collide(self) -> None:
+        fake_wandb, fake_run, _store, _init_calls = self._make_fake_wandb()
+        adapter = WandbLoggerAdapter()
+
+        original_module = sys.modules.get("wandb")
+        sys.modules["wandb"] = fake_wandb
+        try:
+            session = adapter.start(
+                cfg=LoggingConfig(provider="wandb"),
+                project_name="transformer-room-baseline",
+                run_name="lr-run",
+                group_name=None,
+                config_payload={},
+                run_artifact_dir=tempfile.gettempdir(),
+            )
+            session.log(
+                {
+                    "avg_forward_pass_time_ms_epoch": 10.0,
+                    "Timing/avg_forward_pass_time_ms_epoch": 11.0,
+                },
+                step=10,
+            )
+            session.close()
+        finally:
+            if original_module is None:
+                sys.modules.pop("wandb", None)
+            else:
+                sys.modules["wandb"] = original_module
+
+        self.assertEqual(len(fake_run.logged_metrics), 1)
+        _step, logged_metrics = fake_run.logged_metrics[0]
+        self.assertEqual(
+            logged_metrics,
+            {"Timing/avg_forward_pass_time_ms_epoch": 11.0},
+        )
+
+    def test_log_keeps_first_explicit_section_when_sectioned_metrics_collide(self) -> None:
+        fake_wandb, fake_run, _store, _init_calls = self._make_fake_wandb()
+        adapter = WandbLoggerAdapter()
+
+        original_module = sys.modules.get("wandb")
+        sys.modules["wandb"] = fake_wandb
+        try:
+            session = adapter.start(
+                cfg=LoggingConfig(provider="wandb"),
+                project_name="transformer-room-baseline",
+                run_name="lr-run",
+                group_name=None,
+                config_payload={},
+                run_artifact_dir=tempfile.gettempdir(),
+            )
+            session.log(
+                {
+                    "Timing/avg_forward_pass_time_ms_epoch": 11.0,
+                    "Custom Timing/avg_forward_pass_time_ms_epoch": 12.0,
+                },
+                step=10,
+            )
+            session.close()
+        finally:
+            if original_module is None:
+                sys.modules.pop("wandb", None)
+            else:
+                sys.modules["wandb"] = original_module
+
+        self.assertEqual(len(fake_run.logged_metrics), 1)
+        _step, logged_metrics = fake_run.logged_metrics[0]
+        self.assertEqual(
+            logged_metrics,
+            {"Timing/avg_forward_pass_time_ms_epoch": 11.0},
+        )
+
+    def test_log_keeps_non_colliding_metrics(self) -> None:
+        fake_wandb, fake_run, _store, _init_calls = self._make_fake_wandb()
+        adapter = WandbLoggerAdapter()
+
+        original_module = sys.modules.get("wandb")
+        sys.modules["wandb"] = fake_wandb
+        try:
+            session = adapter.start(
+                cfg=LoggingConfig(provider="wandb"),
+                project_name="transformer-room-baseline",
+                run_name="lr-run",
+                group_name=None,
+                config_payload={},
+                run_artifact_dir=tempfile.gettempdir(),
+            )
+            session.log(
+                {
+                    "train_loss_step": 1.5,
+                    "Perplexity/custom_metric": 8.0,
+                    "avg_forward_pass_time_ms_epoch": 9.0,
+                },
+                step=10,
+            )
+            session.close()
+        finally:
+            if original_module is None:
+                sys.modules.pop("wandb", None)
+            else:
+                sys.modules["wandb"] = original_module
+
+        self.assertEqual(len(fake_run.logged_metrics), 1)
+        _step, logged_metrics = fake_run.logged_metrics[0]
+        self.assertEqual(
+            logged_metrics,
+            {
+                "Loss Curves/train_loss_step": 1.5,
+                "Perplexity/custom_metric": 8.0,
+                "Timing/avg_forward_pass_time_ms_epoch": 9.0,
+            },
+        )
+
     def test_checkpoint_save_prunes_older_versions(self) -> None:
         fake_wandb, fake_run, store, _init_calls = self._make_fake_wandb()
         adapter = WandbLoggerAdapter()
