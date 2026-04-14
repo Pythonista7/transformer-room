@@ -27,7 +27,7 @@ N_LAYERS = 12
 
 # Training Params
 # EPOCHS = 1 we will use MAX_TRAIN_STEPS instead since the dataset is huge.
-EFFECTIVE_BATCH_SZ = 512
+EFFECTIVE_BATCH_SZ = 480
 MICRO_BATCH_SZ = 96
 TORCH_COMPILE_MEM_BUDGET = 0.75
 LEARNING_RATE = 1e-3
