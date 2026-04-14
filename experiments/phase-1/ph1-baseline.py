@@ -27,8 +27,9 @@ N_LAYERS = 12
 
 # Training Params
 # EPOCHS = 1 we will use MAX_TRAIN_STEPS instead since the dataset is huge.
-EFFECTIVE_BATCH_SZ = 480
-MICRO_BATCH_SZ = 96
+EFFECTIVE_BATCH_SZ = 512
+MICRO_BATCH_SZ = 64
+ACCUMULATION_STEPS = EFFECTIVE_BATCH_SZ // MICRO_BATCH_SZ
 TORCH_COMPILE_MEM_BUDGET = 0.75
 LEARNING_RATE = 1e-3
 LR_END_FACTOR = 0.1 
@@ -119,8 +120,8 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             ),
             effective_batch_size=EFFECTIVE_BATCH_SZ,
             micro_batch_size= MICRO_BATCH_SZ,
-            accumulation_steps= EFFECTIVE_BATCH_SZ/MICRO_BATCH_SZ,
-            lr_scaling= "none" if EFFECTIVE_BATCH_SZ/MICRO_BATCH_SZ == 1 else "sqrt",
+            accumulation_steps= ACCUMULATION_STEPS,
+            lr_scaling= "none" if ACCUMULATION_STEPS == 1 else "sqrt",
             seq_len=SEQ_LEN,
             stride=STRIDE,
             data_mode="streaming",
