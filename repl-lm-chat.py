@@ -254,6 +254,30 @@ def safe_float(value: Any, key: str) -> float:
         raise ValueError(f"Config key '{key}' must be float-like, got {value!r}") from exc
 
 
+def resolve_model_seq_len(config: dict[str, Any]) -> int:
+    candidates: list[tuple[str, Any]] = [
+        ("seq_len", config.get("seq_len")),
+        ("training_seq_len", config.get("training_seq_len")),
+    ]
+
+    model_cfg = config.get("model")
+    if isinstance(model_cfg, dict):
+        candidates.append(("model.seq_len", model_cfg.get("seq_len")))
+
+    train_cfg = config.get("train")
+    if isinstance(train_cfg, dict):
+        candidates.append(("train.seq_len", train_cfg.get("seq_len")))
+
+    for key, value in candidates:
+        if value is not None:
+            return safe_int(value, key)
+
+    raise ValueError(
+        "Missing model sequence length in config. Expected one of: "
+        "seq_len, training_seq_len, model.seq_len, or train.seq_len."
+    )
+
+
 def resolve_vocab_and_special_ids(
     config: dict[str, Any],
 ) -> tuple[int, int, int, int | None, int | None, int | None]:
@@ -455,10 +479,13 @@ def build_runtime_config_from_run_metadata(
 ) -> dict[str, Any]:
     model_cfg = run_config.get("model")
     tokenizer_cfg = run_config.get("tokenizer")
+    train_cfg = run_config.get("train")
     if not isinstance(model_cfg, dict):
         raise ValueError("run_config.json is missing a 'model' object.")
     if not isinstance(tokenizer_cfg, dict):
         raise ValueError("run_config.json is missing a 'tokenizer' object.")
+    if train_cfg is not None and not isinstance(train_cfg, dict):
+        raise ValueError("run_config.json has invalid 'train' object.")
 
     model_name = str(model_cfg.get("name", inference_config.get("model_name", ""))).strip()
     if model_name and model_name != "baseline_decoder":
@@ -474,6 +501,15 @@ def build_runtime_config_from_run_metadata(
         )
 
     runtime_config = dict(inference_config)
+    seq_len_value = (
+        model_cfg.get("seq_len")
+        if model_cfg.get("seq_len") is not None
+        else (
+            train_cfg.get("seq_len")
+            if isinstance(train_cfg, dict) and train_cfg.get("seq_len") is not None
+            else inference_config.get("training_seq_len")
+        )
+    )
     runtime_config.update(
         {
             "dropout": safe_float(model_cfg.get("dropout", 0.1), "dropout"),
@@ -494,6 +530,7 @@ def build_runtime_config_from_run_metadata(
             "tokenizer_trust_remote_code": bool(
                 tokenizer_cfg.get("trust_remote_code", False)
             ),
+            "seq_len": safe_int(seq_len_value, "seq_len"),
             "model_name": model_name or "baseline_decoder",
             "tokenizer_name": tokenizer_name or "hf_pretrained",
         }
@@ -563,6 +600,7 @@ def load_model_and_tokenizer_from_wandb(args: argparse.Namespace) -> tuple[
         d_model=safe_int(runtime_config["d_model"], "d_model"),
         n_heads=safe_int(runtime_config["n_heads"], "n_heads"),
         layers=safe_int(runtime_config["layers"], "layers"),
+        seq_len=resolve_model_seq_len(runtime_config),
         dropout=safe_float(runtime_config.get("dropout", 0.1), "dropout"),
         attention_impl=str(runtime_config.get("attention_impl", "basic")),
         norm_placement=str(runtime_config.get("norm_placement", "post")),
@@ -794,6 +832,7 @@ def load_model_and_tokenizer_from_local(args: argparse.Namespace) -> tuple[
         d_model=safe_int(config["d_model"], "d_model"),
         n_heads=safe_int(config["n_heads"], "n_heads"),
         layers=safe_int(config["layers"], "layers"),
+        seq_len=resolve_model_seq_len(config),
         attention_impl=str(config.get("attention_impl", "basic")),
         pad_id=pad_id,
     )
