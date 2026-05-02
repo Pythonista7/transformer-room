@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
@@ -72,8 +73,7 @@ class HFTextDatasetConfig:
     - `dataset_name`: HF dataset path/name passed to `load_dataset`.
     - `dataset_config`: optional HF config/subset name.
     - `split`: training split name.
-    - `validation_split`: optional validation split name.
-      Required when `train.run_validation=True` in streaming mode.
+    - `validation_split`: optional validation split name (legacy/deprecated).
     - `text_field`: row field containing text. If `None`, inferred from sample rows.
     - `shuffle_buffer_size`: streaming shuffle buffer size.
     - `max_rows`: optional row cap. `0` means "no cap".
@@ -86,6 +86,28 @@ class HFTextDatasetConfig:
     text_field: str | None = None
     shuffle_buffer_size: int = 10_000
     max_rows: int = 0
+
+
+@dataclass(slots=True)
+class HFStreamingSourceConfig:
+    """Self-contained HF streaming source configuration."""
+
+    dataset_name: str = ""
+    dataset_config: str | None = None
+    split: str = "train"
+    text_field: str | None = None
+    shuffle_buffer_size: int = 10_000
+    max_rows: int = 0
+
+
+@dataclass(slots=True)
+class ValSourceConfig:
+    """Named validation source used for source-scoped metric logging."""
+
+    name: str = ""
+    source: HFStreamingSourceConfig = field(default_factory=HFStreamingSourceConfig)
+    # Per-validation-source evaluation cap (in dataloader batches).
+    max_eval_batches: int = 0
 
 
 DatasetConfig = LocalTextDatasetConfig | HFTextDatasetConfig
@@ -235,8 +257,7 @@ class TrainConfig:
       Streaming requires `dataset.name="hf_text"`,
       `tokenizer.name="hf_pretrained"`, and `split.name="pre_split"`.
     - `max_steps`: optional optimizer-step cap. Supported only in streaming mode.
-    - `run_validation`: enable validation. Streaming validation additionally requires
-      `dataset.validation_split`.
+    - `run_validation`: enable validation using resolved validation sources.
 
     Behavior:
     - `effective_batch_size == micro_batch_size * accumulation_steps` is enforced.
@@ -410,6 +431,7 @@ class ExperimentConfig:
     tokenizer: TokenizerConfig
     model: ModelConfig
     train: TrainConfig
+    val_sources: list[ValSourceConfig] = field(default_factory=list)
     split: SplitConfig = field(default_factory=HoldoutSplitConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
@@ -545,6 +567,49 @@ def resolve_special_token_ids(tokenizer_cfg: BPETokenizerConfig) -> SpecialToken
         base_vocab_size=base_vocab_size,
         num_special_tokens=num_special_tokens,
     )
+
+
+def normalize_validation_source_name(name: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name).strip()).strip("-._").lower()
+    if not normalized:
+        raise ValueError("validation source names must normalize to a non-empty value.")
+    return normalized
+
+
+def _validate_streaming_source_config(
+    source: HFStreamingSourceConfig,
+    *,
+    prefix: str,
+) -> None:
+    if not source.dataset_name.strip():
+        raise ValueError(f"{prefix}.dataset_name must be non-empty.")
+    if not source.split.strip():
+        raise ValueError(f"{prefix}.split must be non-empty.")
+    if source.shuffle_buffer_size <= 0:
+        raise ValueError(f"{prefix}.shuffle_buffer_size must be > 0.")
+    if source.max_rows < 0:
+        raise ValueError(f"{prefix}.max_rows must be >= 0.")
+
+
+def resolve_validation_sources(config: ExperimentConfig) -> list[ValSourceConfig]:
+    if len(config.val_sources) > 0:
+        return [
+            ValSourceConfig(
+                name=val_source.name,
+                source=HFStreamingSourceConfig(
+                    dataset_name=val_source.source.dataset_name,
+                    dataset_config=val_source.source.dataset_config,
+                    split=val_source.source.split,
+                    text_field=val_source.source.text_field,
+                    shuffle_buffer_size=val_source.source.shuffle_buffer_size,
+                    max_rows=val_source.source.max_rows,
+                ),
+                max_eval_batches=val_source.max_eval_batches,
+            )
+            for val_source in config.val_sources
+        ]
+
+    return []
 
 
 def validate_experiment_config(config: ExperimentConfig) -> None:
@@ -686,6 +751,24 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("train.max_steps is only supported in streaming mode.")
     if not isinstance(config.train.run_validation, bool):
         raise ValueError("train.run_validation must be a bool.")
+    normalized_val_source_names: set[str] = set()
+    for idx, val_source in enumerate(config.val_sources):
+        source_prefix = f"val_sources[{idx}]"
+        if not val_source.name.strip():
+            raise ValueError(f"{source_prefix}.name must be non-empty.")
+        normalized_name = normalize_validation_source_name(val_source.name)
+        if normalized_name in normalized_val_source_names:
+            raise ValueError(
+                "val_sources contains duplicate names after normalization: "
+                f"'{normalized_name}'."
+            )
+        normalized_val_source_names.add(normalized_name)
+        _validate_streaming_source_config(
+            val_source.source,
+            prefix=f"{source_prefix}.source",
+        )
+        if val_source.max_eval_batches <= 0:
+            raise ValueError(f"{source_prefix}.max_eval_batches must be > 0.")
 
     if config.split.name == "holdout":
         if not 0 < config.split.train_fraction < 1:
@@ -713,13 +796,21 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             raise ValueError(
                 "train.data_fraction is not supported in streaming mode; use max_steps."
             )
-        if config.train.run_validation and not config.dataset.validation_split:
-            raise ValueError(
-                "Streaming validation requires dataset.validation_split to be set."
-            )
     elif config.split.name != "holdout":
         raise ValueError(
             "split.name='pre_split' is only supported when train.data_mode='streaming'."
+        )
+    resolved_val_sources = resolve_validation_sources(config)
+    for val_source in resolved_val_sources:
+        normalize_validation_source_name(val_source.name)
+    if (
+        config.train.run_validation
+        and config.train.data_mode == "streaming"
+        and len(resolved_val_sources) == 0
+    ):
+        raise ValueError(
+            "Validation is enabled but no validation source was configured. "
+            "Set val_sources with per-source max_eval_batches."
         )
 
     if config.logging.provider not in {"console", "local", "wandb"}:

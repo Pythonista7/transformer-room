@@ -75,11 +75,9 @@ class RunResult:
     global_step: int
     final_train_loss: float
     final_train_bits_per_byte: float
-    final_val_loss: float
-    final_val_perplexity: float
-    final_val_bits_per_byte: float
+    final_val_metrics_by_source: dict[str, dict[str, float]]
     completed_epochs: int
-    epoch_end_validation_ran: bool
+    epoch_end_validation_ran_by_source: dict[str, bool]
 
 
 @dataclass(slots=True)

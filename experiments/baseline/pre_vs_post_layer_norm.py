@@ -658,14 +658,21 @@ def main() -> int:
                 config,
                 extra_metric_plugins=(collector,),
             )
+            primary_val_metrics = next(
+                iter(result.final_val_metrics_by_source.values()),
+                {
+                    "val_loss": float("nan"),
+                    "val_perplexity": float("nan"),
+                },
+            )
             trial_results.append(
                 TrialResult(
                     spec=spec,
                     run_artifact_dir=result.run_artifact_dir,
                     global_step=result.global_step,
                     final_train_loss=result.final_train_loss,
-                    final_val_loss=result.final_val_loss,
-                    final_val_perplexity=result.final_val_perplexity,
+                    final_val_loss=float(primary_val_metrics["val_loss"]),
+                    final_val_perplexity=float(primary_val_metrics["val_perplexity"]),
                     layer_grad_records=list(collector.records),
                 )
             )
@@ -673,8 +680,8 @@ def main() -> int:
                 "Completed variant | "
                 f"run_name={spec.run_name} | "
                 f"run_dir={result.run_artifact_dir} | "
-                f"final_val_loss={result.final_val_loss:.6f} | "
-                f"final_val_ppl={result.final_val_perplexity:.6f} | "
+                f"final_val_loss={float(primary_val_metrics['val_loss']):.6f} | "
+                f"final_val_ppl={float(primary_val_metrics['val_perplexity']):.6f} | "
                 f"layer_grad_points={len(collector.records)}"
             )
         finally:

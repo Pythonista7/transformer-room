@@ -256,6 +256,13 @@ def main() -> int:
         torch.compiler.reset()
         
         run_result = model_pipeline(cfg)
+        primary_val_metrics = next(
+            iter(run_result.final_val_metrics_by_source.values()),
+            {
+                "val_loss": float("nan"),
+                "val_perplexity": float("nan"),
+            },
+        )
         results.append(
             {
                 "variant": variant.key,
@@ -263,8 +270,8 @@ def main() -> int:
                 "budget": variant.activation_memory_budget,
                 "run_dir": run_result.run_artifact_dir,
                 "train_loss": run_result.final_train_loss,
-                "val_loss": run_result.final_val_loss,
-                "val_ppl": run_result.final_val_perplexity,
+                "val_loss": float(primary_val_metrics["val_loss"]),
+                "val_ppl": float(primary_val_metrics["val_perplexity"]),
             }
         )
         print(
@@ -272,8 +279,8 @@ def main() -> int:
             f"variant={variant.key} | "
             f"run_dir={run_result.run_artifact_dir} | "
             f"train_loss={run_result.final_train_loss:.6f} | "
-            f"val_loss={run_result.final_val_loss:.6f} | "
-            f"val_ppl={run_result.final_val_perplexity:.6f}"
+            f"val_loss={float(primary_val_metrics['val_loss']):.6f} | "
+            f"val_ppl={float(primary_val_metrics['val_perplexity']):.6f}"
         )
 
         del run_result

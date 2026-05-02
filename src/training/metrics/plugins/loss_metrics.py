@@ -50,18 +50,26 @@ class LossMetricsPlugin(BaseMetricPlugin):
         metrics: MetricPayload = {
             "epoch": ctx.epoch_progress,
         }
+        emitted_val_metric = False
         if self._wandb_cfg.enable_val_loss_vs_tokens:
-            metrics["val_loss"] = float(ctx.val_metrics["val_loss"])
-            metrics["tokens_seen_train"] = float(ctx.tokens_seen_train)
+            for key, value in ctx.val_metrics.items():
+                if key.endswith("/val_loss"):
+                    metrics[key] = float(value)
+                    emitted_val_metric = True
         if self._wandb_cfg.enable_perplexity:
-            metrics["val_perplexity"] = float(ctx.val_metrics["val_perplexity"])
-            metrics.setdefault("tokens_seen_train", float(ctx.tokens_seen_train))
+            for key, value in ctx.val_metrics.items():
+                if key.endswith("/val_perplexity"):
+                    metrics[key] = float(value)
+                    emitted_val_metric = True
         if (
             self._wandb_cfg.enable_bits_per_byte
-            and "val_bits_per_byte" in ctx.val_metrics
         ):
-            metrics["val_bits_per_byte"] = float(ctx.val_metrics["val_bits_per_byte"])
-            metrics.setdefault("tokens_seen_train", float(ctx.tokens_seen_train))
+            for key, value in ctx.val_metrics.items():
+                if key.endswith("/val_bits_per_byte"):
+                    metrics[key] = float(value)
+                    emitted_val_metric = True
+        if emitted_val_metric:
+            metrics["tokens_seen_train"] = float(ctx.tokens_seen_train)
         return metrics
 
     def collect_epoch_metrics(self, ctx: EpochMetricsContext) -> MetricPayload:
@@ -69,14 +77,21 @@ class LossMetricsPlugin(BaseMetricPlugin):
             "epoch": float(ctx.epoch + 1),
             "train_loss_epoch": float(ctx.avg_train_loss),
         }
-        if (not self._wandb_enabled) or self._wandb_cfg.enable_val_loss_vs_tokens:
-            metrics["val_loss"] = float(ctx.val_metrics["val_loss"])
-        if (not self._wandb_enabled) or self._wandb_cfg.enable_perplexity:
-            metrics["val_perplexity"] = float(ctx.val_metrics["val_perplexity"])
-        if ((not self._wandb_enabled) or self._wandb_cfg.enable_bits_per_byte) and (
-            "val_bits_per_byte" in ctx.val_metrics
-        ):
-            metrics["val_bits_per_byte"] = float(ctx.val_metrics["val_bits_per_byte"])
+        include_val_loss = (not self._wandb_enabled) or self._wandb_cfg.enable_val_loss_vs_tokens
+        include_perplexity = (not self._wandb_enabled) or self._wandb_cfg.enable_perplexity
+        include_bits_per_byte = (not self._wandb_enabled) or self._wandb_cfg.enable_bits_per_byte
+        if include_val_loss:
+            for key, value in ctx.val_metrics.items():
+                if key.endswith("/val_loss"):
+                    metrics[key] = float(value)
+        if include_perplexity:
+            for key, value in ctx.val_metrics.items():
+                if key.endswith("/val_perplexity"):
+                    metrics[key] = float(value)
+        if include_bits_per_byte:
+            for key, value in ctx.val_metrics.items():
+                if key.endswith("/val_bits_per_byte"):
+                    metrics[key] = float(value)
         if self._wandb_enabled and self._wandb_cfg.enable_train_loss_vs_tokens:
             metrics["tokens_seen_train"] = float(ctx.tokens_seen_train)
         if self._wandb_enabled and self._wandb_cfg.enable_perplexity:

@@ -325,9 +325,9 @@ class RunTrialValidityTests(unittest.TestCase):
             global_step=7,
             run_artifact_dir="/tmp/fake-run",
             final_train_loss=1.23,
-            final_val_loss=float("nan"),
+            final_val_metrics_by_source={},
             completed_epochs=1,
-            epoch_end_validation_ran=False,
+            epoch_end_validation_ran_by_source={},
         )
         with mock.patch(
             "experiments.baseline.memory_experiments.microbatch_memory_frontier_exp.model_pipeline",
@@ -350,9 +350,9 @@ class RunTrialValidityTests(unittest.TestCase):
             global_step=7,
             run_artifact_dir="/tmp/fake-run",
             final_train_loss=2.34,
-            final_val_loss=float("nan"),
+            final_val_metrics_by_source={},
             completed_epochs=0,
-            epoch_end_validation_ran=False,
+            epoch_end_validation_ran_by_source={},
         )
         with mock.patch(
             "experiments.baseline.memory_experiments.microbatch_memory_frontier_exp.model_pipeline",

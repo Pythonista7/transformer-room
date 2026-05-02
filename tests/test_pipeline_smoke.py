@@ -80,7 +80,7 @@ class PipelineSmokeTests(unittest.TestCase):
             self.assertTrue(Path(result.final_model_path).exists())
             self.assertGreater(result.global_step, 0)
             self.assertEqual(result.completed_epochs, config.train.epochs)
-            self.assertTrue(result.epoch_end_validation_ran)
+            self.assertTrue(any(result.epoch_end_validation_ran_by_source.values()))
 
     def test_cpu_smoke_train_and_artifacts_baseline(self) -> None:
         self._run_smoke_with_model(BaselineDecoderConfig(d_model=32, n_heads=4, layers=1))

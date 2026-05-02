@@ -349,7 +349,7 @@ class WandbRemoteLineageTests(unittest.TestCase):
             run_dir = Path(result.run_artifact_dir)
             self.assertEqual(result.global_step, 7)
             self.assertEqual(result.completed_epochs, config.train.epochs)
-            self.assertFalse(result.epoch_end_validation_ran)
+            self.assertFalse(any(result.epoch_end_validation_ran_by_source.values()))
             self.assertEqual(len(session.restore_calls), 1)
             self.assertEqual(
                 session.restore_calls[0]["artifact_name"],
@@ -390,7 +390,7 @@ class WandbRemoteLineageTests(unittest.TestCase):
             self.assertEqual(session.restore_calls, [])
             self.assertGreater(result.global_step, 0)
             self.assertEqual(result.completed_epochs, config.train.epochs)
-            self.assertTrue(result.epoch_end_validation_ran)
+            self.assertTrue(any(result.epoch_end_validation_ran_by_source.values()))
 
 
 if __name__ == "__main__":

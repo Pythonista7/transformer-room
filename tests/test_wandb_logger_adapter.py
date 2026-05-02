@@ -350,7 +350,7 @@ class WandbLoggerAdapterTests(unittest.TestCase):
             {"Timing/avg_forward_pass_time_ms_epoch": 11.0},
         )
 
-    def test_log_keeps_first_explicit_section_when_sectioned_metrics_collide(self) -> None:
+    def test_log_keeps_distinct_explicit_sections_when_base_metric_matches(self) -> None:
         fake_wandb, fake_run, _store, _init_calls = self._make_fake_wandb()
         adapter = WandbLoggerAdapter()
 
@@ -383,7 +383,10 @@ class WandbLoggerAdapterTests(unittest.TestCase):
         _step, logged_metrics = fake_run.logged_metrics[0]
         self.assertEqual(
             logged_metrics,
-            {"Timing/avg_forward_pass_time_ms_epoch": 11.0},
+            {
+                "Timing/avg_forward_pass_time_ms_epoch": 11.0,
+                "Custom Timing/avg_forward_pass_time_ms_epoch": 12.0,
+            },
         )
 
     def test_log_keeps_non_colliding_metrics(self) -> None:

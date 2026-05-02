@@ -233,9 +233,9 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertIn("lr_current", keys)
             self.assertNotIn("train_loss_step", keys)
             self.assertNotIn("tokens_seen_train", keys)
-            self.assertNotIn("val_loss", keys)
-            self.assertNotIn("val_perplexity", keys)
-            self.assertNotIn("val_bits_per_byte", keys)
+            self.assertNotIn("holdout/val_loss", keys)
+            self.assertNotIn("holdout/val_perplexity", keys)
+            self.assertNotIn("holdout/val_bits_per_byte", keys)
             self.assertNotIn("train_perplexity", keys)
             self.assertNotIn("train_perplexity_epoch", keys)
             self.assertNotIn("train_bits_per_byte", keys)
@@ -296,13 +296,13 @@ class WandbMetricGatingTests(unittest.TestCase):
             self.assertIn("train_loss_epoch", keys)
             self.assertIn("lr_current", keys)
             self.assertIn("tokens_seen_train", keys)
-            self.assertIn("val_loss", keys)
+            self.assertIn("holdout/val_loss", keys)
             self.assertIn("train_perplexity", keys)
             self.assertIn("train_perplexity_epoch", keys)
-            self.assertIn("val_perplexity", keys)
+            self.assertIn("holdout/val_perplexity", keys)
             self.assertIn("train_bits_per_byte", keys)
             self.assertIn("train_bits_per_byte_epoch", keys)
-            self.assertIn("val_bits_per_byte", keys)
+            self.assertIn("holdout/val_bits_per_byte", keys)
             self.assertIn("step_time_ms", keys)
             self.assertIn("global_grad_norm", keys)
             self.assertIn("layer_grad_norm_layer_0", keys)
@@ -394,17 +394,17 @@ class WandbMetricGatingTests(unittest.TestCase):
             }
             expected_periodic_val_subset = {
                 "epoch",
-                "val_loss",
-                "val_perplexity",
-                "val_bits_per_byte",
+                "holdout/val_loss",
+                "holdout/val_perplexity",
+                "holdout/val_bits_per_byte",
                 "tokens_seen_train",
             }
             expected_epoch_subset = {
                 "epoch",
                 "train_loss_epoch",
-                "val_loss",
-                "val_perplexity",
-                "val_bits_per_byte",
+                "holdout/val_loss",
+                "holdout/val_perplexity",
+                "holdout/val_bits_per_byte",
                 "train_perplexity_epoch",
                 "train_bits_per_byte_epoch",
                 "tokens_seen_train",

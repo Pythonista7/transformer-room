@@ -152,6 +152,13 @@ def main() -> int:
                 sweep_group=sweep_group,
             )
             result = model_pipeline(config)
+            primary_val_metrics = next(
+                iter(result.final_val_metrics_by_source.values()),
+                {
+                    "val_loss": float("nan"),
+                    "val_perplexity": float("nan"),
+                },
+            )
             results.append(
                 {
                     "sweep_group": sweep_group,
@@ -163,8 +170,8 @@ def main() -> int:
                     "checkpoint_artifact_ref": result.checkpoint_artifact_ref,
                     "final_model_artifact_ref": result.final_model_artifact_ref,
                     "train_loss": result.final_train_loss,
-                    "val_loss": result.final_val_loss,
-                    "val_ppl": result.final_val_perplexity,
+                    "val_loss": float(primary_val_metrics["val_loss"]),
+                    "val_ppl": float(primary_val_metrics["val_perplexity"]),
                 }
             )
             print(

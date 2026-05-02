@@ -37,10 +37,21 @@ def build_config() -> ExperimentConfig:
             dataset_name="epfml/FineWeb-HQ",
             dataset_config=None, # Same as huggingface dataset-subset
             split="train",
-            # validation_split="validation",
             text_field="text",
             shuffle_buffer_size=30,
         ),
+        # val_sources=[
+        #     ValSourceConfig(
+        #         name="fineweb-validation",
+        #         source=HFStreamingSourceConfig(
+        #             dataset_name="epfml/FineWeb-HQ",
+        #             split="train",
+        #             text_field="text",
+        #             max_rows=10_000,
+        #         ),
+        #         max_eval_batches=50,
+        #     )
+        # ],
         tokenizer=HFPretrainedTokenizerConfig(
             pretrained_name_or_path="gpt2",
             use_fast=True,

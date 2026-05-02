@@ -107,8 +107,7 @@ def _wandb_metric_section(metric_key: str) -> str:
 
 def _with_wandb_metric_sections(metrics: Mapping[str, float]) -> dict[str, float]:
     grouped: dict[str, float] = {}
-    metric_base_to_canonical: dict[str, str] = {}
-    metric_base_has_explicit_section: dict[str, bool] = {}
+    canonical_has_explicit_section: dict[str, bool] = {}
 
     for key, value in metrics.items():
         explicit_section, metric_base_key = _split_explicit_metric_key(key)
@@ -119,24 +118,19 @@ def _with_wandb_metric_sections(metrics: Mapping[str, float]) -> dict[str, float
             canonical_key = f"{_wandb_metric_section(metric_base_key)}/{metric_base_key}"
             is_explicit = False
 
-        existing_canonical = metric_base_to_canonical.get(metric_base_key)
-        if existing_canonical is None:
+        if canonical_key not in grouped:
             grouped[canonical_key] = value
-            metric_base_to_canonical[metric_base_key] = canonical_key
-            metric_base_has_explicit_section[metric_base_key] = is_explicit
+            canonical_has_explicit_section[canonical_key] = is_explicit
             continue
 
-        existing_is_explicit = metric_base_has_explicit_section[metric_base_key]
+        existing_is_explicit = canonical_has_explicit_section[canonical_key]
         if is_explicit and not existing_is_explicit:
-            # Sectioned keys win over raw keys for the same base metric.
-            grouped.pop(existing_canonical, None)
             grouped[canonical_key] = value
-            metric_base_to_canonical[metric_base_key] = canonical_key
-            metric_base_has_explicit_section[metric_base_key] = True
+            canonical_has_explicit_section[canonical_key] = True
             continue
 
-        # Keep the first explicit key for a base metric and ignore later collisions.
-        # If both are raw forms, keep the first canonicalized one for stability.
+        # Keep the first value for identical canonical keys; explicit keys override
+        # previously canonicalized raw keys above.
     return grouped
 
 

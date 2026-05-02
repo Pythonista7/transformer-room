@@ -8,7 +8,13 @@ import torch
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from ..adapters.datasets import _infer_text_field_from_sample, _normalize_text_value
-from ..core.config import ExperimentConfig, resolve_train_batching
+from ..core.config import (
+    ExperimentConfig,
+    HFStreamingSourceConfig,
+    normalize_validation_source_name,
+    resolve_train_batching,
+    resolve_validation_sources,
+)
 from ..core.registry import get_split_adapter
 from ..core.types import TokenizedCorpus
 
@@ -60,6 +66,9 @@ class LMWindowDataset(Dataset):
         target_seq = sample_tensor[1:]
         key_padding_mask = input_seq != self.pad_id
         return input_seq, target_seq, key_padding_mask
+
+
+type ValLoaderSpec = tuple[str, DataLoader, int | None]
 
 
 def _build_lm_tensors(
@@ -145,6 +154,7 @@ class HFStreamingWindowDataset(IterableDataset):
         shuffle: bool,
         bpb_mode: Literal["off", "approx", "exact"] = "off",
         approx_token_byte_lengths: list[int] | None = None,
+        reset_on_iter_close: bool = False,
     ) -> None:
         if seq_len <= 0:
             raise ValueError(f"seq_len must be > 0, got {seq_len}")
@@ -162,6 +172,7 @@ class HFStreamingWindowDataset(IterableDataset):
         self.shuffle = bool(shuffle)
         self.bpb_mode: Literal["off", "approx", "exact"] = bpb_mode
         self.approx_token_byte_lengths = approx_token_byte_lengths
+        self.reset_on_iter_close = bool(reset_on_iter_close)
         self.epoch = 0
         self._text_field = dataset_cfg.text_field
         self._source_dataset = None
@@ -271,78 +282,98 @@ class HFStreamingWindowDataset(IterableDataset):
         return text_field
 
     def __iter__(self):
-        source = self._build_source_dataset()
-        iterator = iter(source)
+        if self.reset_on_iter_close:
+            self._reset_iteration_state()
 
-        if self._text_field is None:
-            try:
-                first_row = next(iterator)
-            except StopIteration as exc:
+        try:
+            source = self._build_source_dataset()
+            iterator = iter(source)
+
+            if self._text_field is None:
+                try:
+                    first_row = next(iterator)
+                except StopIteration as exc:
+                    raise ValueError(
+                        f"Hugging Face dataset '{self.dataset_cfg.dataset_name}' split "
+                        f"'{self.split}' is empty."
+                    ) from exc
+                if not isinstance(first_row, Mapping):
+                    raise ValueError("Expected Hugging Face dataset rows to be dict-like objects.")
+                self._infer_or_validate_text_field(first_row)
+                iterator = itertools.chain([first_row], iterator)
+
+            for row in iterator:
+                if self.dataset_cfg.max_rows > 0 and self._usable_rows_seen >= self.dataset_cfg.max_rows:
+                    break
+                if not isinstance(row, Mapping):
+                    continue
+                text_field = self._infer_or_validate_text_field(row)
+                text = _normalize_text_value(row.get(text_field))
+                if not text:
+                    continue
+                self._usable_rows_seen += 1
+
+                tokenizer_kwargs = {
+                    "add_special_tokens": False,
+                    "return_attention_mask": False,
+                    "return_token_type_ids": False,
+                }
+                if self.bpb_mode == "exact":
+                    tokenizer_kwargs["return_offsets_mapping"] = True
+                tokenized = self.tokenizer(text, **tokenizer_kwargs)
+                encoded_ids = [int(token_id) for token_id in tokenized["input_ids"]]
+                encoded_byte_lengths: list[int]
+                if self.bpb_mode == "off":
+                    encoded_byte_lengths = [0] * len(encoded_ids)
+                elif self.bpb_mode == "approx":
+                    if self.approx_token_byte_lengths is None:
+                        raise ValueError(
+                            "HF streaming bpb_mode='approx' requires token byte lookup table."
+                        )
+                    encoded_byte_lengths = [
+                        int(self.approx_token_byte_lengths[token_id])
+                        if 0 <= int(token_id) < len(self.approx_token_byte_lengths)
+                        else 0
+                        for token_id in encoded_ids
+                    ]
+                else:
+                    offsets = tokenized.get("offset_mapping")
+                    if offsets is None:
+                        raise ValueError(
+                            "HF tokenizer did not provide offsets for bpb_mode='exact'. "
+                            "Use tokenizer.use_fast=True and a tokenizer with offset mapping support."
+                        )
+                    normalized_offsets = [
+                        (int(start), int(end))
+                        for start, end in offsets
+                    ]
+                    encoded_byte_lengths = _bytes_from_offsets(
+                        normalized_offsets,
+                        _utf8_char_byte_prefix(text),
+                    )
+                encoded_ids.append(self.eos_id)
+                encoded_byte_lengths.append(0)
+                self._buffer_tokens.extend(encoded_ids)
+                self._buffer_byte_lengths.extend(encoded_byte_lengths)
+                self._total_tokens_seen += len(encoded_ids)
+
+                while self._next_start + self.window <= self._total_tokens_seen:
+                    sample, sample_byte_lengths = self._window_from_buffer(self._next_start)
+                    yield _build_lm_tensors(
+                        sample,
+                        self.pad_id,
+                        sample_byte_lengths,
+                    )
+                    self._next_start += self.stride
+                    self._maybe_trim_buffer()
+
+            if self._total_tokens_seen <= 0:
                 raise ValueError(
-                    f"Hugging Face dataset '{self.dataset_cfg.dataset_name}' split "
-                    f"'{self.split}' is empty."
-                ) from exc
-            if not isinstance(first_row, Mapping):
-                raise ValueError("Expected Hugging Face dataset rows to be dict-like objects.")
-            self._infer_or_validate_text_field(first_row)
-            iterator = itertools.chain([first_row], iterator)
-
-        for row in iterator:
-            if self.dataset_cfg.max_rows > 0 and self._usable_rows_seen >= self.dataset_cfg.max_rows:
-                break
-            if not isinstance(row, Mapping):
-                continue
-            text_field = self._infer_or_validate_text_field(row)
-            text = _normalize_text_value(row.get(text_field))
-            if not text:
-                continue
-            self._usable_rows_seen += 1
-
-            tokenizer_kwargs = {
-                "add_special_tokens": False,
-                "return_attention_mask": False,
-                "return_token_type_ids": False,
-            }
-            if self.bpb_mode == "exact":
-                tokenizer_kwargs["return_offsets_mapping"] = True
-            tokenized = self.tokenizer(text, **tokenizer_kwargs)
-            encoded_ids = [int(token_id) for token_id in tokenized["input_ids"]]
-            encoded_byte_lengths: list[int]
-            if self.bpb_mode == "off":
-                encoded_byte_lengths = [0] * len(encoded_ids)
-            elif self.bpb_mode == "approx":
-                if self.approx_token_byte_lengths is None:
-                    raise ValueError(
-                        "HF streaming bpb_mode='approx' requires token byte lookup table."
-                    )
-                encoded_byte_lengths = [
-                    int(self.approx_token_byte_lengths[token_id])
-                    if 0 <= int(token_id) < len(self.approx_token_byte_lengths)
-                    else 0
-                    for token_id in encoded_ids
-                ]
-            else:
-                offsets = tokenized.get("offset_mapping")
-                if offsets is None:
-                    raise ValueError(
-                        "HF tokenizer did not provide offsets for bpb_mode='exact'. "
-                        "Use tokenizer.use_fast=True and a tokenizer with offset mapping support."
-                    )
-                normalized_offsets = [
-                    (int(start), int(end))
-                    for start, end in offsets
-                ]
-                encoded_byte_lengths = _bytes_from_offsets(
-                    normalized_offsets,
-                    _utf8_char_byte_prefix(text),
+                    f"No usable text found in field '{self._text_field}' for "
+                    f"dataset '{self.dataset_cfg.dataset_name}' split '{self.split}'."
                 )
-            encoded_ids.append(self.eos_id)
-            encoded_byte_lengths.append(0)
-            self._buffer_tokens.extend(encoded_ids)
-            self._buffer_byte_lengths.extend(encoded_byte_lengths)
-            self._total_tokens_seen += len(encoded_ids)
 
-            while self._next_start + self.window <= self._total_tokens_seen:
+            while self._next_start < self._total_tokens_seen:
                 sample, sample_byte_lengths = self._window_from_buffer(self._next_start)
                 yield _build_lm_tensors(
                     sample,
@@ -352,23 +383,10 @@ class HFStreamingWindowDataset(IterableDataset):
                 self._next_start += self.stride
                 self._maybe_trim_buffer()
 
-        if self._total_tokens_seen <= 0:
-            raise ValueError(
-                f"No usable text found in field '{self._text_field}' for "
-                f"dataset '{self.dataset_cfg.dataset_name}' split '{self.split}'."
-            )
-
-        while self._next_start < self._total_tokens_seen:
-            sample, sample_byte_lengths = self._window_from_buffer(self._next_start)
-            yield _build_lm_tensors(
-                sample,
-                self.pad_id,
-                sample_byte_lengths,
-            )
-            self._next_start += self.stride
-            self._maybe_trim_buffer()
-
-        self._reset_iteration_state()
+            self._reset_iteration_state()
+        finally:
+            if self.reset_on_iter_close:
+                self._reset_iteration_state()
 
 
 def truncate_stream_by_fraction_at_eos(
@@ -398,7 +416,7 @@ def build_data_loaders(
     config: ExperimentConfig,
     tokenized: TokenizedCorpus,
     pin_memory: bool,
-) -> tuple[DataLoader, DataLoader]:
+) -> tuple[DataLoader, list[ValLoaderSpec]]:
     batching = resolve_train_batching(config.train)
     special = tokenized.vocab.special
     if tokenized.token_stream is None:
@@ -441,20 +459,23 @@ def build_data_loaders(
         shuffle=True,
         pin_memory=pin_memory,
     )
-    val_loader = DataLoader(
-        val_set,
-        batch_size=batching.loader_batch_size,
-        shuffle=False,
-        pin_memory=pin_memory,
-    )
-    return train_loader, val_loader
+    val_loaders: list[ValLoaderSpec] = []
+    if config.train.run_validation:
+        val_loader = DataLoader(
+            val_set,
+            batch_size=batching.loader_batch_size,
+            shuffle=False,
+            pin_memory=pin_memory,
+        )
+        val_loaders.append(("holdout", val_loader, None))
+    return train_loader, val_loaders
 
 
 def build_streaming_data_loaders(
     config: ExperimentConfig,
     tokenized: TokenizedCorpus,
     pin_memory: bool,
-):
+) -> tuple[DataLoader, list[ValLoaderSpec]]:
     batching = resolve_train_batching(config.train)
     special = tokenized.vocab.special
     StatefulDataLoader = _resolve_stateful_dataloader()
@@ -493,36 +514,49 @@ def build_streaming_data_loaders(
         # multiprocessing_context="spawn"
     )
 
-    val_loader = None
+    val_loaders: list[ValLoaderSpec] = []
     if config.train.run_validation:
-        val_split = config.dataset.validation_split
-        if not val_split:
-            raise ValueError(
-                "Streaming validation requires dataset.validation_split to be set."
+        for val_source in resolve_validation_sources(config):
+            val_source_name = normalize_validation_source_name(val_source.name)
+            val_dataset_source = HFStreamingSourceConfig(
+                dataset_name=val_source.source.dataset_name,
+                dataset_config=val_source.source.dataset_config,
+                split=val_source.source.split,
+                text_field=val_source.source.text_field,
+                shuffle_buffer_size=val_source.source.shuffle_buffer_size,
+                max_rows=val_source.source.max_rows,
             )
-        val_dataset = HFStreamingWindowDataset(
-            dataset_cfg=config.dataset,
-            split=val_split,
-            tokenizer=tokenized.tokenizer,
-            seq_len=config.train.seq_len,
-            stride=config.train.stride,
-            pad_id=special.pad_id,
-            eos_id=special.eos_id,
-            seed=config.run.seed,
-            shuffle=False,
-            bpb_mode=bpb_mode,
-            approx_token_byte_lengths=approx_token_byte_lengths,
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batching.loader_batch_size,
-            pin_memory=pin_memory,
-        )
+            val_dataset = HFStreamingWindowDataset(
+                dataset_cfg=val_dataset_source,
+                split=val_source.source.split,
+                tokenizer=tokenized.tokenizer,
+                seq_len=config.train.seq_len,
+                stride=config.train.stride,
+                pad_id=special.pad_id,
+                eos_id=special.eos_id,
+                seed=config.run.seed,
+                shuffle=False,
+                bpb_mode=bpb_mode,
+                approx_token_byte_lengths=approx_token_byte_lengths,
+                reset_on_iter_close=True,
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=batching.loader_batch_size,
+                pin_memory=pin_memory,
+            )
+            val_loaders.append(
+                (
+                    val_source_name,
+                    val_loader,
+                    int(val_source.max_eval_batches),
+                )
+            )
 
     print(
         "Streaming data loaders ready: "
         f"split={config.dataset.split} | "
-        f"validation_split={config.dataset.validation_split or '<disabled>'} | "
+        f"validation_sources={','.join(name for name, _, _ in val_loaders) or '<disabled>'} | "
         f"seq_len={config.train.seq_len} | stride={config.train.stride}"
     )
-    return train_loader, val_loader
+    return train_loader, val_loaders

@@ -232,9 +232,20 @@ dataset=HFTextDatasetConfig(
     dataset_name="Salesforce/wikitext",
     dataset_config="wikitext-2-v1",
     split="train",
-    validation_split="validation",
     text_field="text",
 ),
+val_sources=[
+    ValSourceConfig(
+        name="wikitext-validation",
+        source=HFStreamingSourceConfig(
+            dataset_name="Salesforce/wikitext",
+            dataset_config="wikitext-2-v1",
+            split="validation",
+            text_field="text",
+        ),
+        max_eval_batches=64,
+    )
+],
 tokenizer=HFPretrainedTokenizerConfig(
     pretrained_name_or_path="gpt2",
 ),
@@ -247,6 +258,9 @@ train=TrainConfig(
 ),
 split=PreSplitConfig(),
 ```
+
+`max_eval_batches` controls validation runtime per source on each validation pass
+(both periodic `val_every_n_steps` and epoch-end validation).
 
 ## If something fails
 

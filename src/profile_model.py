@@ -157,7 +157,7 @@ def profile_model(
             bpb_metrics_enabled=False,
         )
         write_run_metadata(config=config, tokenized=tokenized, run_paths=run_paths)
-        train_loader, val_loader = build_streaming_data_loaders(
+        train_loader, val_loaders = build_streaming_data_loaders(
             config=config,
             tokenized=tokenized,
             pin_memory=device.type == "cuda",
@@ -168,7 +168,7 @@ def profile_model(
         tokenizer_adapter = get_tokenizer_adapter(config.tokenizer.name)
         tokenized = tokenizer_adapter.build(corpus=corpus, cfg=config.tokenizer)
         write_run_metadata(config=config, tokenized=tokenized, run_paths=run_paths)
-        train_loader, val_loader = build_data_loaders(
+        train_loader, val_loaders = build_data_loaders(
             config=config,
             tokenized=tokenized,
             pin_memory=device.type == "cuda",
@@ -322,7 +322,7 @@ def profile_model(
         else:
             print("No child processes to wait for in `train_loader.multiprocessing_context`")
 
-        if val_loader is not None:
+        for _, val_loader, _ in val_loaders:
             del val_loader
 
         gc.collect()

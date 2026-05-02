@@ -479,11 +479,19 @@ def run_trial(
         global_step = int(run_result.global_step)
         run_artifact_dir = run_result.run_artifact_dir
         final_train_loss = float(run_result.final_train_loss)
+        primary_val_metrics = next(
+            iter(run_result.final_val_metrics_by_source.values()),
+            None,
+        )
         final_val_loss = (
-            float(run_result.final_val_loss) if requires_validation else None
+            float(primary_val_metrics["val_loss"])
+            if (requires_validation and primary_val_metrics is not None)
+            else None
         )
         completed_epochs = int(run_result.completed_epochs)
-        epoch_end_validation_ran = bool(run_result.epoch_end_validation_ran)
+        epoch_end_validation_ran = bool(
+            run_result.epoch_end_validation_ran_by_source
+        ) and all(run_result.epoch_end_validation_ran_by_source.values())
         if completed_epochs < int(config.train.epochs) or (
             requires_validation and not epoch_end_validation_ran
         ):

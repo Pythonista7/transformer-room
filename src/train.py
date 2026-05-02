@@ -37,7 +37,7 @@ from .training.artifacts import (
     resolve_wandb_lineage,
     write_run_metadata,
 )
-from .training.data import build_data_loaders, build_streaming_data_loaders
+from .training.data import ValLoaderSpec, build_data_loaders, build_streaming_data_loaders
 from .training.evaluate import evaluate
 from .training.metrics import (
     EpochMetricsContext,
@@ -128,22 +128,33 @@ def _unpack_batch_tensors(
     )
 
 
+def _namespace_val_metrics(
+    source_name: str,
+    val_metrics: dict[str, float],
+) -> dict[str, float]:
+    return {
+        f"{source_name}/val_loss": float(val_metrics["val_loss"]),
+        f"{source_name}/val_perplexity": float(val_metrics["val_perplexity"]),
+        f"{source_name}/val_bits_per_byte": float(val_metrics["val_bits_per_byte"]),
+    }
+
+
 @dataclass(slots=True)
 class TrainLoopResult:
     global_step: int
     final_train_loss: float
     final_train_bits_per_byte: float
-    final_val_metrics: dict[str, float]
+    final_val_metrics_by_source: dict[str, dict[str, float]]
     checkpoint_artifact_ref: str | None
     final_model_artifact_ref: str | None
     completed_epochs: int
-    epoch_end_validation_ran: bool
+    epoch_end_validation_ran_by_source: dict[str, bool]
 
 
 def train_loop(
     model: torch.nn.Module,
     train_loader: DataLoader,
-    val_loader: DataLoader | None,
+    val_loaders: list[ValLoaderSpec],
     loss_fn: CrossEntropyLoss,
     optimizer: optim.Optimizer,
     scheduler: LRScheduler | None,
@@ -300,7 +311,7 @@ def train_loop(
     non_blocking = device.type == "cuda"
     batching: ResolvedTrainBatchingConfig = resolve_train_batching(config.train)
     accumulation_steps = int(batching.accumulation_steps)
-    run_validation = bool(config.train.run_validation) and val_loader is not None
+    run_validation = bool(config.train.run_validation) and len(val_loaders) > 0
 
     start_epoch, start_batch_idx, global_step, tokens_seen_train = load_checkpoint_if_available()
     next_resume_epoch = start_epoch
@@ -322,13 +333,18 @@ def train_loop(
 
     last_avg_train_loss = 0.0
     last_train_bits_per_byte = float("nan")
-    last_val_metrics = {
-        "val_loss": float("nan"),
-        "val_perplexity": float("nan"),
-        "val_bits_per_byte": float("nan"),
+    last_val_metrics_by_source: dict[str, dict[str, float]] = {
+        val_source_name: {
+            "val_loss": float("nan"),
+            "val_perplexity": float("nan"),
+            "val_bits_per_byte": float("nan"),
+        }
+        for val_source_name, _, _ in val_loaders
     }
     completed_epochs = int(start_epoch)
-    epoch_end_validation_ran = False
+    epoch_end_validation_ran_by_source: dict[str, bool] = {
+        val_source_name: False for val_source_name, _, _ in val_loaders
+    }
 
     try:
         metrics_engine.on_train_start()
@@ -374,7 +390,7 @@ def train_loop(
                 nonlocal step_backward_pass_time_ms
                 nonlocal should_measure_step_timing
                 nonlocal micro_batches_in_step
-                nonlocal last_val_metrics
+                nonlocal last_val_metrics_by_source
                 nonlocal last_checkpoint_artifact_ref
                 nonlocal next_resume_epoch
                 nonlocal next_resume_batch_idx
@@ -456,28 +472,33 @@ def train_loop(
                     logger.log(step_metrics, step=global_step)
 
                 if run_validation and step_ctx.schedule.periodic_val_due:
-                    val_metrics = evaluate(
-                        model,
-                        val_loader,
-                        loss_fn,
-                        device,
-                        use_bf16=use_bf16,
-                        token_byte_lengths=token_byte_lengths,
-                    )
-                    model.train()
-                    last_val_metrics = val_metrics
-                    val_log_metrics = metrics_engine.collect_periodic_val_metrics(
-                        PeriodicValMetricsContext(
-                            schedule=step_ctx.schedule,
-                            global_step=global_step,
-                            epoch=current_epoch,
-                            batch_idx=current_batch_idx,
-                            train_loader_len=train_loader_len,
-                            tokens_seen_train=tokens_seen_train,
-                            val_metrics=val_metrics,
+                    for val_source_name, val_loader, max_eval_batches in val_loaders:
+                        val_metrics = evaluate(
+                            model,
+                            val_loader,
+                            loss_fn,
+                            device,
+                            use_bf16=use_bf16,
+                            token_byte_lengths=token_byte_lengths,
+                            max_eval_batches=max_eval_batches,
                         )
-                    )
-                    logger.log(val_log_metrics, step=global_step)
+                        model.train()
+                        last_val_metrics_by_source[val_source_name] = val_metrics
+                        val_log_metrics = metrics_engine.collect_periodic_val_metrics(
+                            PeriodicValMetricsContext(
+                                schedule=step_ctx.schedule,
+                                global_step=global_step,
+                                epoch=current_epoch,
+                                batch_idx=current_batch_idx,
+                                train_loader_len=train_loader_len,
+                                tokens_seen_train=tokens_seen_train,
+                                val_metrics=_namespace_val_metrics(
+                                    val_source_name,
+                                    val_metrics,
+                                ),
+                            )
+                        )
+                        logger.log(val_log_metrics, step=global_step)
 
                 if (
                     config.run.checkpoint_every_n_steps > 0
@@ -666,19 +687,36 @@ def train_loop(
                 next_resume_epoch = epoch + 1
                 next_resume_batch_idx = 0
             epoch_time_s = time.perf_counter() - epoch_wall_start
-            val_metrics = last_val_metrics
+            val_metrics: dict[str, float] = {}
+            if run_validation:
+                for val_source_name, source_val_metrics in last_val_metrics_by_source.items():
+                    val_metrics.update(
+                        _namespace_val_metrics(
+                            val_source_name,
+                            source_val_metrics,
+                        )
+                    )
             if run_validation and epoch_fully_exhausted:
-                val_metrics = evaluate(
-                    model,
-                    val_loader,
-                    loss_fn,
-                    device,
-                    use_bf16=use_bf16,
-                    token_byte_lengths=token_byte_lengths,
-                )
-                model.train()
-                epoch_end_validation_ran = True
-                last_val_metrics = val_metrics
+                val_metrics = {}
+                for val_source_name, val_loader, max_eval_batches in val_loaders:
+                    source_val_metrics = evaluate(
+                        model,
+                        val_loader,
+                        loss_fn,
+                        device,
+                        use_bf16=use_bf16,
+                        token_byte_lengths=token_byte_lengths,
+                        max_eval_batches=max_eval_batches,
+                    )
+                    model.train()
+                    epoch_end_validation_ran_by_source[val_source_name] = True
+                    last_val_metrics_by_source[val_source_name] = source_val_metrics
+                    val_metrics.update(
+                        _namespace_val_metrics(
+                            val_source_name,
+                            source_val_metrics,
+                        )
+                    )
             epoch_metrics = metrics_engine.collect_epoch_metrics(
                 EpochMetricsContext(
                     global_step=global_step,
@@ -693,12 +731,21 @@ def train_loop(
             logger.log(epoch_metrics, step=global_step)
 
             if run_validation and epoch_fully_exhausted:
+                val_summary = " | ".join(
+                    (
+                        f"{val_source_name}/val_loss="
+                        f"{last_val_metrics_by_source[val_source_name]['val_loss']:.4f} | "
+                        f"{val_source_name}/val_perplexity="
+                        f"{last_val_metrics_by_source[val_source_name]['val_perplexity']:.4f} | "
+                        f"{val_source_name}/val_bits_per_byte="
+                        f"{last_val_metrics_by_source[val_source_name]['val_bits_per_byte']:.4f}"
+                    )
+                    for val_source_name, _, _ in val_loaders
+                )
                 print(
                     f"Epoch {epoch + 1}/{epoch_label_total} | "
                     f"train_loss={avg_train_loss:.4f} | "
-                    f"val_loss={val_metrics['val_loss']:.4f} | "
-                    f"val_perplexity={val_metrics['val_perplexity']:.4f} | "
-                    f"val_bits_per_byte={val_metrics['val_bits_per_byte']:.4f}"
+                    f"{val_summary}"
                 )
             else:
                 print(
@@ -730,15 +777,19 @@ def train_loop(
             "final_train_bits_per_byte": float(last_train_bits_per_byte),
             "run_name": run_label,
             "group_name": config.run.group_name,
+            "final_val_metrics_by_source": {
+                source_name: {
+                    "val_loss": float(metrics["val_loss"]),
+                    "val_perplexity": float(metrics["val_perplexity"]),
+                    "val_bits_per_byte": float(metrics["val_bits_per_byte"]),
+                }
+                for source_name, metrics in last_val_metrics_by_source.items()
+            },
+            "epoch_end_validation_ran_by_source": {
+                source_name: bool(ran_validation)
+                for source_name, ran_validation in epoch_end_validation_ran_by_source.items()
+            },
         }
-        if epoch_end_validation_ran:
-            final_model_metadata["final_val_loss"] = float(last_val_metrics["val_loss"])
-            final_model_metadata["final_val_perplexity"] = float(
-                last_val_metrics["val_perplexity"]
-            )
-            final_model_metadata["final_val_bits_per_byte"] = float(
-                last_val_metrics["val_bits_per_byte"]
-            )
         final_model_artifact_ref = logger.save(
             str(run_paths["final_model_path"]),
             artifact_name=final_model_artifact_name,
@@ -750,11 +801,11 @@ def train_loop(
         global_step=global_step,
         final_train_loss=last_avg_train_loss,
         final_train_bits_per_byte=last_train_bits_per_byte,
-        final_val_metrics=last_val_metrics,
+        final_val_metrics_by_source=last_val_metrics_by_source,
         checkpoint_artifact_ref=last_checkpoint_artifact_ref,
         final_model_artifact_ref=final_model_artifact_ref,
         completed_epochs=completed_epochs,
-        epoch_end_validation_ran=epoch_end_validation_ran,
+        epoch_end_validation_ran_by_source=epoch_end_validation_ran_by_source,
     )
 
 
@@ -807,7 +858,7 @@ def model_pipeline(
             bpb_metrics_enabled=bpb_metrics_enabled,
         )
         write_run_metadata(config=config, tokenized=tokenized, run_paths=run_paths)
-        train_loader, val_loader = build_streaming_data_loaders(
+        train_loader, val_loaders = build_streaming_data_loaders(
             config=config,
             tokenized=tokenized,
             pin_memory=device.type == "cuda",
@@ -819,7 +870,7 @@ def model_pipeline(
         tokenizer_adapter = get_tokenizer_adapter(config.tokenizer.name)
         tokenized = tokenizer_adapter.build(corpus=corpus, cfg=config.tokenizer)
         write_run_metadata(config=config, tokenized=tokenized, run_paths=run_paths)
-        train_loader, val_loader = build_data_loaders(
+        train_loader, val_loaders = build_data_loaders(
             config=config,
             tokenized=tokenized,
             pin_memory=device.type == "cuda",
@@ -950,7 +1001,7 @@ def model_pipeline(
         train_result = train_loop(
             model=model,
             train_loader=train_loader,
-            val_loader=val_loader,
+            val_loaders=val_loaders,
             loss_fn=loss_fn,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -981,7 +1032,7 @@ def model_pipeline(
         else:
             print('No child processes to wait for in `train_loader.multiprocessing_context`')
         
-        if val_loader is not None:
+        for _, val_loader, _ in val_loaders:
             del val_loader
             
         import gc 
@@ -998,11 +1049,7 @@ def model_pipeline(
         global_step=train_result.global_step,
         final_train_loss=train_result.final_train_loss,
         final_train_bits_per_byte=train_result.final_train_bits_per_byte,
-        final_val_loss=float(train_result.final_val_metrics["val_loss"]),
-        final_val_perplexity=float(train_result.final_val_metrics["val_perplexity"]),
-        final_val_bits_per_byte=float(
-            train_result.final_val_metrics["val_bits_per_byte"]
-        ),
+        final_val_metrics_by_source=train_result.final_val_metrics_by_source,
         completed_epochs=train_result.completed_epochs,
-        epoch_end_validation_ran=train_result.epoch_end_validation_ran,
+        epoch_end_validation_ran_by_source=train_result.epoch_end_validation_ran_by_source,
     )

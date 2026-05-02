@@ -64,8 +64,12 @@ class PreVsPostLayerNormExperimentTests(unittest.TestCase):
             run_artifact_dir="/tmp/run-dir",
             global_step=10,
             final_train_loss=1.0,
-            final_val_loss=1.1,
-            final_val_perplexity=3.0,
+            final_val_metrics_by_source={
+                "holdout": {
+                    "val_loss": 1.1,
+                    "val_perplexity": 3.0,
+                }
+            },
         )
         with (
             mock.patch.object(

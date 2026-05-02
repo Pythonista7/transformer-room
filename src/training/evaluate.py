@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from itertools import islice
 
 import torch
 from torch.nn import CrossEntropyLoss
@@ -32,7 +33,11 @@ def evaluate(
     device: torch.device,
     use_bf16: bool,
     token_byte_lengths: Sequence[int] | None = None,
+    max_eval_batches: int | None = None,
 ) -> dict[str, float]:
+    if max_eval_batches is not None and int(max_eval_batches) <= 0:
+        raise ValueError("max_eval_batches must be > 0 when provided.")
+
     model.eval()
     pad_id = int(loss_fn.ignore_index)
     total_tokens = 0
@@ -48,7 +53,12 @@ def evaluate(
         )
 
     with torch.no_grad():
-        for batch in loader:
+        batch_iter = (
+            iter(loader)
+            if max_eval_batches is None
+            else islice(loader, int(max_eval_batches))
+        )
+        for batch in batch_iter:
             (
                 input_seq,
                 target_seq,

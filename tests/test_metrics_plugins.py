@@ -143,9 +143,9 @@ def _periodic_val_ctx(schedule: MetricSchedule) -> PeriodicValMetricsContext:
         train_loader_len=10,
         tokens_seen_train=32,
         val_metrics={
-            "val_loss": 1.75,
-            "val_perplexity": 3.5,
-            "val_bits_per_byte": 2.25,
+            "holdout/val_loss": 1.75,
+            "holdout/val_perplexity": 3.5,
+            "holdout/val_bits_per_byte": 2.25,
         },
     )
 
@@ -157,9 +157,9 @@ def _epoch_ctx() -> EpochMetricsContext:
         avg_train_loss=2.0,
         tokens_seen_train=64,
         val_metrics={
-            "val_loss": 1.5,
-            "val_perplexity": 2.5,
-            "val_bits_per_byte": 2.0,
+            "holdout/val_loss": 1.5,
+            "holdout/val_perplexity": 2.5,
+            "holdout/val_bits_per_byte": 2.0,
         },
         train_bits_per_byte_epoch=2.75,
     )
@@ -199,14 +199,14 @@ class LossMetricsPluginTests(unittest.TestCase):
         self.assertIn("tokens_seen_train", step_metrics)
 
         self.assertIn("epoch", periodic_metrics)
-        self.assertIn("val_loss", periodic_metrics)
-        self.assertIn("val_perplexity", periodic_metrics)
-        self.assertIn("val_bits_per_byte", periodic_metrics)
+        self.assertIn("holdout/val_loss", periodic_metrics)
+        self.assertIn("holdout/val_perplexity", periodic_metrics)
+        self.assertIn("holdout/val_bits_per_byte", periodic_metrics)
 
         self.assertIn("train_loss_epoch", epoch_metrics)
-        self.assertIn("val_loss", epoch_metrics)
-        self.assertIn("val_perplexity", epoch_metrics)
-        self.assertIn("val_bits_per_byte", epoch_metrics)
+        self.assertIn("holdout/val_loss", epoch_metrics)
+        self.assertIn("holdout/val_perplexity", epoch_metrics)
+        self.assertIn("holdout/val_bits_per_byte", epoch_metrics)
         self.assertIn("train_perplexity_epoch", epoch_metrics)
         self.assertIn("train_bits_per_byte_epoch", epoch_metrics)
         self.assertIn("tokens_seen_train", epoch_metrics)

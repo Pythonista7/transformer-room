@@ -11,6 +11,7 @@ from src.config import (
     BaselineDecoderConfig,
     ExperimentConfig,
     HFPretrainedTokenizerConfig,
+    HFStreamingSourceConfig,
     HFTextDatasetConfig,
     HoldoutSplitConfig,
     LRSchedulerChainConfig,
@@ -22,7 +23,9 @@ from src.config import (
     RunConfig,
     SACDecoderConfig,
     TrainConfig,
+    ValSourceConfig,
     WandbMetricsConfig,
+    resolve_validation_sources,
     resolve_train_learning_rate,
     validate_experiment_config,
 )
@@ -196,6 +199,114 @@ class ConfigValidationTests(unittest.TestCase):
             split=PreSplitConfig(),
             logging=LoggingConfig(provider="wandb", wandb=WandbMetricsConfig()),
         )
+
+    def test_streaming_validation_accepts_explicit_val_sources(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.train.run_validation = True
+        config.dataset.validation_split = None
+        config.val_sources = [
+            ValSourceConfig(
+                name="FineWeb CC24",
+                source=HFStreamingSourceConfig(
+                    dataset_name="dummy/dataset",
+                    split="train",
+                    text_field="text",
+                    shuffle_buffer_size=1000,
+                    max_rows=32,
+                ),
+                max_eval_batches=8,
+            )
+        ]
+        validate_experiment_config(config)
+
+    def test_streaming_validation_rejects_missing_val_source(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.train.run_validation = True
+        config.dataset.validation_split = None
+        config.val_sources = []
+        with self.assertRaisesRegex(
+            ValueError,
+            "Validation is enabled but no validation source was configured",
+        ):
+            validate_experiment_config(config)
+
+    def test_streaming_validation_rejects_non_positive_max_eval_batches(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.train.run_validation = True
+        config.dataset.validation_split = None
+        config.val_sources = [
+            ValSourceConfig(
+                name="fineweb",
+                source=HFStreamingSourceConfig(
+                    dataset_name="dummy/dataset",
+                    split="train",
+                    text_field="text",
+                    shuffle_buffer_size=1000,
+                    max_rows=0,
+                ),
+                max_eval_batches=0,
+            )
+        ]
+        with self.assertRaisesRegex(
+            ValueError,
+            "max_eval_batches must be > 0",
+        ):
+            validate_experiment_config(config)
+
+    def test_val_source_name_collisions_fail_after_normalization(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.val_sources = [
+            ValSourceConfig(
+                name="FineWeb CC24",
+                source=HFStreamingSourceConfig(
+                    dataset_name="dummy/dataset",
+                    split="train",
+                    shuffle_buffer_size=1000,
+                    max_rows=32,
+                ),
+                max_eval_batches=8,
+            ),
+            ValSourceConfig(
+                name="fineweb-cc24",
+                source=HFStreamingSourceConfig(
+                    dataset_name="dummy/dataset",
+                    split="train",
+                    shuffle_buffer_size=1000,
+                    max_rows=64,
+                ),
+                max_eval_batches=8,
+            ),
+        ]
+        with self.assertRaisesRegex(
+            ValueError,
+            "duplicate names after normalization",
+        ):
+            validate_experiment_config(config)
+
+    def test_legacy_validation_split_no_longer_resolves_to_val_sources(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.train.run_validation = True
+        config.dataset.validation_split = "validation"
+        config.val_sources = []
+        resolved_val_sources = resolve_validation_sources(config)
+        self.assertEqual(resolved_val_sources, [])
+
+    def test_resolve_validation_sources_preserves_max_eval_batches(self) -> None:
+        config = self._make_streaming_hf_config()
+        config.val_sources = [
+            ValSourceConfig(
+                name="fineweb",
+                source=HFStreamingSourceConfig(
+                    dataset_name="dummy/dataset",
+                    split="train",
+                    shuffle_buffer_size=1000,
+                ),
+                max_eval_batches=12,
+            )
+        ]
+        resolved_val_sources = resolve_validation_sources(config)
+        self.assertEqual(len(resolved_val_sources), 1)
+        self.assertEqual(resolved_val_sources[0].max_eval_batches, 12)
 
     def test_hf_bpb_mode_accepts_supported_values(self) -> None:
         for mode in ("off", "approx", "exact"):
