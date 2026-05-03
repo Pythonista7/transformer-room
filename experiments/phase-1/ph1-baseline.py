@@ -5,7 +5,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.core.config import BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFTextDatasetConfig, HoldoutSplitConfig, LRSchedulerChainConfig, LRSchedulerStageConfig, LoggingConfig, OptimizerConfig, PreSplitConfig, RunConfig, TrainConfig, WandbMetricsConfig
+from src.core.config import BaselineDecoderConfig, ExperimentConfig, HFPretrainedTokenizerConfig, HFStreamingSourceConfig, HFTextDatasetConfig, HoldoutSplitConfig, LRSchedulerChainConfig, LRSchedulerStageConfig, LoggingConfig, OptimizerConfig, PreSplitConfig, RunConfig, TrainConfig, ValSourceConfig, WandbMetricsConfig
 from src.train import model_pipeline
 
 """
@@ -50,6 +50,11 @@ WANDB_RUN_NAME = f"A100-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}"
 # which comes to 524k per step
 DATASET_NAME = "HuggingFaceFW/fineweb"
 DATASET_CONFIG = "sample-10BT"
+
+# Held-out CC dump for validation — no overlap with sample-10BT
+VAL_DATASET_CONFIG = "CC-MAIN-2024-10"
+VAL_MAX_ROWS = 5_000
+VAL_MAX_EVAL_BATCHES = 50  # 50 × (64 seqs × 1024 toks) ≈ 3.3M val tokens per pass
 
 # As for chinchilla recommeding 20 tokens per param
 # so a 124M model approx should train on 2.5B tokens -> that suggests max_steps = 4.8k steps 
@@ -126,8 +131,22 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             stride=STRIDE,
             data_mode="streaming",
             max_steps= MAX_TRAIN_STEPS,
-            run_validation=False
+            run_validation=True,
         ),
+        val_sources=[
+            ValSourceConfig(
+                name="fineweb-cc-2024-10",
+                source=HFStreamingSourceConfig(
+                    dataset_name=DATASET_NAME,
+                    dataset_config=VAL_DATASET_CONFIG,
+                    split="train",
+                    text_field="text",
+                    shuffle_buffer_size=1_000,
+                    max_rows=VAL_MAX_ROWS,
+                ),
+                max_eval_batches=VAL_MAX_EVAL_BATCHES,
+            )
+        ],
         split=PreSplitConfig(),
         logging=LoggingConfig(
             provider="wandb",
@@ -157,6 +176,7 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
                 
                 # Cadances
                 log_every_n_steps= 25, # for step metrics
+                val_every_n_steps= 500,
                 diagnostics_every_n_steps= 100, # default for diagnostics
                 layer_grad_norms_every_n_steps= 500,
                 parameter_optimizer_norms_every_n_steps=500, # for update/weight ratio freq

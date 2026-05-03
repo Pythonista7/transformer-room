@@ -481,7 +481,7 @@ def build_streaming_data_loaders(
     StatefulDataLoader = _resolve_stateful_dataloader()
 
     bpb_metrics_enabled = (
-        config.logging.provider == "wandb"
+        config.logging.provider in {"wandb", "local"}
         and config.logging.wandb.enable_bits_per_byte
     )
     bpb_mode: Literal["off", "approx", "exact"] = "off"
