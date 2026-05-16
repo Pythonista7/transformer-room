@@ -450,8 +450,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     model_pt = artifact_dir / "baseline_model.pt"
-    if not model_pt.exists():
-        print(f"Error: baseline_model.pt not found in {artifact_dir}", file=sys.stderr)
+    checkpoint_pt = artifact_dir / "baseline_checkpoint.pt"
+    if not model_pt.exists() and not checkpoint_pt.exists():
+        print(
+            f"Error: neither baseline_model.pt nor baseline_checkpoint.pt found in {artifact_dir}",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"Loading metadata from {artifact_dir} ...")
@@ -464,7 +468,17 @@ def main(argv: list[str] | None = None) -> int:
     hf_config = build_hf_config_json(inference_config, run_config)
 
     print("Loading weights ...")
-    state_dict = torch.load(model_pt, weights_only=True, map_location="cpu")
+    if model_pt.exists():
+        state_dict = torch.load(model_pt, weights_only=True, map_location="cpu")
+    else:
+        print(
+            f"  baseline_model.pt not found — extracting state dict from baseline_checkpoint.pt"
+        )
+        ckpt = torch.load(checkpoint_pt, weights_only=False, map_location="cpu")
+        state_dict = {
+            k: v for k, v in ckpt["model_state_dict"].items()
+            if k != "pos_encoding.pos_enc_cache"
+        }
     param_count = count_parameters_from_state_dict(state_dict)
     print(f"  Parameters: {param_count:,} (~{param_count / 1e6:.1f}M)")
 

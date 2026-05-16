@@ -102,6 +102,9 @@ def build_hf_pretrained_tokenizer_bundle(
         revision=cfg.revision,
         trust_remote_code=cfg.trust_remote_code,
     )
+    # Suppress the "sequence longer than model_max_length" warning — the data pipeline
+    # tokenizes full documents and does its own windowing, so long documents are expected.
+    tokenizer.model_max_length = int(1e30)
     added_special_tokens = _normalize_hf_tokenizer_specials(tokenizer)
     vocab_info = _build_vocab_info_from_hf_tokenizer(tokenizer)
     if bpb_metrics_enabled and cfg.bpb_mode == "exact":
