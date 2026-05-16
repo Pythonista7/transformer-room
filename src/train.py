@@ -770,7 +770,7 @@ def train_loop(
 
     if persist_local_artifacts:
         torch.save(checkpoint_model.state_dict(), run_paths["final_model_path"])
-    if artifact_io_enabled and persist_local_artifacts:
+    if artifact_io_enabled and persist_local_artifacts and not config.run.hf_repo_id:
         final_model_metadata = {
             "global_step": int(global_step),
             "final_train_loss": float(last_avg_train_loss),
