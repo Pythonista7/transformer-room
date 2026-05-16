@@ -809,6 +809,31 @@ def train_loop(
     )
 
 
+def _hf_upload_if_configured(config: ExperimentConfig, run_artifact_dir: str) -> None:
+    if not config.run.hf_repo_id:
+        return
+    import os
+    import subprocess
+    import sys
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "hf_upload.py"
+    cmd = [
+        sys.executable, str(script),
+        "--artifact-dir", run_artifact_dir,
+        "--repo-id", config.run.hf_repo_id,
+    ]
+    if config.run.hf_private:
+        cmd.append("--private")
+    if run_id := os.environ.get("WANDB_RUN_ID"):
+        cmd += ["--wandb-run-id", run_id]
+
+    print(f"[hf_upload] Uploading to {config.run.hf_repo_id} ...")
+    try:
+        subprocess.run(cmd, check=True)
+    except Exception as exc:
+        print(f"[hf_upload] Upload failed — model saved locally at {run_artifact_dir}. Error: {exc}")
+
+
 def model_pipeline(
     config: ExperimentConfig,
     *,
@@ -1022,6 +1047,7 @@ def model_pipeline(
                 logger=logger,
                 trace_dir=trace_dir,
             )
+        _hf_upload_if_configured(config, str(run_paths["run_artifact_dir"]))
     finally:
         logger.close()
         if train_loader.multiprocessing_context is not None:

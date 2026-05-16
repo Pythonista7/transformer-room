@@ -38,6 +38,9 @@ class RunConfig:
     - `compile_warmup_steps`: number of initial compiled steps excluded from perf
       aggregate metrics (helps avoid compile warmup skew).
     - `seed`: global RNG seed.
+    - `hf_repo_id`: HuggingFace Hub repo to upload the final model to after training
+      (e.g. ``"Pythonista7/gpt2-124m-fineweb-baseline"``). ``None`` disables upload.
+    - `hf_private`: create the HF repo as private (default public).
     """
     project_name: str
     run_name: str | None = None
@@ -56,6 +59,8 @@ class RunConfig:
     activation_memory_budget: float | None = None
     compile_warmup_steps: int = 3 if use_torch_compile else 0
     seed: int = 42
+    hf_repo_id: str | None = None
+    hf_private: bool = False
 
 
 @dataclass(slots=True)
