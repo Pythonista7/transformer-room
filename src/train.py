@@ -809,6 +809,66 @@ def train_loop(
     )
 
 
+def _preflight_hf_check(config: ExperimentConfig) -> None:
+    if not config.run.hf_repo_id:
+        return
+    import getpass
+    import os
+    from huggingface_hub import HfApi
+
+    def _try_auth(token: str | None) -> bool:
+        try:
+            HfApi(token=token).whoami()
+            return True
+        except Exception:
+            return False
+
+    token = os.environ.get("HF_TOKEN")
+    if _try_auth(token):
+        print(f"[hf_upload] Auth OK — will upload to {config.run.hf_repo_id} after training.")
+        return
+
+    print(
+        f"[hf_upload] HF_TOKEN not set or invalid. "
+        f"A token is required to upload to '{config.run.hf_repo_id}'."
+    )
+    for attempt in range(3):
+        token = getpass.getpass(prompt="  Enter HuggingFace token (input hidden): ").strip()
+        if not token:
+            print("  No token entered.")
+            continue
+        if _try_auth(token):
+            break
+        print(f"  Token rejected by HuggingFace (attempt {attempt + 1}/3).")
+        token = None
+    else:
+        raise RuntimeError(
+            f"HuggingFace auth failed after 3 attempts for repo '{config.run.hf_repo_id}'."
+        )
+
+    os.environ["HF_TOKEN"] = token
+
+    shell = os.environ.get("SHELL", "")
+    if "zsh" in shell:
+        rc_file = Path.home() / ".zshrc"
+    elif "bash" in shell:
+        rc_file = Path.home() / ".bashrc"
+    else:
+        rc_file = Path.home() / ".profile"
+
+    export_line = f'\nexport HF_TOKEN="{token}"\n'
+    existing = rc_file.read_text(encoding="utf-8") if rc_file.exists() else ""
+    if "HF_TOKEN" in existing:
+        import re
+        existing = re.sub(r'\nexport HF_TOKEN=.*\n', export_line, existing)
+        rc_file.write_text(existing, encoding="utf-8")
+    else:
+        with rc_file.open("a", encoding="utf-8") as f:
+            f.write(export_line)
+    print(f"  Token saved to {rc_file}.")
+    print(f"[hf_upload] Auth OK — will upload to {config.run.hf_repo_id} after training.")
+
+
 def _hf_upload_if_configured(config: ExperimentConfig, run_artifact_dir: str) -> None:
     if not config.run.hf_repo_id:
         return
@@ -842,6 +902,7 @@ def model_pipeline(
 ) -> RunResult:
     register_builtin_adapters()
     validate_experiment_config(config)
+    _preflight_hf_check(config)
     logger_adapter = get_logger_adapter(config.logging.provider)
     rich_metrics_enabled = bool(logger_adapter.supports_rich_metrics(config.logging))
     config = resolve_wandb_lineage(config, logger_adapter)
