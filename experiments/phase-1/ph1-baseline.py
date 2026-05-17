@@ -32,7 +32,7 @@ MICRO_BATCH_SZ = 64
 ACCUMULATION_STEPS = EFFECTIVE_BATCH_SZ // MICRO_BATCH_SZ
 TORCH_COMPILE_MEM_BUDGET = 0.75
 LEARNING_RATE = 1e-3
-LR_END_FACTOR = 0.1 
+LR_END_FACTOR = 0.1
 
 SEQ_LEN = 1024
 STRIDE = SEQ_LEN
@@ -41,7 +41,7 @@ STRIDE = SEQ_LEN
 # WANDB
 WANDB_PROJECT_NAME = "transformer-room-baseline"
 WANDB_GROUP_NAME = "phase1/stage-1/baseline"
-WANDB_RUN_NAME = f"A100-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}"
+WANDB_RUN_NAME = f"A100-gpt-2-124M-B-{EFFECTIVE_BATCH_SZ}-MB-{MICRO_BATCH_SZ}-WSD"
 
 
 # Dataset
@@ -62,7 +62,16 @@ VAL_MAX_EVAL_BATCHES = 50  # 50 × (64 seqs × 1024 toks) ≈ 3.3M val tokens pe
 # While llama recommends a 1000:1 for token:param, which lands us around 125B which is insane! 
 # That would be 240k steps, for 125B tokens !
 
-MAX_TRAIN_STEPS = 1_000
+# Current config - MICRO_BATCH_SZ * SEQ_LEN * ACCUMULATION_STEPS = 64 * 1024 * 8 = 524,288 tokens per step
+# MAX_TRAIN_STEPS = 4730 is about 2,479,882,240 training tokens
+# For a 1 param : 20 tokens ratio, 124M params : 248,00,00,000 tokens --> translates to around ~4730 steps in the above config.
+
+
+MAX_TRAIN_STEPS = 4_730
+# WSD schedule: warm up, hold the applied LR stable, then decay at the end.
+WARMUP_STEPS = 200
+COOLDOWN_STEPS = 400
+STABLE_STEPS = MAX_TRAIN_STEPS - WARMUP_STEPS - COOLDOWN_STEPS
 
 # On an 40GB A100, including torch.compile and final model upload, the train time for B=128 @ 1k steps was 34mins
 # The GPU utilization could be better with bigger batches but this is the ball park range.
@@ -117,11 +126,23 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             lr_scheduler= LRSchedulerChainConfig(
                 stages=[
                     LRSchedulerStageConfig(
-                        type="cosine",
+                        type="linear",
+                        start_factor=0,
+                        end_factor=1,
+                        steps=WARMUP_STEPS,
+                    ),
+                    LRSchedulerStageConfig(
+                        type="linear",
+                        start_factor=1,
+                        end_factor=1,
+                        steps=STABLE_STEPS,
+                    ),
+                    LRSchedulerStageConfig(
+                        type="linear",
                         start_factor=1,
                         end_factor=LR_END_FACTOR,
-                        steps=None, # this should automatically apply this for the entire run
-                    )
+                        steps=COOLDOWN_STEPS,
+                    ),
                 ]
             ),
             effective_batch_size=EFFECTIVE_BATCH_SZ,
