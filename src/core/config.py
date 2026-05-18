@@ -39,7 +39,7 @@ class RunConfig:
       aggregate metrics (helps avoid compile warmup skew).
     - `seed`: global RNG seed.
     - `hf_repo_id`: HuggingFace Hub repo to upload the final model to after training
-      (e.g. ``"Pythonista7/gpt2-124m-fineweb-baseline"``). ``None`` disables upload.
+      (e.g. ``"Ashwin7/gpt2-124m-fineweb-baseline"``). ``None`` disables upload.
     - `hf_private`: create the HF repo as private (default public).
     """
     project_name: str

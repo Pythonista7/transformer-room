@@ -93,7 +93,7 @@ PHASE_1_STAGE_1_BAELINE_CONFIG = ExperimentConfig(
             use_torch_compile=True,
             activation_memory_budget=TORCH_COMPILE_MEM_BUDGET,
             compile_warmup_steps=3,
-            hf_repo_id="Pythonista7/gpt2-124m-fineweb-baseline",
+            hf_repo_id="Ashwin7/gpt2-124m-fineweb-baseline",
         ),
         dataset=HFTextDatasetConfig(
             dataset_name=DATASET_NAME,

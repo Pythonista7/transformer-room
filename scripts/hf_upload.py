@@ -6,7 +6,7 @@ Uploads: model.safetensors, config.json, tokenizer/, README.md (model card).
 Usage:
     python scripts/hf_upload.py \\
         --artifact-dir artifacts/models/<run_name> \\
-        --repo-id Pythonista7/gpt2-124m-fineweb-baseline \\
+        --repo-id Ashwin7/gpt2-124m-fineweb-baseline \\
         [--wandb-run-id 10wy8cqi] \\
         [--wandb-2b5-run-id <full-run-id>] \\
         [--token $HF_TOKEN] \\
@@ -420,7 +420,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--repo-id", required=True,
-        help="HF Hub repo id, e.g. Pythonista7/gpt2-124m-fineweb-baseline",
+        help="HF Hub repo id, e.g. Ashwin7/gpt2-124m-fineweb-baseline",
     )
     p.add_argument("--wandb-run-id", default=None, help="W&B run ID for primary/smoke run")
     p.add_argument("--wandb-2b5-run-id", default=None, help="W&B run ID for the 2.5B full run")
